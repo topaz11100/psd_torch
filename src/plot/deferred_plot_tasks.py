@@ -7,8 +7,8 @@ import numpy as np
 import torch
 from tqdm.auto import tqdm
 
-from src.common.plotting import flush_plot_tasks, save_bar_plot, save_hist_bar, save_line_plot
-from src.common.psd_artifacts import save_psd_bundle
+from src.plot.plotting import flush_plot_tasks, save_bar_plot, save_hist_bar, save_line_plot
+from src.signal.psd_artifacts import save_psd_bundle
 
 
 # Keep deferred plot payloads in process-local CPU memory during training so

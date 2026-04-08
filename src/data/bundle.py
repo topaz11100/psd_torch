@@ -41,7 +41,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from .fft_analysis import rfft_log_mag, bin_spectrum
+from src.signal.fft_analysis import rfft_log_mag, bin_spectrum
 
 
 # ----------------------------------------------------------------------------

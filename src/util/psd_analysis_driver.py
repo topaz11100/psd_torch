@@ -12,8 +12,8 @@ import torch
 import torch.nn as nn
 from tqdm.auto import tqdm
 
-from src.common.datasets import build_dataset_bundle, get_shd_loaders, normalize_dataset_name
-from src.common.psd_artifacts import (
+from src.data import build_dataset_bundle, get_shd_loaders, normalize_dataset_name
+from src.signal.psd_artifacts import (
     FeedForwardSNNWithReadout,
     build_common_classifier,
     combined_exact_psd_payload_from_maps_torch,
@@ -23,10 +23,10 @@ from src.common.psd_artifacts import (
     maybe_active_mask,
     save_psd_bundle,
 )
-from src.common.psd_training import configure_structure_schedule, evaluate_model, train_one_epoch
-from src.common.model_registry import get_model_spec, resolve_model_name, spike_driving_membrane_key
-from src.common.optim import build_adamw
-from src.common.plotting import (
+from src.model.psd_training import configure_structure_schedule, evaluate_model, train_one_epoch
+from src.model.model_registry import get_model_spec, resolve_model_name, spike_driving_membrane_key
+from src.model.optim import build_adamw
+from src.plot.plotting import (
     configure_plot_writer,
     flush_plot_tasks,
     plot_writer_metadata,
@@ -36,7 +36,7 @@ from src.common.plotting import (
     save_line_plot,
     shutdown_plot_worker,
 )
-from src.common.deferred_plot_tasks import (
+from src.plot.deferred_plot_tasks import (
     deferred_plot_metadata,
     render_deferred_plot_tasks,
     save_deferred_bar_plot,
@@ -44,8 +44,8 @@ from src.common.deferred_plot_tasks import (
     save_deferred_line_plot,
     save_deferred_psd_bundle,
 )
-from src.common.probe_selection import flatten_scope_indices, probe_scope_signature, probe_union_indices, select_fixed_probe_scopes
-from src.common.psd_model_variants import (
+from src.stat.probe_selection import flatten_scope_indices, probe_scope_signature, probe_union_indices, select_fixed_probe_scopes
+from src.model.psd_model_variants import (
     default_band_neuron_ends,
     groups_from_cli,
     infer_num_groups_from_band_neuron_ends,
@@ -54,17 +54,17 @@ from src.common.psd_model_variants import (
     validate_rf_clip_edges,
     validate_tear,
 )
-from src.common.psd_utils import (
+from src.signal.psd_utils import (
     effective_psd_window,
     normalize_userbin_edges,
     temporal_band_ranges_from_edges,
     userbin_centers,
 )
-from src.common.readout import normalize_readout_mode
-from src.common.snn_builder import SNNConfig
-from src.common.surrogate import SpikeFn
-from src.common.first_spike_loss import FirstSpikeLoss
-from src.common.utils import get_backend_flags, get_device, now_timestamp_seoul, require_absolute_path, save_json, save_text, set_seed
+from src.readout.readout import normalize_readout_mode
+from src.model.snn_builder import SNNConfig
+from src.neurons.surrogate import SpikeFn
+from src.model.first_spike_loss import FirstSpikeLoss
+from src.util.utils import get_backend_flags, get_device, now_timestamp_seoul, require_absolute_path, save_json, save_text, set_seed
 from src.neurons.LIF_neuron import LIFDenseLayer
 from src.neurons.RF_neuron import RFDenseLayer
 
