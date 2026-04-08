@@ -157,6 +157,14 @@ class SNNClassifier(nn.Module):
 
 
 def build_layer(model_name: str, input_dim: int, output_dim: int, cfg: SNNConfig) -> nn.Module:
+    """Build one dense SNN layer from a normalized model token.
+
+    Beginner note:
+    - 논문 + Origin 코드가 있는 모델(dh-snn, tc-lif, ts-lif, d-rf)은
+      `src/neurons/*_neuron.py`의 thin wrapper를 통해 저자 코드를 그대로
+      재사용한다.
+    - proposed 모델(my_*)만 프로젝트 정의식을 사용한다.
+    """
     name = builder_name_from_any(model_name)
     spike_fn = SpikeFn(name=cfg.spike_surrogate, lens=0.5, gamma=0.5)
 

@@ -7,13 +7,15 @@ import torch.nn as nn
 
 from src.neurons.surrogate import SpikeFn
 from src.neurons._origin_imports import load_dh_spike_dense
+from src.neurons.sequence_adapter import normalize_record_keys, rollout_sequence
 
 
 class DHSNNDenseLayer(nn.Module):
     """DH-SNN dense layer backed by the released author implementation.
 
     The wrapped dynamics come from:
-      Origin/Temporal dendritic heterogeneity.../SHD/SNN_layers/spike_dense.py
+      - Paper: Temporal dendritic heterogeneity incorporated with spiking neural networks for learning multi-timescale dynamics
+      - Code: Origin/Temporal dendritic heterogeneity.../SHD/SNN_layers/spike_dense.py
 
     This wrapper only adds the project-facing layer API:
       - ``forward_sequence`` returning ``(B, T, N)``
@@ -181,31 +183,12 @@ class DHSNNDenseLayer(nn.Module):
         bsz, steps, _ = x_seq.shape
         self.reset_state(int(bsz), x_seq.device, x_seq.dtype)
 
-        if record is False:
-            record_keys = None
-        elif record is True:
-            record_keys = ("dendrite_input", "dendrite_state", "soma_input", "soma_state", "output")
-        else:
-            record_keys = tuple(record)
-
-        if record_keys is None:
-            out_list = []
-            for t in range(int(steps)):
-                out_list.append(self.forward_step(x_seq[:, t], record=False))
-            return torch.stack(out_list, dim=1)
-
-        out_list = []
-        rec_lists: Dict[str, list[torch.Tensor]] = {k: [] for k in record_keys}
-        for t in range(int(steps)):
-            y, sig = self.forward_step(x_seq[:, t], record=True)
-            out_list.append(y)
-            for k in record_keys:
-                if k not in sig:
-                    raise KeyError(f"Unknown record key: {k!r}")
-                rec_lists[k].append(sig[k])
-        out_seq = torch.stack(out_list, dim=1)
-        rec = {k: torch.stack(v, dim=1) for k, v in rec_lists.items()}
-        return out_seq, rec
+        _ = steps  # kept for readability: sequence length is consumed in rollout helper.
+        record_keys = normalize_record_keys(
+            record,
+            ("dendrite_input", "dendrite_state", "soma_input", "soma_state", "output"),
+        )
+        return rollout_sequence(x_seq, step_fn=self.forward_step, record_keys=record_keys)
 
     def get_timing_params(self) -> Dict[str, torch.Tensor]:
         return {
