@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.common.surrogate import SpikeFn
+from src.neurons.surrogate import SpikeFn
 
 
 _RF_INIT_TRIM_EPS = 1.0e-4

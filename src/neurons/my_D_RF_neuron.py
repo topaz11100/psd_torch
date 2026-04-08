@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.common.surrogate import SpikeFn
+from src.neurons.surrogate import SpikeFn
 
 
 def _soft_branch_mask_from_s(s: torch.Tensor, branch: int) -> tuple[torch.Tensor, torch.Tensor]:
