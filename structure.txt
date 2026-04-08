@@ -1,39 +1,18 @@
 /
---bash/                (launcher 및 CLI template)
+--bash/                (launcher 및 CLI template, 읽기 전용)
 --Origin/              (저자 제공 코드, 읽기 전용)
---paper/
+--paper/               (논문 및 서류, 읽기 전용)
   |
-  --proposed/          (공식 명세 및 프로젝트 문서)
---results/             (실험 결과 저장 예시 경로)
+  --proposed/          (공식 명세 및 프로젝트 문서, 읽기 전용)
 --src/                 (실험 코드)
   |
-  --common/            (공통 학습/PSD/데이터셋 유틸)
-  --data/              (데이터셋별 얇은 진입점/호환 wrapper)
-  --neurons/           (뉴런 구현 파일)
-  --readout/           (readout 계층 namespace)
-  --model/             (모델 계층 namespace)
-  --signal/            (signal 계층 namespace)
-  --stat/              (통계 계층 namespace)
-  --plot/              (plot 계층 namespace)
-  --util/              (유틸 계층 namespace)
-  --dataset_psd.py     (dataset_psd 편의 엔트리)
-  --psd_analysis.py    (psd_analysis 편의 엔트리)
-  --dataset_psd/       (dataset_psd 실험 엔트리)
-  |  |
-  |  --run.py
-  |  --SHD/
-  |     |
-  |     --data.py
-  |     --model.py
-  |     --run.py
-  |     --util.py
-  |
-  --psd_analysis/      (psd_analysis 실험 엔트리)
-     |
-     --run.py
-     --SHD/
-        |
-        --data.py
-        --model.py
-        --run.py
-        --util.py
+  --data/              (데이터셋별 전처리 기능 파일들)
+  --neurons/           (뉴런 구현 파일들)
+  --readout/           (readout 구현 파일들)
+  --model/             (모델 생성 구현 파일들)
+  --signal/            (psd, 스펙트로그램 등 신호관련 구현 파일들)
+  --stat/              (통계 기능 구현 파일들)
+  --plot/              (plot생성, 저장 구현 파일들)
+  --util/              (기타 파일들(가능하면 최소화))
+  --dataset_psd.py     (dataset_psd 메인함수)
+  --psd_analysis.py    (psd_analysis 메인함수)
