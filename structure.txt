@@ -16,3 +16,5 @@
   --util/              (기타 파일들(가능하면 최소화))
   --dataset_psd.py     (dataset_psd 메인함수)
   --psd_analysis.py    (psd_analysis 메인함수)
+
+src/ 의 모든 폴더는 단일폴더로 폴더안의 폴더는 존재하지 않는다
