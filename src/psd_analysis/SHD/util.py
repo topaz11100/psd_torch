@@ -1,0 +1,56 @@
+from __future__ import annotations
+
+from typing import Any
+
+from src.common.psd_analysis_driver import run_psd_analysis_shd
+
+
+def run_from_config(cfg: Any) -> str:
+    return run_psd_analysis_shd(
+        model=cfg.model,
+        out_root=cfg.out_root,
+        data_root=cfg.data_root,
+        hidden=cfg.hidden,
+        epochs=int(cfg.epochs),
+        soft_mask_epochs=cfg.soft_mask_epochs,
+        stabilize_epochs=int(cfg.stabilize_epochs),
+        ste_epochs=int(cfg.ste_epochs),
+        batch_size=int(cfg.batch_size),
+        lr=float(cfg.lr),
+        weight_decay=float(cfg.weight_decay),
+        weight_decay_dend_soma=cfg.weight_decay_dend_soma,
+        seed=int(cfg.seed),
+        S_min=float(cfg.S_min),
+        S_max=float(cfg.S_max),
+        th_len=int(cfg.th_len),
+        v_th=float(cfg.v_th),
+        v_pre=float(cfg.v_pre),
+        T_event=int(cfg.T_event),
+        num_workers=int(cfg.num_workers),
+        download=bool(cfg.download),
+        shd_max_time=float(cfg.shd_max_time),
+        shd_binning=str(cfg.shd_binning),
+        shd_unit_indexing=str(cfg.shd_unit_indexing),
+        shd_channel_flip=bool(cfg.shd_channel_flip),
+        shd_align_to_first_event=bool(cfg.shd_align_to_first_event),
+        shd_use_event_counts=bool(cfg.shd_use_event_counts),
+        lambda_ortho=float(cfg.lambda_ortho),
+        lambda_s=float(cfg.lambda_s),
+        same_label_n_per_label=int(cfg.same_label_n_per_label),
+        balanced_global_n_per_label=int(cfg.balanced_global_n_per_label),
+        probe_plot=bool(cfg.probe_plot),
+        plot_epochs=cfg.plot_epochs,
+        psd_window=int(cfg.psd_window),
+        psd_overlap=int(cfg.psd_overlap),
+        window_fn=str(cfg.window_fn),
+        userbin_edges=cfg.userbin_edges,
+        rf_reset_mode=str(cfg.rf_reset_mode),
+        w_clip_edges=cfg.w_clip_edges,
+        alpha_clip_edges=cfg.alpha_clip_edges,
+        band_neuron_ends=cfg.band_neuron_ends,
+        tear=int(cfg.tear),
+        readout_mode=str(cfg.readout_mode),
+        exp_name=cfg.exp_name,
+        timestamp=cfg.timestamp,
+        device=str(cfg.device),
+    )

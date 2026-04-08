@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.readout.readout import earliest_spike_exact_logits
+from src.common.readout import earliest_spike_exact_logits
 
 
 @dataclass
