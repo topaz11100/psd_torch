@@ -6,14 +6,14 @@ from typing import Optional, Sequence
 import torch
 import torch.nn as nn
 
-from src.common.model_registry import builder_name_from_any
-from src.common.readout import (
+from src.model.model_registry import builder_name_from_any
+from src.readout.readout import (
     TTFS_MEMBRANE_TIEBREAK_SCALE,
     TTFS_RATE_TIEBREAK_SCALE,
     apply_readout,
     normalize_readout_mode,
 )
-from src.common.surrogate import SpikeFn
+from src.neurons.surrogate import SpikeFn
 
 
 @dataclass
@@ -140,7 +140,7 @@ class SNNClassifier(nn.Module):
         return logits, hidden_recs, out_rec
 
     def regularization_loss(self, lambda_ortho: float = 0.0, lambda_s: float = 0.0) -> torch.Tensor:
-        from src.common.model_utils import s_complexity_mean
+        from src.model.model_utils import s_complexity_mean
 
         loss = None
         for layer in list(self.hidden_layers) + [self.output_layer]:
