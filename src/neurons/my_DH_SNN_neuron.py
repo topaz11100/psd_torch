@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.common.surrogate import SpikeFn
+from src.neurons.surrogate import SpikeFn
 
 
 def _ema_orthogonality_loss(alpha: torch.Tensor) -> torch.Tensor:

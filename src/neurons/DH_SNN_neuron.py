@@ -5,7 +5,7 @@ from typing import Dict, Optional, Sequence
 import torch
 import torch.nn as nn
 
-from src.common.surrogate import SpikeFn
+from src.neurons.surrogate import SpikeFn
 from src.neurons._origin_imports import load_dh_spike_dense
 
 
