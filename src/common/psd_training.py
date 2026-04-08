@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from src.model.model_utils import harden_variable_branches_, set_ste_mode_
+from src.common.model_utils import harden_variable_branches_, set_ste_mode_
 
 
 def _criterion_uses_output_record(criterion: nn.Module) -> bool:

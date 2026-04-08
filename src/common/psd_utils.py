@@ -5,7 +5,7 @@ from typing import Optional, Sequence, Tuple
 import numpy as np
 import torch
 
-from src.signal.fft_analysis import band_edges_to_bin_ranges, bin_spectrum
+from src.common.fft_analysis import band_edges_to_bin_ranges, bin_spectrum
 
 
 _DEFAULT_USERBIN_EDGES: Tuple[float, ...] = (0.0, 0.1, 0.2, 0.3, 0.4, 0.5)

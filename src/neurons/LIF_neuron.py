@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.neurons.surrogate import SpikeFn
+from src.common.surrogate import SpikeFn
 
 
 _LIF_INIT_TRIM_EPS = 1.0e-4

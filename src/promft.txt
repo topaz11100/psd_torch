@@ -1,0 +1,44 @@
+실험별 엔트리 포인트는 보통 /src/(실험이름)/(데이터셋이름) 아래의 data.py, model.py, run.py, util.py 조합으로 둘 수 있다.
+다만 공통 로직은 src/common/ 에 모아 재사용할 수 있으며, 이것은 허용한다.
+즉 실험 디렉토리는 얇은 설정 계층이고, 실제 구현은 공통 모듈로 분리될 수 있다.
+
+실험은 CPU 경로를 주 대상으로 고려하지 않는다. 기본 대상은 CUDA 이며, 사용할 GPU 번호는 CLI 인수로 선택 가능해야 한다.
+CUDA 전용 경로에서 비효율이 크지 않도록 구현한다.
+
+문서 명세와 코드가 충돌하면 관련 문서를 함께 갱신해 일관성을 유지한다.
+Origin/ 아래 저자 제공 코드는 읽기 전용이다. paper/ 와 Origin/ 이 함께 있는 기존 뉴런 구현은 상위 실험 명세가 별도 공식 이산화를 강제하지 않는 한 저자 제공 코드를 거의 그대로 감싼 wrapper 형태를 우선한다.
+특히 PSD 관련 실험은 `paper/proposed/psd_analysis.md`, `paper/proposed/psd_analysis_implement.md`, `paper/proposed/dataset_psd.md`, `paper/proposed/filter_analysis.md` 의 현재 명세를 만족해야 한다.
+
+`src/psd_analysis/run.py` 는 `--dataset` 단일 인수와 `--model`, `--readout_mode` 다중 인수를 받아 같은 dataset 안에서 model × readout 조합을 직렬 실행해야 한다. 공식 dataset 이름은 `s-mnist`, `dvsgesture`, `shd`, `deap`, `forda` 이고, 모델은 기존 LIF / RF PSD variant 외에 `tc`, `ts`, `dh`, `d_rf`, `my_*` 도 지원해야 한다. fixed-branch dendritic 모델은 `dh_snn_2`, `d_rf_4` 식 suffix 를 허용하고, `my_*` 는 `S_min`, `S_max` 로 branch range 를 정한다.
+
+readout mode 로 `earliest_spike` 를 제공할 때에는 output neuron 뒤 learned NN head 를 두지 말고, output layer 의 spike / membrane record 를 저장한 뒤 released First-spike 계열 timing loss 를 공식 supervised path 로 사용한다. 분류 예측은 encoded first-spike time 기반으로 계산하며, train/test accuracy 와 probe-set accuracy 도 같은 prediction 규칙을 써야 한다.
+
+readout score 의미는 아래처럼 고정한다.
+
+- `final_membrane` 는 softmax 를 미리 적용하지 않고 마지막 membrane 값을 raw pre-softmax class score 로 쓴다. 이 mode 에서만 output layer 의 spike emission 과 spike-triggered reset path 를 끈다.
+- `max_rate` 는 output spike sequence 의 평균 firing-rate 를 raw class score 로 쓴다.
+- 공식 CLI mode 이름은 `final_membrane`, `earliest_spike`, `max_rate` 셋만 유지한다.
+
+PSD 저장 규칙은 아래와 같이 고정한다.
+
+- waveform 은 raw / centered 둘 다 저장하는 full-length exact simple periodogram
+- periodogram heatmap 은 raw / centered 둘 다 저장하는 exact periodogram userbin 집계
+- mean spectrogram 은 raw / centered 둘 다 저장하는 exact sliding simple periodogram
+- spectrogram heatmap 은 raw / centered 둘 다 저장하는 exact spectrogram userbin 집계의 frame-major heatmap
+- exact periodogram / exact spectrogram 공식 경로에는 taper window 를 적용하지 않는다.
+- `window_fn` 은 legacy compatibility 인수로만 남길 수 있으며, 공식 exact 경로에서는 무시한다.
+- 모든 주파수축 단위는 Nyquist 상한이 0.5 인 cycles/sample 이다.
+
+`psd_analysis` 는 위 8개 선형 PNG 와 대응 dB 8개 PNG, `summary.json` 을 probe-set reference 및 epoch 분석 bundle 에 저장한다. `dataset_psd` 는 선택한 benchmark dataset 의 train / test split 각각에 대해 같은 선형 8개 PNG, 대응 dB 8개 PNG, `summary.json` 을 저장한다. 공식 canonical dataset 이름은 `s-mnist`, `dvsgesture`, `shd`, `deap`, `forda` 다.
+
+`psd_analysis` 는 추가로 선택된 epoch root 의 `probe_set_accuracy.txt`, `attenuation_stats/`, `all_layers_summary.csv`, hidden layer incoming-weight `w_plot.png`, 그리고 grouped(`clip`, `structure`, `clip_structure`) hidden-layer block PSD bundle / hidden-layer block weight plot 을 저장한다. run root 에는 `train_test_accuracy.csv` / 그 CSV 기반 accuracy plot 을 두고, `training_complete_stats/attenuation_stats/` 아래 bar plot / `summary_stats.csv` 와 `training_complete_stats/all_layers_summary.csv` 로 최종 snapshot 을 별도 유지한다.
+
+hidden/output signal PSD epoch bundle 저장 epoch 는 기본적으로 전체 epoch 이며, `--plot_epoch`(alias `--plot_epochs`) 가 주어지면 지정한 epoch 에서만 epoch 디렉터리와 signal PSD bundle 최종 PNG + `summary.json` + `probe_set_accuracy.txt` + epoch attenuation 통계 + hidden weight visualization 을 저장한다. 다만 학습 중에는 PNG 를 직접 그리지 않고 plot 생성용 numeric payload 를 process-local CPU 메모리에만 적재하며, 학습 완료 후 tqdm 로그와 함께 일괄 렌더링하고 성공한 payload 는 즉시 메모리에서 제거한다. grouped(`clip`, `structure`, `clip_structure`) 시나리오에서는 같은 selected epoch root 아래 hidden-layer block PSD bundle 과 hidden-layer block weight plot 도 함께 저장한다. 학습 완료 시 `training_complete_stats/` 아래의 최종 accuracy plot, 최종 probe-set accuracy, 최종 attenuation 통계는 이 선택과 독립이다.
+
+`epochs = 0` 이면 학습 및 epoch 분석은 수행하지 않는다. 입력 probe reference 영구 저장은 `dataset_psd` 의 `--probe_plot` 이 담당하고, `psd_analysis` 는 deterministic probe batch 에 대한 내부 reference payload 만 사용한다.
+
+`psd_analysis` 는 선택된 epoch hidden / output bundle 과 probe input reference 의 같은 family mean plot 사이 derivative semi-metric 을 추적해야 한다. 대상은 mean plot 8개뿐이며 `element_*` heatmap 은 제외한다. output layer 도 반드시 포함하고, finite difference 는 unit-step 기준으로 계산한다. 결과는 `training_complete_stats/derivative_semi_metric/` 아래 저장한다.
+
+vanilla RF 는 exact ZOH 만 지원하며, RF clip 입력은 Nyquist 가 0.5 인 normalized frequency(cycles/sample) 단위를 사용하고 저장 통계는 `rho` 와 `f_cyc_per_sample` 로 남긴다. LIF / RF 동역학 학습 파라미터 초기화는 fan-based Kaiming/Xavier 가 아니라 유효 물리 파라미터 구간에서의 bounded uniform 초기화를 사용해야 한다. free LIF alpha 는 열린구간 `(0, 1)` 에서, free RF resonance frequency 는 `(0, 0.5)` 에서, free RF damping magnitude 는 기본 bounded range 에서 시작한다. clip model 은 같은 bounded-uniform 규칙을 유지하되 `--alpha_clip_edges`, `--w_clip_edges` 로 지정한 각 neuron clip 구간으로 support 를 좁혀 적용한다. 현재 RF clip CLI 는 frequency 만 제한하므로 RF damping magnitude 는 free bounded-uniform 초기화를 유지한다. probe set selection 은 split 이름 + seed 로 label별 canonical order 를 먼저 고정하고, `same_label` / `balanced_global` 의 requested probe-sample counts 는 그 canonical order 에서 prefix 길이만 정해야 하며, input probe reference 저장은 `--probe_plot` 로만 켜고 끈다. `--probe_plot 0` 이어도 고정 probe index 는 config 에 저장해야 한다.
+
+freq_ 실험 잔재는 남기지 않는다. 공통 뉴런 구현과 PSD 관련 실험 코드만 유지한다.

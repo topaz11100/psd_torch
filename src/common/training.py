@@ -94,7 +94,7 @@ def train_classifier(
     criterion: Optional[nn.Module] = None,
 ) -> Dict[str, Any]:
     model.to(device)
-    from src.model.optim import build_adamw
+    from src.common.optim import build_adamw
 
     optimizer, _ = build_adamw(
         model,
@@ -119,7 +119,7 @@ def train_classifier(
     pbar = tqdm(range(1, total_e + 1), desc='epoch', total=int(total_e), leave=True)
     for epoch in pbar:
         if int(stb_e) > 0 and int(epoch) == int(soft_e) + 1:
-            from src.model.model_utils import harden_variable_branches_
+            from src.common.model_utils import harden_variable_branches_
 
             harden_variable_branches_(model)
         model.train()

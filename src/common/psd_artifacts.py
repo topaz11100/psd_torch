@@ -8,15 +8,15 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from src.plot.plotting import save_heatmap_plot, save_line_plot, save_multiline_series_plot
-from src.signal.psd_utils import (
+from src.common.plotting import save_heatmap_plot, save_line_plot, save_multiline_series_plot
+from src.common.psd_utils import (
     periodogram_psd_torch,
     spectrogram_exact_torch,
     spectrogram_frame_centers,
     userbin_from_psd_torch,
 )
-from src.model.snn_builder import SNNConfig, SNNClassifier, build_snn_classifier
-from src.util.utils import save_json
+from src.common.snn_builder import SNNConfig, SNNClassifier, build_snn_classifier
+from src.common.utils import save_json
 
 
 FeedForwardSNNWithReadout = SNNClassifier
