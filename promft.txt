@@ -1,0 +1,46 @@
+structure.txt 는 프로젝트 폴더 구조 텍스트이다.
+paper/ 는 논문과 제안 구조 설명 문서를 담는다.
+Origin/ 은 paper/ 의 논문 저자 제공 코드이므로 읽기 전용 구현 근거로만 사용한다. Origin/ 아래 원본 파일은 수정하지 않고, 대응 뉴런 구현은 상위 실험 명세가 별도 공식 이산화를 강제하지 않는 한 저자 제공 코드를 거의 그대로 감싼 thin wrapper 방식으로 유지한다.
+
+프로젝트의 실제 구현 규칙은 모든 경로의 promft.txt 와 현재 유지 중인 명세 문서가 함께 결정한다.
+특히 PSD 관련 구현은 아래 문서를 기준으로 맞춘다.
+
+- paper/proposed/psd_analysis.md
+- paper/proposed/psd_analysis_implement.md
+- paper/proposed/psd_userbin_async_plot.md
+- paper/proposed/dataset_psd.md
+- paper/proposed/filter_analysis.md
+- paper/proposed/readout.md
+
+src/ 이하 코드는 위 문서들과 모순되지 않도록 유지한다.
+
+핵심 저장 규칙은 아래와 같다.
+
+- psd_analysis 는 probe-set reference / epoch bundle 마다 raw / centered dual PSD 산출물을 저장한다. 아래 8개 선형 PNG 에 대응하는 `_db.png` 8개를 함께 저장한다.
+  1) `mean_psd_waveform_exact_raw.png`
+  2) `mean_psd_waveform_exact_centered.png`
+  3) `element_psd_heatmap_userbin_raw.png`
+  4) `element_psd_heatmap_userbin_centered.png`
+  5) `mean_spectrogram_exact_raw.png`
+  6) `mean_spectrogram_exact_centered.png`
+  7) `element_spectrogram_heatmap_userbin_raw.png`
+  8) `element_spectrogram_heatmap_userbin_centered.png`
+  9) `summary.json`
+- psd_analysis 는 위 bundle 외에 선택된 epoch root 의 `probe_set_accuracy.txt`, `attenuation_stats/`, `all_layers_summary.csv`, hidden layer incoming-weight `w_plot.png`, 그리고 `clip` / `structure` / `clip_structure` 시나리오의 hidden-layer block PSD bundle 및 hidden-layer block weight plot 을 저장한다. 단 학습 중에는 PNG 를 직접 그리지 않고 plot 생성에 필요한 수치 payload 를 process-local CPU 메모리에만 홀드한 뒤, 학습 완료 후 tqdm 진행 로그와 함께 렌더링하며 성공한 payload 는 즉시 메모리에서 제거한다. run root 에는 `train_test_accuracy.csv` 와 그 CSV 기반 단일 accuracy plot 을 두고, `training_complete_stats/` 아래에는 최종 filter 통계와 최종 probe-set accuracy 를 별도로 유지한다.
+- dataset_psd 는 선택한 benchmark dataset 의 train / test split 각각에 대해 같은 선형 8개 PNG, 대응 dB 8개 PNG, `summary.json` 을 저장한다. 공식 canonical dataset 이름은 `s-mnist`, `dvsgesture`, `shd`, `deap`, `forda` 다.
+- waveform 은 full-length exact simple periodogram 이고 mean spectrogram 은 exact sliding simple periodogram 이다.
+- periodogram heatmap 과 spectrogram heatmap 은 exact 결과에 userbin 을 적용한 표현 계층이다.
+- PSD heatmap 은 모든 칸 annotation 을 넣고, spectrogram heatmap 은 annotation 을 넣지 않는다.
+- spectrogram heatmap 은 `(rows, bands, frames)` 를 frame-major 2차원 heatmap 으로 펼친다.
+- 모든 PSD / spectrogram / RF clip / RF 통계 주파수 단위는 Nyquist 상한이 0.5 인 cycles/sample 이다.
+- exact periodogram / exact spectrogram 공식 경로에는 taper window 를 적용하지 않는다. `window_fn` 은 legacy compatibility 의미만 가진다.
+- output neuron 뒤에 learned NN head 를 두지 않는다.
+- readout mode 는 `final_membrane`, `earliest_spike`, `max_rate` 셋만 공식 지원한다. 여기서 `final_membrane` 은 마지막 membrane 값을 raw pre-softmax score 로 쓰며, 이 mode 에서만 output layer 의 spike emission 과 spike-triggered reset path 를 비활성화한다. `earliest_spike`, `max_rate` 는 일반 spiking output layer 를 유지하고, `max_rate` 는 평균 firing-rate 를 raw score 로 쓴다.
+- `earliest_spike` 의 공식 supervised path 는 output layer spike / membrane record 를 저장한 뒤 released First-spike 계열 timing loss 를 적용하는 것이다. train/test accuracy 와 probe-set accuracy 도 같은 first-time prediction 규칙을 사용한다.
+- probe set index 는 split 이름 + seed 로 정해지는 label별 canonical order 의 prefix 로 결정되며, scope 별 requested probe-sample counts 는 prefix 길이만 제어한다. `psd_analysis` model 시나리오는 선택 자체를 바꾸지 않고, 입력 reference 영구 저장 on/off 는 `dataset_psd` 의 `--probe_plot` 만 제어한다.
+- `epochs = 0` 이면 학습 및 epoch 분석은 수행하지 않는다. input probe reference 영구 저장은 `dataset_psd` 의 `--probe_plot` 이 담당하고, `psd_analysis` 는 deterministic probe batch 에 대한 내부 reference payload 만 사용한다.
+- psd_analysis 는 선택된 epoch hidden / output bundle 과 probe input reference 의 같은 family mean plot 사이 derivative semi-metric 을 추적한다. 대상은 mean plot 8개뿐이며 `element_*` heatmap 은 제외한다. output layer 도 반드시 포함하고, finite difference 는 unit-step 기준으로 계산한다. 결과는 `training_complete_stats/derivative_semi_metric/` 아래 저장한다.
+- RF / LIF 필터 통계는 선택된 epoch root 의 `attenuation_stats/` 와 `all_layers_summary.csv` 에도 저장하고, 학습 완료 시점 최종 snapshot 을 `training_complete_stats/attenuation_stats/` 와 `training_complete_stats/all_layers_summary.csv` 로 별도 유지한다.
+- free / clip LIF/RF 동역학 학습 파라미터는 fan-based Kaiming/Xavier 가 아니라 유효 물리 파라미터 구간에서의 bounded uniform 초기화를 사용한다. clip model 은 같은 규칙을 유지하되 public CLI clip 구간으로 support 를 좁힌다. 현재 RF clip CLI 는 frequency 만 제한하므로 RF damping magnitude 는 free bounded-uniform 초기화를 유지한다.
+- vanilla RF 는 exact ZOH 만으로 구현하며, RF 관련 기록 단위는 `rho` 와 normalized frequency(cycles/sample) 로 통일한다.
+- freq_ 실험 잔재는 남기지 않는다. 뉴런 구현과 PSD 관련 실험 코드만 유지한다.
