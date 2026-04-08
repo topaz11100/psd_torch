@@ -7,13 +7,17 @@ import torch.nn as nn
 
 from src.neurons.surrogate import SpikeFn
 from src.neurons._origin_imports import OriginSurrogateAdapter, load_tslif_module
+from src.neurons.sequence_adapter import normalize_record_keys, rollout_sequence
 
 
 class TSLIFDenseLayer(nn.Module):
     """TS-LIF dense layer backed by the released author ``TSLIFNode``.
 
-    The original repository couples ``TSLIFNode`` to a larger forecasting stack,
-    so this wrapper only adds the feed-forward projection, optional project
+    Source provenance:
+    - Paper: TS-LIF A TEMPORAL SEGMENT SPIKING NEURON NETWORK FOR TIME SERIES FORECASTING
+    - Code: Origin/TS-LIF .../SeqSNN/network/snn/TSLIF.py
+
+    The wrapper only adds the feed-forward projection, optional project
     recurrent adapter, sequence API, recording hooks, and the project's
     ``spiking_enabled`` switch for ``final_membrane`` output readout.
 
@@ -153,31 +157,12 @@ class TSLIFDenseLayer(nn.Module):
         bsz, steps, _ = x_seq.shape
         self.reset_state(int(bsz), x_seq.device, x_seq.dtype)
 
-        if record is False:
-            record_keys = None
-        elif record is True:
-            record_keys = ('dendrite_input', 'dendrite_state', 'soma_input', 'soma_state', 'output')
-        else:
-            record_keys = tuple(record)
-
-        if record_keys is None:
-            out_list = []
-            for t in range(int(steps)):
-                out_list.append(self.forward_step(x_seq[:, t], record=False))
-            return torch.stack(out_list, dim=1)
-
-        out_list = []
-        rec_lists: Dict[str, list[torch.Tensor]] = {k: [] for k in record_keys}
-        for t in range(int(steps)):
-            y, sig = self.forward_step(x_seq[:, t], record=True)
-            out_list.append(y)
-            for k in record_keys:
-                if k not in sig:
-                    raise KeyError(f'Unknown record key: {k!r}')
-                rec_lists[k].append(sig[k])
-        out_seq = torch.stack(out_list, dim=1)
-        rec = {k: torch.stack(v, dim=1) for k, v in rec_lists.items()}
-        return out_seq, rec
+        _ = steps
+        record_keys = normalize_record_keys(
+            record,
+            ('dendrite_input', 'dendrite_state', 'soma_input', 'soma_state', 'output'),
+        )
+        return rollout_sequence(x_seq, step_fn=self.forward_step, record_keys=record_keys)
 
     def get_timing_params(self) -> Dict[str, torch.Tensor]:
         decay = self.decay_factor.detach().cpu().view(-1)

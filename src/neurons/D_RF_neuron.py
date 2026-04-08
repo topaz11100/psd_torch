@@ -12,7 +12,11 @@ from src.neurons._origin_imports import load_drf_newlayer_module
 class DRFDenseLayer(nn.Module):
     """D-RF layer backed by the released BiRF implementation.
 
-    The released D-RF repository exposes its neuron through
+    Source provenance:
+    - Paper: Dendritic Resonate-and-Fire Neuron for Effective and Efficient Long Sequence Modeling
+    - Code: Origin/Dendritic Resonate-and-Fire .../models/layers.py
+
+    The released repository exposes its neuron through
     ``Origin/.../models/layers.py`` (`BiRFKernel` / `BiRFModel`) rather than as
     a standalone dense cell. This wrapper keeps the released kernel, parameter
     initialization, and spike nonlinearity intact, and only adds the minimum

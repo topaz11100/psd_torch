@@ -4,6 +4,15 @@ from dataclasses import dataclass
 from typing import Dict, List, Mapping, Sequence, Tuple
 
 
+# Registry purpose
+# ---------------
+# 1) 사용자 입력 alias를 canonical model 이름으로 정규화한다.
+# 2) 각 모델의 signal/timing key를 한 곳에서 관리해 PSD 분석 코드가
+#    모델별 분기 없이 공통 처리하도록 돕는다.
+# 3) 논문+Origin 코드 기반 모델과 proposed 모델을 같은 인터페이스로
+#    다루기 위한 메타데이터를 제공한다.
+
+
 @dataclass(frozen=True)
 class ModelSpec:
     canonical: str
