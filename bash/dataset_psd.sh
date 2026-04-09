@@ -55,6 +55,10 @@ BALANCED_GLOBAL_N_PER_LABEL=""
 PROBE_PLOT=""
 MAX_SAMPLES=""
 
+# Append one scalar CLI option only when the value is non-empty.
+#
+# This keeps optional dataset_psd flags out of the final command when the user
+# intentionally left them blank in the wrapper configuration.
 append_scalar_if_nonempty() {
   local flag="$1"
   local value="$2"
@@ -63,6 +67,10 @@ append_scalar_if_nonempty() {
   fi
 }
 
+# Append one multi-value CLI option only when the array has elements.
+#
+# Bash arrays map directly to argparse ``nargs`` parameters, so this helper keeps
+# the command assembly readable and avoids repeated length checks.
 append_array_if_nonempty() {
   local flag="$1"
   local -n values_ref="$2"
@@ -71,6 +79,11 @@ append_array_if_nonempty() {
   fi
 }
 
+# Read only the launcher-owned CLI overrides from the user command line.
+#
+# dataset_psd.sh owns root-path settings such as ``--data_root`` and
+# ``--out_root``. Everything else is forwarded to the internal Python entry
+# unchanged.
 apply_wrapper_overrides_from_cli() {
   local -a args=("$@")
   local i=0
@@ -101,12 +114,20 @@ apply_wrapper_overrides_from_cli() {
   done
 }
 
+# Fail early when a required wrapper path is not absolute.
+#
+# The project spec requires external data and output roots to be absolute so the
+# generated nohup logs always point to unambiguous filesystem locations.
 ensure_absolute_path() {
   local path="$1"
   local name="$2"
   [[ "${path}" = /* ]] || { echo "${name} must be an absolute path" >&2; exit 1; }
 }
 
+# Start the internal execution branch with nohup and save its PID.
+#
+# The wrapper launches itself once more with an internal flag so the parent
+# process can stay small and only manage logging / bookkeeping.
 launch_background() {
   local log_path="$1"
   local pid_path="$2"
@@ -126,7 +147,7 @@ launch_background() {
 
 if [[ "${1:-}" == "${_INTERNAL_FLAG}" ]]; then
   shift
-  CMD=("${PYTHON_BIN}" -u "${ROOT_DIR}/src/dataset_psd/run.py")
+  CMD=("${PYTHON_BIN}" -u "${ROOT_DIR}/src/dataset_psd.py")
   append_scalar_if_nonempty --dataset "${DATASET}"
   append_scalar_if_nonempty --data_root "${DATA_ROOT}"
   append_scalar_if_nonempty --out_root "${OUT_ROOT}"

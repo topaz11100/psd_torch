@@ -46,7 +46,7 @@ PSD_PLOT_WRITER_START_METHOD="${PSD_PLOT_WRITER_START_METHOD:-fork}"
 # grouped model/readout 예시
 #   SCENARIO_COUNT=2
 #   SCENARIO_MODEL_GROUPS_RAW="((lif lif_R) (rf rf_R))"
-#   SCENARIO_READOUT_GROUPS_RAW="((final_membrane earliest_spike) (final_membrane))"
+#   SCENARIO_READOUT_GROUPS_RAW="((final_membrane first_spike) (final_membrane))"
 #   SCENARIO_DATASET_TOKENS=("s-mnist")
 #   SCENARIO_GPUS=(0 1)
 #   SCENARIO_HIDDENS=("60 48 36")
@@ -61,6 +61,11 @@ SCENARIO_EXTRA_ARGS=()
 SCENARIO_MODEL_GROUPS_RAW="${SCENARIO_MODEL_GROUPS_RAW:-}"
 SCENARIO_READOUT_GROUPS_RAW="${SCENARIO_READOUT_GROUPS_RAW:-}"
 
+# Parse wrapper-level CLI overrides that belong to the launcher itself.
+#
+# This function extracts only run_psd.sh ownership arguments such as data/out
+# roots and experiment name. Any remaining arguments are forwarded untouched to
+# the underlying psd.sh config script.
 apply_wrapper_overrides_from_cli() {
   local -a args=("$@")
   local i=0
@@ -101,12 +106,17 @@ apply_wrapper_overrides_from_cli() {
   done
 }
 
+# Fail early when a path-valued launcher setting is not absolute.
 ensure_absolute_path() {
   local path="$1"
   local name="$2"
   [[ "${path}" = /* ]] || { echo "${name} must be an absolute path" >&2; exit 1; }
 }
 
+# Convert one whitespace-delimited shell string into a bash array.
+#
+# Scenario overrides are stored as plain strings in environment variables, so we
+# centralize the split step here to keep later append helpers simple.
 split_words_into_array() {
   local text="$1"
   local -n out_ref="$2"
@@ -117,6 +127,7 @@ split_words_into_array() {
   fi
 }
 
+# Append a multi-value CLI flag only when its raw text is non-empty.
 append_optional_multi_value_flag() {
   local -n cmd_ref="$1"
   local flag="$2"
@@ -128,6 +139,7 @@ append_optional_multi_value_flag() {
   fi
 }
 
+# Append a scalar CLI flag only when a concrete value is present.
 append_optional_scalar_flag() {
   local -n cmd_ref="$1"
   local flag="$2"
@@ -137,6 +149,7 @@ append_optional_scalar_flag() {
   fi
 }
 
+# Broadcast one scalar value into an array of fixed scenario length.
 fill_array_with_repeated_value() {
   local -n ref="$1"
   local count="$2"
@@ -148,6 +161,10 @@ fill_array_with_repeated_value() {
   done
 }
 
+# Normalize scenario override arrays to exactly SCENARIO_COUNT entries.
+#
+# Accepted forms are: empty (optional broadcast fill), one value (broadcast to
+# all scenarios), or one value per scenario. Any other length is an error.
 normalize_scenario_array() {
   local name="$1"
   local expected="$2"
@@ -174,6 +191,9 @@ normalize_scenario_array() {
   exit 1
 }
 
+# Parse the grouped "((a b) (c d))" scenario syntax into one bash array entry
+# per group. The small Python helper keeps the parenthesis parser reliable and
+# much easier to maintain than pure bash string surgery.
 parse_grouped_token_lists() {
   local raw="$1"
   local -n out_ref="$2"
@@ -223,6 +243,7 @@ PY
   )
 }
 
+# Expand grouped model/readout syntax into ordinary per-scenario arrays.
 expand_grouped_model_readout_scenarios() {
   if [[ -z "${SCENARIO_MODEL_GROUPS_RAW}" && -z "${SCENARIO_READOUT_GROUPS_RAW}" ]]; then
     return
@@ -255,6 +276,7 @@ expand_grouped_model_readout_scenarios() {
   SCENARIO_READOUT_MODES=("${readout_groups[@]}")
 }
 
+# Launch exactly one scenario under nohup and persist its PID/log paths.
 launch_one() {
   local index="$1"
   shift

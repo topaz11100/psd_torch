@@ -1,19 +1,12 @@
+명세 우선순위 규칙: `paper/proposed/psd_analysis.md` 가 절대 기준이며, 다른 문서와 충돌하면 해당 문서를 `psd_analysis.md` 기준으로 해석/수정한다.
+
 structure.txt 는 프로젝트 폴더 구조 텍스트이다.
 paper/ 는 논문과 제안 구조 설명 문서를 담는다.
 Origin/ 은 paper/ 의 논문 저자 제공 코드이므로 읽기 전용 구현 근거로만 사용한다.
-Origin/ 아래 원본 파일은 수정하지 않고, 대응 뉴런 구현은 상위 실험 명세가 별도 공식 이산화를 강제하지 않는 한 저자 제공 코드를 거의 그대로 감싼 thin wrapper 방식으로 유지한다.
-즉 실험 재현, 정확, 공정성을 위해 paper, origin 에 원본 논문/코드가 있는 뉴런 모델은 저자제공코드를 거의 복붙하는 수준으로만 개발, 절대 자의적 개조 금지
+Origin/ 아래 원본 파일은 수정하지 않고, 대응 뉴런 구현, first_spike 리드아웃은 상위 실험 명세가 별도 변형을 강제하지 않는 한 저자 제공 코드를 거의 그대로 감싼 thin wrapper 방식으로 유지한다.
+즉 실험 재현, 정확, 공정성을 위해 paper, origin 에 원본 논문/코드가 있는 뉴런 모델, first_spike은 저자제공코드를 거의 복붙하는 수준으로만 개발, 절대 자의적 개조 금지
 
-프로젝트의 실제 구현 규칙은 모든 경로의 promft.txt 와 현재 유지 중인 명세 문서가 함께 결정한다.
-특히 PSD 관련 구현은 아래 문서를 기준으로 맞춘다.
-
-- paper/proposed/psd_analysis.md
-- paper/proposed/psd_analysis_implement.md
-- paper/proposed/psd_userbin_async_plot.md
-- paper/proposed/data_preprocessing.md
-- paper/proposed/filter_analysis.md
-- paper/proposed/readout.md
-
-src/ 이하 코드는 위 문서들과 모순되지 않도록 유지한다.
+프로젝트의 실제 구현 규칙은 현재 유지 중인 명세 문서가 결정한다.
+src/ 이하 코드는 명세 문서들과 모순되지 않도록 유지한다.
 
 

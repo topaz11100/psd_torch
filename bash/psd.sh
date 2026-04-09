@@ -15,7 +15,7 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 # - output layer 뒤 learned NN head 는 두지 않는다.
 # - readout 은 output neuron 의 membrane / spike sequence 에 대한 기능적 판정 규칙이다.
 # - DATASET 은 단일 값만 허용한다.
-# - MODELS / READOUT_MODES 에 여러 값을 주면 run.py 가 model × readout 조합을 받은 순서대로 직렬 실행한다.
+# - MODELS / READOUT_MODES 에 여러 값을 주면 psd_analysis.py 가 model × readout 조합을 받은 순서대로 직렬 실행한다.
 # - grouped model / readout 병렬 시나리오는 bash/run_psd.sh 가 담당한다.
 # -----------------------------------------------------------------------------
 
@@ -35,7 +35,7 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 #   my_dh_snn, my_r_dh_snn, my_d_rf
 #
 # readout mode
-#   final_membrane / earliest_spike / max_rate
+#   final_membrane / first_spike / max_rate
 # -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
@@ -50,7 +50,7 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 #   * time_domain_heatmap.png : x축 timestep, y축 element index
 #   * time_domain_element_mean.png : x축 timestep, y축 element 평균
 # - 최종 snapshot 은 training_complete_stats/ 아래에 최종 probe-set accuracy,
-#   최종 attenuation 통계, 최종 all_layers_summary.csv, 최종 derivative semi-metric 을 유지한다.
+#   최종 attenuation 통계, 최종 all_layers_summary.csv, 최종 centered pointwise L2 semi-metric(디렉터리명은 shape_sim_metric) 을 유지한다.
 # - 학습 중에는 PNG 를 직접 그리지 않고 process-local CPU 메모리에 numeric payload 만 홀드한 뒤,
 #   학습 완료 후 tqdm 로그와 함께 렌더링하며 성공한 payload 는 즉시 메모리에서 제거한다.
 # -----------------------------------------------------------------------------
@@ -73,7 +73,7 @@ DATA_ROOT=""        # --data_root : 절대경로. 비우면 생략
 OUT_ROOT=""         # --out_root  : 절대경로. 비우면 생략
 
 # -----------------------------------------------------------------------------
-# CUDA / seed / dataloader (비우면 run.py 기본값 사용)
+# CUDA / seed / dataloader (비우면 엔트리포인트 기본값 사용)
 # -----------------------------------------------------------------------------
 GPU=""              # --gpu : CUDA device index. 비우면 생략
 SEED=""             # --seed : 전역 시드 + deterministic probe-set 선택 시드
@@ -85,11 +85,11 @@ DOWNLOAD=""         # --download : 0 또는 1. 비우면 생략
 # -----------------------------------------------------------------------------
 DATASET=""          # --dataset : 예) s-mnist
 MODELS=()            # --model : 예) (lif lif_R rf dh_snn_R_4)
-READOUT_MODES=()     # --readout_mode : 예) (final_membrane earliest_spike)
+READOUT_MODES=()     # --readout_mode : 예) (final_membrane first_spike)
 HIDDEN=()            # --hidden : 예) (256 256 128)
 
 # -----------------------------------------------------------------------------
-# 학습 하이퍼파라미터 (비우면 생략 -> run.py 기본값 사용)
+# 학습 하이퍼파라미터 (비우면 생략 -> 엔트리포인트 기본값 사용)
 # -----------------------------------------------------------------------------
 EPOCHS=""
 BATCH_SIZE=""
@@ -161,6 +161,10 @@ TEAR=""
 EXP_NAME=""
 CUSTOM_TIMESTAMP=""
 
+# Append one scalar CLI option only when the value is non-empty.
+#
+# This lets the template keep many knobs blank while still producing a clean
+# final ``psd_analysis.py`` command line.
 append_scalar_if_nonempty() {
   local flag="$1"
   local value="$2"
@@ -169,6 +173,10 @@ append_scalar_if_nonempty() {
   fi
 }
 
+# Append one multi-value CLI option only when the array contains entries.
+#
+# Model, readout, hidden-width, and clip-edge arguments all use bash arrays here
+# because the Python CLI expects repeated positional values after a single flag.
 append_array_if_nonempty() {
   local flag="$1"
   local -n values_ref="$2"
@@ -177,7 +185,7 @@ append_array_if_nonempty() {
   fi
 }
 
-CMD=("${PYTHON_BIN}" -u "${ROOT_DIR}/src/psd_analysis/run.py")
+CMD=("${PYTHON_BIN}" -u "${ROOT_DIR}/src/psd_analysis.py")
 
 append_scalar_if_nonempty --dataset "${DATASET}"
 append_array_if_nonempty --model MODELS

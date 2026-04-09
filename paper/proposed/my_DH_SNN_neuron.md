@@ -49,6 +49,9 @@ Optimizer regularization(AdamW weight decay) 적용 범위(프로젝트 구현):
   \end{cases}
   $$
 
+
+  $$
+
 > 이 프로젝트에서는 가지를 실제로 append/pop 하지 않고, 항상 $D$ 개를 사전 할당한 뒤 $M\in[0,1]$ 로 게이팅한다(비활성/약활성 가지는 0 또는 작은 값으로 유지).
 
 ---
@@ -72,7 +75,7 @@ $$
 ### 2.2 가지별 수상돌기 전류(누설 적분)
 
 $$
- i_{n,d}^{t+1,l}
+i_{n,d}^{t+1,l}
 =
 M_{n,d}^{l}\Bigl(
 \alpha_{n,d}^{l}\, i_{n,d}^{t,l}
@@ -97,7 +100,7 @@ $$
 soft reset 을 포함하면
 
 $$
- u_{n}^{t+1,l}
+u_{n}^{t+1,l}
 =
 \beta_{n}^{l}u_{n}^{t,l}
 +
@@ -109,7 +112,7 @@ $$
 스파이크 출력은
 
 $$
- o_{n}^{t+1,l}=H\!\left(u_{n}^{t+1,l}-u_{\mathrm{th}}\right)
+o_{n}^{t+1,l}=H\!\left(u_{n}^{t+1,l}-u_{\mathrm{th}}\right)
 $$
 
 이다.
@@ -135,16 +138,17 @@ $$
 본 프로젝트에서는 $s$ 범위를 **$S_{\min},S_{\max}$** 로만 정의한다.
 
 $$
- s_{n}^{l}
+s_{n}^{l}
 =
 S_{\min}+(S_{\max}-S_{\min})\,\sigma(\hat{s}_{n}^{l})
 $$
 
 - $s$ 는 **레이어 단위가 아니라 뉴런 단위 파라미터** 이다.
 - $S_{\max}$ 는 구현상 $D$ 보다 클 수도 있다.
-  - 이때도 $D_{n}^{l}\le D$ 로 clamp 되지만, $s$ 가 커질수록 $1/s$ 로 인해 soma drive 가 감소하므로 여전히 의미가 있다.
 
+  - 이때도 $D_{n}^{l}\le D$ 로 clamp 되지만, $s$ 가 커질수록 $1/s$ 로 인해 soma drive 가 감소하므로 여전히 의미가 있다.
 - **기본 초기화 정책:** `s_init` 을 별도로 지정하지 않으면 ** S_max 근처에서 시작** 한다.
+
   - 구현은 sigmoid 포화를 피하기 위해 정규화 비율을 $[\epsilon,1-\epsilon]$ 로 clamp 하므로, 실제 초기 $s$ 는
     $S_{\max}-\epsilon(S_{\max}-S_{\min})$ 처럼 S_max보다 약간 작은 값이 된다(자세한 근거는 varidble_dendric.md §2.3).
 
@@ -192,6 +196,7 @@ $$
 처럼 구성한다(필요 항만 사용) .
 
 - $\mathcal{L}_{\text{ortho}}$ : 가지 시간필터($\alpha$) 중복 억제
+
   - **마스크가 0이 아닌 가지($d\le D_{n,\mathrm{int}}^{l}$)** 에 대해서만 합산한다.
   - 닫힌형은 varidble_dendric.md 참조
 - $\mathcal{L}_{s}$ : 가지 복잡도 비용(전체 뉴런 기준 평균)

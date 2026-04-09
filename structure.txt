@@ -1,9 +1,9 @@
 /
---bash/                (launcher 및 CLI template, 읽기 전용)
---Origin/              (저자 제공 코드, 읽기 전용)
---paper/               (논문 및 서류, 읽기 전용)
+--bash/                (launcher 및 CLI template)
+--Origin/              (저자 제공 코드)
+--paper/               (논문 및 서류)
   |
-  --proposed/          (공식 명세 및 프로젝트 문서, 읽기 전용)
+  --proposed/          (공식 명세 및 프로젝트 문서)
 --src/                 (실험 코드)
   |
   --data/              (데이터셋별 전처리 기능 파일들)

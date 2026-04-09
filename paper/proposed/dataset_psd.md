@@ -2,45 +2,33 @@
 
 ## 1. 목적
 
-`dataset_psd` 는 학습을 수행하지 않고 지원 benchmark dataset 의 train / test split 입력 자체의 PSD / spectrogram 기준선을 저장하는 one-shot 실험이다. 이 실험의 수학적 정의와 저장 규칙은 `paper/proposed/psd_analysis.md` 와 같아야 하며, 차이는 분석 대상이 모델 내부 layer 가 아니라 **데이터셋별 author-code-aligned 전처리 이후의 model input tensor** 라는 점뿐이다. 또한 deterministic probe set input reference 저장 책임은 이제 `dataset_psd` 가 가진다.
+`dataset_psd` 는 학습을 수행하지 않고 현재 실험에서 사용하는 dataset 입력 자체에 대한 PSD / spectrogram 기준선을 저장하는 one-shot 실험이다. 이 실험의 수학적 정의는 `paper/proposed/psd_analysis.md` 와 같고, 차이는 분석 대상이 모델 내부 layer 가 아니라 전처리 이후의 model input tensor 라는 점뿐이다.
 
-현재 공식 dataset 범위는 아래 다섯 개다.
+사용 dataset 목록, dataset 별 전처리 출처, PSD 계산 직전 입력 shape 기준, 다운로드 / 준비 방법은 `paper/proposed/data_preprocessing.md` 를 따른다. deterministic probe set input reference 의 영구 저장 책임도 `dataset_psd` 가 가진다. 즉 `psd_analysis` 는 같은 deterministic index 를 공유하지만, 입력 probe-set plot 자체는 `dataset_psd` 가 저장한다.
 
-- `s-mnist`
-- `dvsgesture`
-- `shd`
-- `deap`
-- `forda`
+이 문서는 dataset 이름별 예외를 열거하지 않고, dataset-agnostic 저장 규칙과 probe set / PSD 계산 / CLI target 선택만 정의한다.
 
-전처리 기준은 `src/common/datasets.py` 의 benchmark adapter 구현과 `Origin/` 아래 released code 를 따른다. 즉 s-MNIST 는 DH-SNN 계열 정규화와 raster sequence, DVS128 Gesture 는 First-spike 계열 HDF5 -> dense tensor, SHD 는 현행 event binning, DEAP 는 DH-SNN 계열 baseline 제거 3초 segment, FordA 는 TS-LIF 계열 `.ts` loader 와 standardization 을 기준으로 한다.
+공식 plot 대상은 CLI `--plot_target` 으로 선택한다.
 
-## 2. dataset별 입력 기준선
+- `dataset` : full train / test split 입력 bundle 만 저장한다.
+- `probe_set` : deterministic probe_set 입력 reference bundle 만 저장한다.
+- `both` : 같은 run root 아래에서 full dataset bundle 과 probe_set bundle 을 직렬로 둘 다 저장한다.
 
-입력 sample $n$ 의 전처리 후 model input 을
+## 2. probe_set
 
-$$
-X^{(n)} \in \mathbb{R}^{C \times T}
-$$
+`dataset_psd` 의 probe_set 은 `psd_analysis` 가 사용하는 deterministic subset 과 동일한 정의를 공유한다. train split, test split 각각에 대해 `same_label` 과 `balanced_global` 두 종류를 사용한다.
 
-로 둔다. 여기서 $C$ 는 입력 element 수, $T$ 는 시간축 길이다. 일부 loader 는 sample 을 `(T, C)` 형태로 반환하지만, PSD 계산 직전에는 항상 channel-major map $C \times T$ 로 정규화해 처리한다. 입력 element index $i$ 의 시계열은
+- `same_label` : 각 label 안에서 deterministic canonical order 의 prefix 를 취한 probe set
+- `balanced_global` : 각 label 의 같은 canonical order prefix 를 취한 뒤 label 순서대로 flatten 한 probe set
 
-$$
-s_i^{(n)}[t], \qquad t=0,1,\dots,T-1
-$$
+canonical order 는 split 이름, base seed, label, dataset index 에만 의존해야 하며, model 시나리오, readout mode, timestamp, out_root 같은 실행 외부 조건 때문에 바뀌면 안 된다. 같은 label 내부에서는 `same_label` 과 `balanced_global` 이 같은 canonical order 를 공유하고, 두 scope 는 서로 다른 prefix 길이만 가질 수 있다.
 
-로 둔다.
+입력 reference bundle 저장 경로는 아래와 같다.
 
-현재 공식 benchmark 별 기준 shape 는 아래와 같다.
+- `probe_set_reference/<split>/same_label/label_<c>/input/`
+- `probe_set_reference/<split>/balanced_global/input/`
 
-| dataset | 전처리 기준 | PSD 계산 직전 기준 $C \times T$ | 비고 |
-| --- | --- | --- | --- |
-| `s-mnist` | DH-SNN 계열 `ToTensor()` 후 `[0, 1]` 유지, `28 x 28 -> 784 x 1` 순차화 | $1 \times 784$ | 입력은 scalar sequence |
-| `dvsgesture` | First-spike 계열 HDF5 -> dense tensor | $(2 \cdot (128/ds)^2) \times (\text{chunk_size}+\text{empty_size})$ | 기본값은 $2048 \times 160$ |
-| `shd` | 현행 SHD event binning | $700 \times 250$ | 표준 설정 기준 |
-| `deap` | DH-SNN 계열 baseline 제거 + 3초 segment | $32 \times 384$ | EEG 32채널 |
-| `forda` | TS-LIF 계열 `.ts` loader + standardization | $1 \times 500$ | 표준 FordA 길이 기준 |
-
-따라서 `dataset_psd` 는 더 이상 SHD 전용 실험이 아니며, 각 dataset 의 전처리 이후 입력 기준선 위에서 동일한 exact PSD / spectrogram 규칙을 적용해야 한다.
+여기서 저장되는 것은 입력 tensor 기준의 PSD / spectrogram bundle 이다. hidden / output layer bundle 이 아니며, epoch 축도 없다. `psd_analysis` 는 같은 index 를 공유해 내부 reference payload 를 계산하지만, 입력 probe-set plot 을 다시 저장하지 않는다.
 
 ## 3. 모든 주파수 단위
 
@@ -53,6 +41,27 @@ $$
 따라서 waveform, heatmap, spectrogram, userbin 중심값은 모두 cycle/sample 단위를 써야 한다.
 
 ## 4. exact periodogram waveform
+
+입력 sample $n$ 의 전처리 후 model input 을
+
+$$
+X^{(n)} \in \mathbb{R}^{C \times T}
+$$
+
+로 둔다. 일부 loader 는 sample 을 `(T, C)` 형태로 반환하지만, PSD 계산 직전에는 항상 channel-major map $C \times T$ 로 정규화해 처리한다. 입력 element index $i$ 의 시계열은
+
+$$
+s_i^{(n)}[t], \qquad t=0,1,\dots,T-1
+$$
+
+로 둔다.
+
+이하에서 scope $\mathcal{S}$ 는 두 경우 중 하나를 의미한다.
+
+1. full dataset bundle 일 때는 split sample 집합 `train` 또는 `test`
+2. probe_set bundle 일 때는 선택된 deterministic probe subset
+
+따라서 sections 4-7 의 수식은 full dataset bundle 과 probe_set bundle 에 공통으로 적용되며, 차이는 $\mathcal{S}$ 가 전체 split 인지 deterministic subset 인지뿐이다.
 
 입력 channel $i$ 의 시계열에 대해 raw signal 과 centered signal 을 각각
 
@@ -78,10 +87,10 @@ $$
 
 이다. 이 경로에서는 Hann, Hamming, Blackman 같은 taper window 를 적용하지 않는다.
 
-split $q \in \{\mathrm{train}, \mathrm{test}\}$ 의 sample 집합을 $\mathcal{S}_q$ 라 두면 channel 평균 후 sample 평균한 waveform 은
+scope 평균 waveform 은
 
 $$
-\bar P_q^{\mathrm{wave},a}[k] = \frac{1}{|\mathcal{S}_q|}\sum_{n \in \mathcal{S}_q} \left( \frac{1}{C}\sum_{i=0}^{C-1} P_i^{(n),a}[k] \right)
+\bar P_{\mathcal{S}}^{\mathrm{wave},a}[k] = \frac{1}{|\mathcal{S}|}\sum_{n \in \mathcal{S}} \left( \frac{1}{C}\sum_{i=0}^{C-1} P_i^{(n),a}[k] \right)
 $$
 
 이다.
@@ -89,7 +98,7 @@ $$
 저장 파일명은 아래 네 개다.
 
 - 선형: `mean_psd_waveform_exact_raw.png`, `mean_psd_waveform_exact_centered.png`
-- dB y축: $10 \log_{10}(\bar P_q^{\mathrm{wave},a}[k] + \varepsilon)$, 여기서 $\varepsilon = 10^{-12}$
+- dB y축: $10 \log_{10}(\bar P_{\mathcal{S}}^{\mathrm{wave},a}[k] + \varepsilon)$, 여기서 $\varepsilon = 10^{-12}$
 - dB: `mean_psd_waveform_exact_raw_db.png`, `mean_psd_waveform_exact_centered_db.png`
 
 ## 5. periodogram userbin heatmap
@@ -102,10 +111,10 @@ $$
 
 이다.
 
-split 평균 heatmap 값은
+scope 평균 heatmap 값은
 
 $$
-H_{q}^{\mathrm{psd},a}[i,b] = \frac{1}{|\mathcal{S}_q|}\sum_{n \in \mathcal{S}_q} \widetilde P_i^{(n),a}[b]
+H_{\mathcal{S}}^{\mathrm{psd},a}[i,b] = \frac{1}{|\mathcal{S}|}\sum_{n \in \mathcal{S}} \widetilde P_i^{(n),a}[b]
 $$
 
 이다.
@@ -121,7 +130,7 @@ heatmap 규칙은 아래와 같다.
 저장 파일명은 아래 네 개다.
 
 - 선형: `element_psd_heatmap_userbin_raw.png`, `element_psd_heatmap_userbin_centered.png`
-- dB 각 칸 값: $10 \log_{10}(H_{q}^{\mathrm{psd},a}[i,b] + \varepsilon)$, 여기서 $\varepsilon = 10^{-12}$
+- dB 각 칸 값: $10 \log_{10}(H_{\mathcal{S}}^{\mathrm{psd},a}[i,b] + \varepsilon)$, 여기서 $\varepsilon = 10^{-12}$
 - dB: `element_psd_heatmap_userbin_raw_db.png`, `element_psd_heatmap_userbin_centered_db.png`
 
 ## 6. exact mean spectrogram
@@ -144,10 +153,10 @@ $$
 
 이다. 이 경로 역시 frame 내부 taper window 를 적용하지 않는다.
 
-split 평균 spectrogram 은
+scope 평균 spectrogram 은
 
 $$
-\bar S_q^{a}[k,u] = \frac{1}{|\mathcal{S}_q|}\sum_{n \in \mathcal{S}_q} \left( \frac{1}{C}\sum_{i=0}^{C-1} S_i^{(n),a}[k,u] \right)
+\bar S_{\mathcal{S}}^{a}[k,u] = \frac{1}{|\mathcal{S}|}\sum_{n \in \mathcal{S}} \left( \frac{1}{C}\sum_{i=0}^{C-1} S_i^{(n),a}[k,u] \right)
 $$
 
 이다.
@@ -155,7 +164,7 @@ $$
 저장 파일명은 아래 네 개다.
 
 - 선형: `mean_spectrogram_exact_raw.png`, `mean_spectrogram_exact_centered.png`
-- dB 값: $10 \log_{10}(\bar S_q^{a}[k,u] + \varepsilon)$, 여기서 $\varepsilon = 10^{-12}$
+- dB 값: $10 \log_{10}(\bar S_{\mathcal{S}}^{a}[k,u] + \varepsilon)$, 여기서 $\varepsilon = 10^{-12}$
 - dB: `mean_spectrogram_exact_raw_db.png`, `mean_spectrogram_exact_centered_db.png`
 
 ## 7. spectrogram userbin heatmap
@@ -166,10 +175,10 @@ $$
 \widetilde S_i^{(n),a}[b,u] = \frac{1}{|\mathcal{B}_b|} \sum_{k \in \mathcal{B}_b} S_i^{(n),a}[k,u]
 $$
 
-split 평균 channel heatmap 값은
+scope 평균 channel heatmap 값은
 
 $$
-H_q^{\mathrm{spec},a}[i,b,u] = \frac{1}{|\mathcal{S}_q|}\sum_{n \in \mathcal{S}_q} \widetilde S_i^{(n),a}[b,u]
+H_{\mathcal{S}}^{\mathrm{spec},a}[i,b,u] = \frac{1}{|\mathcal{S}|}\sum_{n \in \mathcal{S}} \widetilde S_i^{(n),a}[b,u]
 $$
 
 이다.
@@ -192,114 +201,80 @@ heatmap 규칙은 아래와 같다.
 저장 파일명은 아래 네 개다.
 
 - 선형: `element_spectrogram_heatmap_userbin_raw.png`, `element_spectrogram_heatmap_userbin_centered.png`
-- dB 각 칸 값: $10 \log_{10}(H_q^{\mathrm{spec},a}[i,b,u] + \varepsilon)$, 여기서 $\varepsilon = 10^{-12}$
+- dB 각 칸 값: $10 \log_{10}(H_{\mathcal{S}}^{\mathrm{spec},a}[i,b,u] + \varepsilon)$, 여기서 $\varepsilon = 10^{-12}$
 - dB: `element_spectrogram_heatmap_userbin_raw_db.png`, `element_spectrogram_heatmap_userbin_centered_db.png`
 
 ## 8. 저장 구조
 
-각 split bundle 은 아래 구조를 따른다.
+run root 는 `--plot_target` 에 따라 아래 항목을 조건부로 가진다.
 
 ```text
 <run_root>/
   config.json
   summary.json
   train/
-    mean_psd_waveform_exact_raw.png
-    mean_psd_waveform_exact_centered.png
-    element_psd_heatmap_userbin_raw.png
-    element_psd_heatmap_userbin_centered.png
-    mean_spectrogram_exact_raw.png
-    mean_spectrogram_exact_centered.png
-    element_spectrogram_heatmap_userbin_raw.png
-    element_spectrogram_heatmap_userbin_centered.png
-    mean_psd_waveform_exact_raw_db.png
-    mean_psd_waveform_exact_centered_db.png
-    element_psd_heatmap_userbin_raw_db.png
-    element_psd_heatmap_userbin_centered_db.png
-    mean_spectrogram_exact_raw_db.png
-    mean_spectrogram_exact_centered_db.png
-    element_spectrogram_heatmap_userbin_raw_db.png
-    element_spectrogram_heatmap_userbin_centered_db.png
-    summary.json
+    ... 16개 PNG + summary.json ...
   test/
-    mean_psd_waveform_exact_raw.png
-    mean_psd_waveform_exact_centered.png
-    element_psd_heatmap_userbin_raw.png
-    element_psd_heatmap_userbin_centered.png
-    mean_spectrogram_exact_raw.png
-    mean_spectrogram_exact_centered.png
-    element_spectrogram_heatmap_userbin_raw.png
-    element_spectrogram_heatmap_userbin_centered.png
-    mean_psd_waveform_exact_raw_db.png
-    mean_psd_waveform_exact_centered_db.png
-    element_psd_heatmap_userbin_raw_db.png
-    element_psd_heatmap_userbin_centered_db.png
-    mean_spectrogram_exact_raw_db.png
-    mean_spectrogram_exact_centered_db.png
-    element_spectrogram_heatmap_userbin_raw_db.png
-    element_spectrogram_heatmap_userbin_centered_db.png
-    summary.json
+    ... 16개 PNG + summary.json ...
+  probe_set_reference/
+    train/
+      same_label/
+        label_<c>/
+          input/
+            ... 16개 PNG + summary.json ...
+      balanced_global/
+        input/
+          ... 16개 PNG + summary.json ...
+    test/
+      ... 동일 구조 ...
 ```
 
-split-level `summary.json` 은 raw / centered 두 계열의 공통 metadata 와 scalar summary 를 함께 담는다. 현재 공식 저장에서는 `db_plots_saved = true`, `db_plot_scale = "10log10_power_plus_epsilon"`, `db_plot_epsilon = 1.0e-12` 도 함께 기록한다.
+규칙은 아래와 같다.
+
+- `train/`, `test/` 는 `plot_target` 이 `dataset` 또는 `both` 일 때만 생성한다.
+- `probe_set_reference/` 는 `plot_target` 이 `probe_set` 또는 `both` 일 때만 생성한다.
+- full dataset bundle 과 probe_set bundle 은 모두 동일한 16개 PSD / spectrogram PNG 집합과 `summary.json` 을 가진다.
+- run-level `summary.json` 은 어떤 target 이 실제로 저장되었는지와 dataset / probe_set 저장 결과를 함께 요약해야 한다.
+- split-level `summary.json` 은 raw / centered 두 계열의 공통 metadata 와 scalar summary 를 함께 담는다. 현재 공식 저장에서는 `db_plots_saved = true`, `db_plot_scale = "10log10_power_plus_epsilon"`, `db_plot_epsilon = 1.0e-12` 도 함께 기록한다.
 
 ## 9. CLI / config 규칙
 
-공식 엔트리는 `src/dataset_psd/run.py` 다. `src/dataset_psd/SHD/run.py` 는 기존 SHD 전용 호출을 위한 compatibility wrapper 로만 둔다. `probe_set_reference/` 저장도 이 엔트리에서 담당한다. 주요 의미는 아래와 같다.
+공식 엔트리는 `src/dataset_psd.py` 다. 문서 기준 공식 인터페이스는 `--plot_target` 이고, 기존 `--probe_plot` 은 backward compatibility alias 로만 둔다.
 
-- `--dataset` 은 단일 인수다.
-- 공식 canonical dataset 이름은 `s-mnist`, `dvsgesture`, `shd`, `deap`, `forda` 다.
-- `--same_label_n_per_label`, `--balanced_global_n_per_label` 는 deterministic probe scope prefix 길이를 정의한다.
-- `--probe_plot` 이 true 이면 `probe_set_reference/<split>/<scope>/input/` 아래에 입력 reference bundle 을 저장한다.
-- `--data_root`, `--out_root` 는 dataset 공통 절대경로다.
-- `--shd_*` 인수는 SHD 계열 event binning 설정만 바꾼다.
-- `--dvsgesture_chunk_size`, `--dvsgesture_empty_size`, `--dvsgesture_dt_ms`, `--dvsgesture_ds` 는 DVS128 Gesture dense tensor 기준선을 정한다.
-- `--deap_label_axis`, `--deap_num_classes` 는 DEAP label 과제 설정을 정한다.
+- `--dataset` 은 단일 인수다. 유효한 canonical dataset token 집합은 현재 실험 범위와 동일하며 `paper/proposed/data_preprocessing.md` 를 따른다.
+- `--plot_target` 의 공식 선택지는 `dataset`, `probe_set`, `both` 다.
+- `dataset` 은 full train / test split bundle 만 저장한다.
+- `probe_set` 은 deterministic probe-set input reference bundle 만 저장한다.
+- `both` 는 full dataset bundle 과 probe_set bundle 을 같은 run root 아래 직렬로 모두 저장한다.
+- `--seed`, `--same_label_n_per_label`, `--balanced_global_n_per_label` 는 deterministic probe scope 를 정의한다.
+- `--probe_plot` legacy 호출에서는 `false -> dataset`, `true -> both` 로만 해석하고, `probe_set` 단독 저장은 `--plot_target probe_set` 으로 명시한다.
+- `--data_root`, `--out_root` 는 절대경로다.
+- dataset-specific loader / preprocessing 보조 인수가 존재하더라도, 그 의미와 허용 범위는 `paper/proposed/data_preprocessing.md` 와 대응 adapter 구현을 따른다. 본 문서는 dataset 이름별 옵션 목록을 별도로 나열하지 않는다.
 - `--psd_window`, `--psd_overlap` 은 spectrogram frame 길이 / overlap 을 정한다.
 - `--userbin_edges` 는 periodogram / spectrogram heatmap userbin 경계를 정한다.
-- `--window_fn` 은 **legacy compatibility 인수** 이며 현재 공식 exact 경로에서는 무시된다.
-- `config.json` 에는 최소 `dataset_name`, `dataset_bundle`, `periodogram_length_effective`, `spectrogram_window_effective`, `spectrogram_overlap_effective`, `userbin_edges`, `taper_window_applied = false`, `variants_saved = ["raw", "centered"]`, `save_db_psd_plots = true`, `db_plot_scale = "10log10_power_plus_epsilon"`, `db_plot_epsilon = 1.0e-12` 를 기록한다.
-
+- `--window_fn` 은 legacy compatibility 인수이며 현재 공식 exact 경로에서는 무시된다.
+- `config.json` 에는 최소 `dataset_name`, `plot_target`, `dataset_bundle_saved`, `probe_set_reference_saved`, `seed`, `same_label_n_per_label`, `balanced_global_n_per_label`, `periodogram_length_effective`, `spectrogram_window_effective`, `spectrogram_overlap_effective`, `userbin_edges`, `taper_window_applied = false`, `variants_saved = ["raw", "centered"]`, `save_db_psd_plots = true`, `db_plot_scale = "10log10_power_plus_epsilon"`, `db_plot_epsilon = 1.0e-12` 를 기록한다.
 
 ## 10. 외부 데이터 루트 구조
 
-공식 `data_root` 는 아래 구조를 기준으로 맞춘다.
+공식 `data_root` 는 각 dataset adapter 가 raw / preprocessed asset 을 상대경로로 찾는 공통 절대 루트다. dataset 별 하위 디렉터리 이름, 원본 파일명, 사전 가공 파일 배치는 `paper/proposed/data_preprocessing.md` 와 대응 adapter 구현을 따른다. 본 문서가 강제하는 최소 형태는 아래와 같다.
 
 ```text
 <data_root>/
-  MNIST/
+  <dataset-specific-subdir>/
     raw/
-      train-images-idx3-ubyte.gz
-      train-labels-idx1-ubyte.gz
-      t10k-images-idx3-ubyte.gz
-      t10k-labels-idx1-ubyte.gz
-  DVS128Gesture/
-    hdf5/
-      DVS-Gesture-train10.hdf5
-      DVS-Gesture-test10.hdf5
-    raw/
-      ... optional raw .aedat / *_labels.csv backups ...
-  SHD/
-    shd_train.h5
-    shd_test.h5
-  DEAP/
-    data_preprocessed_python/
-      s01.dat
-      s02.dat
       ...
-  FordA/
-    FordA_TRAIN.ts
-    FordA_TEST.ts
+    preprocessed/
+      ...
 ```
+
+위 그림의 `raw/`, `preprocessed/` 는 예시적 placeholder 다. 모든 dataset 이 두 디렉터리를 모두 가져야 한다는 뜻은 아니다.
 
 설명은 아래와 같다.
 
-- `s-mnist` 는 `MNIST/` 아래 raw IDX gzip 또는 torchvision 호환 구조를 사용한다. 현재 구현은 `[0, 1]` 범위를 유지한 뒤 `28 x 28 -> 784 x 1` flatten과 scalar 실수 직주입을 사용한다.
-- `dvsgesture` 는 학습용 dense loader 가 `DVS128Gesture/hdf5/DVS-Gesture-train10.hdf5`, `DVS-Gesture-test10.hdf5` 를 직접 읽는다.
-- `shd` 는 `SHD/shd_train.h5`, `SHD/shd_test.h5` 를 사용한다.
-- `deap` 는 공식 preprocessed package 인 `DEAP/data_preprocessed_python/` 아래 subject별 `.dat` 파일을 사용한다.
-- `forda` 는 `FordA/FordA_TRAIN.ts`, `FordA/FordA_TEST.ts` 를 사용한다.
-
+- `--data_root` 는 dataset 별 자산을 한곳에 모으는 공통 절대 루트다.
+- 각 adapter 는 자기 dataset 이 요구하는 파일을 이 루트 아래에서 resolve 해야 한다.
+- `dataset_psd` 는 dataset 이름에 따라 PSD 수학, 저장 파일 집합, probe_set 규칙을 바꾸지 않는다. 달라질 수 있는 것은 전처리 결과로 정해지는 입력 shape 와 sample 집합뿐이며, 이는 `paper/proposed/data_preprocessing.md` 를 따른다.
 
 ## 11. 금지 사항
 
@@ -307,6 +282,6 @@ split-level `summary.json` 은 raw / centered 두 계열의 공통 metadata 와 
 - spectrogram heatmap 을 exact bin heatmap 으로 저장하면 안 된다.
 - exact periodogram 또는 exact spectrogram 경로에 taper window 를 적용하면 안 된다.
 - raw 계열 또는 centered 계열 중 하나만 저장하면 안 된다.
-- `dataset_psd` 를 SHD 전용 실험으로 가정하면 안 된다.
-- dataset별 입력 길이 $T$ 와 element 수 $C$ 를 임의로 SHD 기준선으로 덮어쓰면 안 된다.
-
+- `dataset_psd` 를 특정 dataset 전용 실험으로 가정하면 안 된다.
+- 어떤 dataset 의 입력 길이 $T$ 와 element 수 $C$ 도 다른 dataset 기준선으로 임의 덮어쓰면 안 된다.
+- probe_set input bundle 을 hidden / output layer bundle 과 같은 산출물로 혼동하면 안 된다.

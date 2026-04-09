@@ -477,7 +477,7 @@ $$
 ## 9. 구현 체크리스트
 
 - $s$ 의 범위: $S_{\min},S_{\max}$
-- $s$ 는 **뉴런 단위** 
+- $s$ 는 **뉴런 단위**
 - 텐서 사전 할당: 최대 가지 수 $D$
 - 소프트 마스크: $M_{n,d}(s_n)\in[0,1]$
   - $d\le\lfloor\tilde{s}_n\rfloor$ 는 1, $d=\lfloor\tilde{s}_n\rfloor+1$ 은 $\tilde{s}_n-\lfloor\tilde{s}_n\rfloor$, 그 외 0
