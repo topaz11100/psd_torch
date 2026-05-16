@@ -1,20 +1,42 @@
 /
---bash/                (launcher 및 CLI template)
---Origin/              (저자 제공 코드)
---paper/               (논문 및 서류)
+--bash/                         (stage-specific bash launcher)
   |
-  --proposed/          (공식 명세 및 프로젝트 문서)
---src/                 (실험 코드)
+  --data_prep.sh                (prepared-data generation launcher)
+  --dataset_psd.sh              (dataset baseline CSV launcher)
+  --model_training.sh           (training-only launcher; expands dataset/training/model slots)
+  --psd_analysis.sh             (checkpoint-analysis-only launcher; groups .pt inputs and assigns GPUs)
+  --plotting.sh                 (CSV-only plotting launcher)
+  --reinterpretation.sh         (independent author-code reinterpretation launcher)
+--Spec/                         (official specification)
   |
-  --data/              (데이터셋별 전처리 기능 파일들)
-  --neurons/           (뉴런 구현 파일들)
-  --readout/           (readout 구현 파일들)
-  --model/             (모델 생성 구현 파일들)
-  --signal/            (psd, 스펙트로그램 등 신호관련 구현 파일들)
-  --stat/              (통계 기능 구현 파일들)
-  --plot/              (plot생성, 저장 구현 파일들)
-  --util/              (기타 파일들(가능하면 최소화))
-  --dataset_psd.py     (dataset_psd 메인함수)
-  --psd_analysis.py    (psd_analysis 메인함수)
+  --README.md                   (specification index)
+  --theory/                     (theory specification)
+  --impl/                       (implementation specification)
+  --traceability.md             (theory-to-implementation mapping)
+  --validation_checklist.md     (validation checklist)
+  --conflict.md                 (current conflict audit)
+  --lr_guide.md                 (learning-rate guide)
+--Origin/                       (author-provided source bundle; connect through wrappers/adapters/hooks)
+--paper/                        (paper and reference material)
+--src/                          (project code)
+  |
+  --data/                       (prepared-data loaders, storage, registry)
+  --neurons/                    (neuron implementations)
+  --readout/                    (readout implementations)
+  --model/                      (model registry and builders)
+  --signal/                     (PSD, spectrogram, distance, signal analysis helpers)
+  --stat/                       (probe sampling and statistics)
+  --reinterpretation/           (author-code reinterpretation wrappers)
+  --util/                       (shared helpers)
+  --data_prep.py                (raw -> prepared train.npy/test.npy/manifest.json entrypoint)
+  --dataset_psd.py              (dataset-level PSD baseline CSV entrypoint)
+  --model_training.py           (supervised training and selected checkpoint entrypoint)
+  --psd_analysis.py             (checkpoint-only signal analysis CSV entrypoint)
+  --plotting.py                 (CSV-only figure rendering entrypoint)
 
-src/ 의 모든 폴더는 단일폴더로 폴더안의 폴더는 존재하지 않는다
+The main PSD pipeline is executed as explicit stages:
+
+src/model_training.py -> src/psd_analysis.py -> src/plotting.py
+bash/model_training.sh -> bash/psd_analysis.sh -> bash/plotting.sh
+
+Main-stage binary output is limited to selected `.pt` checkpoints written by src/model_training.py. Numeric artifacts are common-schema CSV files. PNG figures are produced only by src/plotting.py from CSV input.

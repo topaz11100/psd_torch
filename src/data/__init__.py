@@ -1,1 +1,1 @@
-"""Package init."""
+"""PSD experiment package."""
