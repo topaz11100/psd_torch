@@ -28,3 +28,16 @@ def test_cli_help_smoke():
     for mod in ['psd_snn.cli.train','psd_snn.cli.analyze_signal','psd_snn.cli.analyze_fft2d','psd_snn.cli.plot_artifacts']:
         cp=subprocess.run([sys.executable,'-m',mod,'--help'], env={**os.environ,'PYTHONPATH':'src'}, capture_output=True)
         assert cp.returncode==0
+
+
+def test_analyze_dynamics_help_smoke_without_torch():
+    cp = subprocess.run(
+        [sys.executable, '-m', 'psd_snn.cli.analyze_dynamics', '--help'],
+        env={**os.environ, 'PYTHONPATH': 'src'},
+        capture_output=True,
+        text=True,
+    )
+    assert cp.returncode == 0
+    assert 'usage:' in cp.stdout.lower()
+    assert '--parameter-stats-json' in cp.stdout
+    assert '--internal-state-stats-json' in cp.stdout
