@@ -6,9 +6,10 @@ from psd_snn.config.specs import load_experiment_config
 from psd_snn.analysis.signal.runner import SignalAnalysisRunner, SignalMapRecord
 from psd_snn.analysis.signal_map.emitter import bt_to_srt
 from psd_snn.artifacts.writers import SummaryWriter
+from psd_snn.analysis.common.status import AnalysisFailure
 from psd_snn.analysis.common import CheckpointRef, load_checkpoint_bundle, ProbeRequest, build_probe_batches
 from psd_snn.analysis.common.model_restore import restore_model_from_bundle
-from psd_snn.analysis.trace.adapter import TraceAdapter
+from psd_snn.analysis.trace.adapter import TraceAdapter, TraceContext
 from psd_snn.artifacts.trace_writer import TraceArtifactWriter
 from psd_snn.analysis.signal.pca_basis_store import PCABasisKey, PCAFitRequest
 
@@ -19,7 +20,10 @@ def _synthetic_records() -> list[SignalMapRecord]:
 
 
 def _collect_records(bundle, model, args, cfg, split='test', probe_family='balanced_global', scope_override=None, reference_meta=None):
-    x = torch.randn(16, 32, cfg.model.topology.input_dim)
+    if cfg.model.topology.kind in {'vgg','resnet'}:
+        x = torch.randn(16, 32, 1, 8, 8)
+    else:
+        x = torch.randn(16, 32, cfg.model.topology.input_dim)
     y = torch.tensor([i % cfg.model.topology.output_dim for i in range(16)])
     dataset = {'test_inputs': x, 'test_labels': y.tolist(), 'train_inputs': x.clone(), 'train_labels': y.tolist()}
     batches = build_probe_batches(dataset, ProbeRequest(split=split, probe_family=probe_family, sample_count=args.sample_count, seed=0, exclusion_family=args.exclusion_family, exclusion_sample_count=args.exclusion_sample_count, exclusion_seed=args.exclusion_seed), batch_size=args.batch_size)
@@ -27,12 +31,13 @@ def _collect_records(bundle, model, args, cfg, split='test', probe_family='balan
     out: list[SignalMapRecord] = []
     raw_traces=[]
     for b in batches:
-        _, traces = ta.run_with_trace(b.inputs, probe_family=b.probe_family, label='na')
+        ctx=TraceContext(run_id=args.run_id, checkpoint_epoch=bundle.checkpoint_epoch, checkpoint_id=None, split=b.split, scope=(scope_override or b.scope), probe_family=b.probe_family, sample_indices=b.sample_indices, labels=b.labels, probe_manifest_id=b.probe_manifest_id, exclusion_family=(b.probe_metadata or {}).get('exclusion_family'), exclusion_scope=(b.probe_metadata or {}).get('exclusion_scope'))
+        _, traces = ta.run_with_trace(b.inputs, probe_family=b.probe_family, label='na', context=ctx)
         for tr in traces:
             if tr.tensor is None or tr.series != 'spike':
                 continue
             maps = bt_to_srt(tr.tensor)
-            md = {'run_id': args.run_id, 'checkpoint_epoch': bundle.checkpoint_epoch, 'split': b.split, 'scope': scope_override or b.scope, 'probe_family': b.probe_family, 'sample_indices': b.sample_indices, 'labels': b.labels, 'layer_name': tr.layer_name, 'layer_index': tr.layer_index, 'signal_kind': tr.signal_kind, 'series': tr.series, 'sample_count': len(b.sample_indices), 'time_length': int(maps.shape[-1]), 'row_count': int(maps.shape[1]), 'source_layout': 'B,T,*', 'probe_manifest_id': b.probe_manifest_id, 'exclusion_family': (b.probe_metadata or {}).get('exclusion_family'), 'exclusion_scope': (b.probe_metadata or {}).get('exclusion_scope')}
+            md = {'run_id': getattr(tr,'run_id',args.run_id), 'checkpoint_epoch': getattr(tr,'checkpoint_epoch',bundle.checkpoint_epoch), 'split': getattr(tr,'split',b.split), 'scope': getattr(tr,'scope', scope_override or b.scope), 'probe_family': getattr(tr,'probe_family',b.probe_family), 'sample_indices': getattr(tr,'sample_indices',b.sample_indices), 'labels': getattr(tr,'labels',b.labels), 'layer_name': tr.layer_name, 'layer_index': tr.layer_index, 'signal_kind': tr.signal_kind, 'series': tr.series, 'sample_count': len(b.sample_indices), 'time_length': int(maps.shape[-1]), 'row_count': int(maps.shape[1]), 'source_layout': 'B,T,*', 'probe_manifest_id': getattr(tr,'probe_manifest_id', b.probe_manifest_id), 'exclusion_family': getattr(tr,'exclusion_family', (b.probe_metadata or {}).get('exclusion_family')), 'exclusion_scope': getattr(tr,'exclusion_scope', (b.probe_metadata or {}).get('exclusion_scope'))}
             if reference_meta:
                 md.update(reference_meta)
             out.append(SignalMapRecord(maps=maps, metadata=md))
@@ -90,9 +95,30 @@ def main(argv=None):
     args = ap.parse_args(argv)
     cfg = load_experiment_config(args.config)
     runner = SignalAnalysisRunner(cfg.signal_analysis)
-    records = _synthetic_records() if args.mode == 'synthetic' else _checkpoint_records(args, cfg, runner)
-    runner.update_signal_maps(records)
-    SummaryWriter(cfg.signal_analysis.artifact.output_dir).write_results(runner.finalize())
+    writer = SummaryWriter(cfg.signal_analysis.artifact.output_dir)
+    try:
+        records = _synthetic_records() if args.mode == 'synthetic' else _checkpoint_records(args, cfg, runner)
+        if not records:
+            fail = AnalysisFailure(status='no_trace_records', reason='no trace records generated', run_id=args.run_id, checkpoint_epoch=None if args.mode=='synthetic' else 0, split='synthetic' if args.mode=='synthetic' else 'test', scope='synthetic' if args.mode=='synthetic' else None, probe_family=args.probe_family)
+            writer.write_failure(fail)
+            raise RuntimeError(fail.reason)
+        runner.update_signal_maps(records)
+        writer.write_results(runner.finalize())
+    except FileNotFoundError as exc:
+        writer.write_failure(AnalysisFailure(status='checkpoint_load_failed', reason=str(exc), error_type=type(exc).__name__, error_message=str(exc), run_id=args.run_id, probe_family=args.probe_family))
+        raise
+    except RuntimeError as exc:
+        msg = str(exc)
+        status = 'model_restore_failed'
+        if 'unsupported' in msg:
+            status = 'unsupported_topology'
+        elif 'pca basis' in msg.lower() or 'not found' in msg.lower():
+            status = 'pca_basis_missing'
+        writer.write_failure(AnalysisFailure(status=status, reason=msg, error_type=type(exc).__name__, error_message=msg, run_id=args.run_id, probe_family=args.probe_family))
+        raise
+    except Exception as exc:
+        writer.write_failure(AnalysisFailure(status='writer_failed', reason=str(exc), error_type=type(exc).__name__, error_message=str(exc), run_id=args.run_id, probe_family=args.probe_family))
+        raise
 
 
 if __name__ == '__main__':

@@ -1,0 +1,29 @@
+# Detailed commented template for PSD/SNN refactor examples.
+# Field policy:
+# - No schema_version/csv_v2
+# - Canonical probe family: balanced_global/distributed_set/label_set/label_single
+# - 2D FFT artifact_type is spectral_matrix_2d
+mode: analyze_signal
+model:
+  topology:
+    kind: mlp_stack
+    input_dim: 8
+    hidden_widths: [16]
+    output_dim: 3
+  cell:
+    kind: lif
+  readout:
+    kind: final_mem
+signal_analysis:
+  psd:
+    representative:
+      method: mean  # mean|median|element_psd|pca
+      pca:
+        n_components: 2
+        basis_mode: fit_per_checkpoint
+    spectral_axis: exact  # exact|userbin
+  fft2d:
+    enabled: false
+    spectral_axis: exact
+  artifact:
+    output_dir: .example_out

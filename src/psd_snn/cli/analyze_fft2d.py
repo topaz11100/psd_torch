@@ -6,9 +6,10 @@ from psd_snn.config.specs import load_experiment_config
 from psd_snn.analysis.signal.runner import SignalAnalysisRunner, SignalMapRecord
 from psd_snn.analysis.signal_map.emitter import bt_to_srt
 from psd_snn.artifacts.writers import SummaryWriter
+from psd_snn.analysis.common.status import AnalysisFailure
 from psd_snn.analysis.common import CheckpointRef, load_checkpoint_bundle, ProbeRequest, build_probe_batches
 from psd_snn.analysis.common.model_restore import restore_model_from_bundle
-from psd_snn.analysis.trace.adapter import TraceAdapter
+from psd_snn.analysis.trace.adapter import TraceAdapter, TraceContext
 
 
 def _records_checkpoint(args, cfg):
@@ -16,13 +17,17 @@ def _records_checkpoint(args, cfg):
     restored = restore_model_from_bundle(bundle, device=args.device)
     if restored.restore_status != 'ok' or restored.model is None:
         raise RuntimeError(f"restore failed: {restored.reason}")
-    x = torch.randn(16, 32, cfg.model.topology.input_dim)
+    if cfg.model.topology.kind in {'vgg','resnet'}:
+        x = torch.randn(16, 32, 1, 8, 8)
+    else:
+        x = torch.randn(16, 32, cfg.model.topology.input_dim)
     y = torch.tensor([i % cfg.model.topology.output_dim for i in range(16)])
     dataset = {'test_inputs': x, 'test_labels': y.tolist()}
     batches = build_probe_batches(dataset, ProbeRequest(split='test', probe_family=args.probe_family, sample_count=args.sample_count, seed=0, exclusion_family=args.exclusion_family, exclusion_sample_count=args.exclusion_sample_count, exclusion_seed=args.exclusion_seed), batch_size=args.batch_size)
     out=[]; ta=TraceAdapter(restored.model)
     for b in batches:
-        _, traces = ta.run_with_trace(b.inputs, probe_family=b.probe_family, label='na')
+        ctx=TraceContext(run_id=args.run_id, checkpoint_epoch=bundle.checkpoint_epoch, split=b.split, scope=b.scope, probe_family=b.probe_family, sample_indices=b.sample_indices, labels=b.labels, probe_manifest_id=b.probe_manifest_id, exclusion_family=(b.probe_metadata or {}).get('exclusion_family'), exclusion_scope=(b.probe_metadata or {}).get('exclusion_scope'))
+        _, traces = ta.run_with_trace(b.inputs, probe_family=b.probe_family, label='na', context=ctx)
         for tr in traces:
             if tr.series != 'spike':
                 continue
@@ -45,13 +50,31 @@ def main(argv=None):
     ap.add_argument('--run_id', default='run_fft2d')
     args = ap.parse_args(argv)
     cfg = load_experiment_config(args.config)
-    if args.mode == 'synthetic':
-        records = [SignalMapRecord(torch.randn(4, 8, 64), {'run_id':'synthetic','split':'synthetic','scope':'synthetic','probe_family':'label_single','series':'spike','layer_name':'synthetic'})]
-    else:
-        records = _records_checkpoint(args, cfg)
-    runner = SignalAnalysisRunner(cfg.signal_analysis)
-    runner.run_fft2d(records)
-    SummaryWriter(cfg.signal_analysis.artifact.output_dir).write_results(runner.finalize())
+    writer = SummaryWriter(cfg.signal_analysis.artifact.output_dir)
+    try:
+        if args.mode == 'synthetic':
+            records = [SignalMapRecord(torch.randn(4, 8, 64), {'run_id':'synthetic','split':'synthetic','scope':'synthetic','probe_family':'label_single','series':'spike','layer_name':'synthetic'})]
+        else:
+            records = _records_checkpoint(args, cfg)
+        if not records:
+            fail = AnalysisFailure(status='no_trace_records', reason='no trace records generated', run_id=args.run_id, split='test', probe_family=args.probe_family)
+            writer.write_failure(fail)
+            raise RuntimeError(fail.reason)
+        runner = SignalAnalysisRunner(cfg.signal_analysis)
+        runner.run_fft2d(records)
+        writer.write_results(runner.finalize())
+    except FileNotFoundError as exc:
+        writer.write_failure(AnalysisFailure(status='checkpoint_load_failed', reason=str(exc), error_type=type(exc).__name__, error_message=str(exc), run_id=args.run_id, probe_family=args.probe_family))
+        raise
+    except RuntimeError as exc:
+        msg = str(exc)
+        status='model_restore_failed'
+        if 'unsupported' in msg: status='unsupported_topology'
+        writer.write_failure(AnalysisFailure(status=status, reason=msg, error_type=type(exc).__name__, error_message=msg, run_id=args.run_id, probe_family=args.probe_family))
+        raise
+    except Exception as exc:
+        writer.write_failure(AnalysisFailure(status='writer_failed', reason=str(exc), error_type=type(exc).__name__, error_message=str(exc), run_id=args.run_id, probe_family=args.probe_family))
+        raise
 
 
 if __name__ == '__main__':

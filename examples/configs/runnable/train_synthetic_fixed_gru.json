@@ -1,0 +1,1 @@
+{"model":{"topology":{"kind":"gru","input_dim":8,"output_dim":3}},"signal_analysis":{"artifact":{"output_dir":".example_out/sig_mean"}}}

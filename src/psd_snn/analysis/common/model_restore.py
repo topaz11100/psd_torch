@@ -3,7 +3,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from psd_snn.config.specs import _from_dict
-from psd_snn.models.mlp.builder import build_mlp_stack_model
+from psd_snn.models.factory import build_model
+from psd_snn.models.fixed.factory import UnsupportedTopologyError
 
 
 @dataclass
@@ -27,9 +28,10 @@ def restore_model_from_bundle(bundle, *, device: str = "cpu", strict_load: bool 
         if cfg_dict is None:
             raise ValueError("checkpoint missing config")
         cfg = _from_dict(cfg_dict)
-        if cfg.model.topology.kind != "mlp_stack":
-            return ModelRestoreResult(None, None, None, None, None, bundle.constraint_hash, bundle.checkpoint_epoch, "unsupported", reason="only mlp_stack restore is supported")
-        model = build_mlp_stack_model(cfg.model)
+                try:
+            model = build_model(cfg.model)
+        except UnsupportedTopologyError as ue:
+            return ModelRestoreResult(None, cfg.model, cfg.model.topology, cfg.model.cell, cfg.model.readout, bundle.constraint_hash, bundle.checkpoint_epoch, 'unsupported_topology', reason=str(ue))
         load_res = model.load_state_dict(bundle.state_dict, strict=strict_load)
         model.eval()
         model.to(device)
@@ -41,9 +43,9 @@ def restore_model_from_bundle(bundle, *, device: str = "cpu", strict_load: bool 
             readout_spec=cfg.model.readout,
             constraint_hash=bundle.constraint_hash,
             checkpoint_epoch=bundle.checkpoint_epoch,
-            restore_status="ok",
+            restore_status='ok',
             missing_keys=list(load_res.missing_keys),
             unexpected_keys=list(load_res.unexpected_keys),
         )
     except Exception as exc:
-        return ModelRestoreResult(None, None, None, None, None, bundle.constraint_hash, bundle.checkpoint_epoch, "failure", reason=str(exc))
+        return ModelRestoreResult(None, None, None, None, None, bundle.constraint_hash, bundle.checkpoint_epoch, 'model_restore_failed', reason=str(exc))
