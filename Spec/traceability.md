@@ -1,17 +1,11 @@
 # Traceability
 
-| Requirement area | Current evidence |
-|---|---|
-| Current package root | `src/psd_snn/` |
-| CLI separation | `src/psd_snn/cli/` |
-| MLP topology/cell separation | `src/psd_snn/models/mlp/`, `src/psd_snn/models/cells/` |
-| Scenario constraints | `src/psd_snn/models/constraints/`, config validation |
-| Trace contract | `analysis/trace`, `analysis/signal_map` |
-| PSD representatives | `analysis/signal` |
-| Fixed-reference PCA | `analysis/signal/pca_basis_store.py` |
-| 2D FFT | `analysis/signal/fft2d.py`, `cli/analyze_fft2d.py` |
-| Artifact identity and distance | `artifacts/identity.py`, `artifacts/distance_writer.py` |
-| Examples | `examples/` |
-| Acceptance tests | `tests/` |
+이 문서는 theory/implementation 문서와 현재 코드의 연결을 요약한다.
 
-This file is a coverage map, not a substitute for tests.
+- trace와 SignalMap: `src/psd_snn/analysis/trace`, `src/psd_snn/analysis/signal_map`.
+- PSD/PCA/2D FFT: `src/psd_snn/analysis/signal`.
+- probe family: `src/psd_snn/analysis/probe`, `src/psd_snn/analysis/common/probe_orchestrator.py`.
+- artifacts: `src/psd_snn/artifacts`.
+- CLI: `src/psd_snn/cli`.
+
+상세 구현 evidence는 tests와 completion report를 함께 본다.

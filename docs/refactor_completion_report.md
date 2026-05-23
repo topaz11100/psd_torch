@@ -1,37 +1,33 @@
-# Refactor Completion Report
+# 리팩터링 완료 보고서
 
-## Status
+## 현재 상태
 
-The analysis-core refactor is ready after documentation cleanup. The current code path is centered on `src/psd_snn`, with canonical examples under `examples/` and current specifications under `Spec/`.
+분석 코어 phase는 완료 판정 가능한 상태다. 현재 공식 구현은 `src/psd_snn`이며, 문서와 examples도 이 구조를 기준으로 정리되어 있다.
 
-## Completed areas
+## 완료된 영역
 
-- Spiking cell path for IF, LIF, and RF within the MLP topology.
-- Spike-only recurrent MLP hidden blocks.
-- Scenario constraints: `none`, `clip`, `structure`, and `clipstructure`.
-- Trace collection and `S,R,T` signal map conversion.
-- PSD representatives: mean, median, row-preserving element PSD, and PCA.
-- Fixed-reference PCA basis fit/apply, basis tensor artifact, and `pca_basis_id` consistency.
-- 2D FFT as an independent analysis method with `spectral_matrix_2d` artifacts.
-- Strict spectral distance compatibility for exact/user-bin axes and PCA basis identity.
-- Checkpoint-mode `analyze_signal` and `analyze_fft2d` smoke flows.
-- Trace tensor chunk writing and manifest outputs.
-- Artifact reader and basic plotting CLI.
-- Minimum synthetic training/checkpoint/analyze smoke path.
-- Canonical examples and runnable config templates.
+- IF/LIF/RF cell과 MLP topology 분리.
+- spike-only SRNN recurrence.
+- `none`, `clip`, `structure`, `clipstructure` scenario.
+- raw trace `B,T,*`와 SignalMap `S,R,T` 변환.
+- PSD 대표화 `mean`, `median`, `element_psd`, `pca`.
+- fixed-reference PCA basis fit/apply와 basis id 비교 규칙.
+- 2D FFT 독립 분석과 `spectral_matrix_2d` artifact.
+- strict spectral distance compatibility.
+- checkpoint-mode `analyze_signal`, `analyze_fft2d` smoke 경로.
+- trace `.pt` chunk와 manifest.
+- artifact reader와 기본 plotting CLI.
+- synthetic training/checkpoint/analyze smoke.
+- canonical examples와 config template.
 
-## Remaining future work
+## 남은 future work
 
-- Real dataset ingestion and preprocessing integration.
-- Full launch packaging for multi-run experiment management.
-- Publication-style figure rendering.
-- Larger-scale training and scheduler utilities.
-- Additional paper-model fidelity work beyond current fixed-topology smoke contracts.
+- 실제 dataset ingest/preprocessing.
+- multi-run launch packaging.
+- publication-ready plotting style.
+- 대규모 training scheduler.
+- fixed topology의 논문 원형 충실도 추가 확장.
 
-## Archive policy
+## Archive 정책
 
-`old/`, `Origin/`, `origin/`, and `references/` remain preserved as reference material. Current docs should not instruct users to run archive code as the active pipeline.
-
-## Merge readiness
-
-The code has no known merge blocker from the latest audit. The remaining blocker was documentation drift: stale current docs described old root launchers and old CSV categories. This patch replaces those stale docs with current theory/implementation specs and removes obsolete current-layer files.
+`old/`, `Origin/`, `origin/`, `references/`는 보존 자료다. 현재 문서는 archive 코드를 active pipeline으로 안내하지 않는다.

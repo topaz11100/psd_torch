@@ -1,25 +1,13 @@
-# CLI Contract
+# CLI contract
 
-## `train`
+공식 CLI는 package module로 실행한다.
 
-Creates a minimum synthetic checkpoint for smoke and compatibility tests. It stores state dictionary and metadata, not a pickled model object.
+```bash
+PYTHONPATH=src python -m psd_snn.cli.train --help
+PYTHONPATH=src python -m psd_snn.cli.analyze_signal --help
+PYTHONPATH=src python -m psd_snn.cli.analyze_fft2d --help
+PYTHONPATH=src python -m psd_snn.cli.analyze_dynamics --help
+PYTHONPATH=src python -m psd_snn.cli.plot_artifacts --help
+```
 
-## `analyze_signal`
-
-Runs PSD representatives from synthetic traces or checkpoint/probe mode. Supports mean, median, element PSD, PCA, fixed-reference PCA, trace saving, and summary/manifest writing.
-
-## `analyze_fft2d`
-
-Runs independent 2D FFT analysis from synthetic traces or checkpoint/probe mode. Produces `spectral_matrix_2d` and row/column axis sidecars.
-
-## `analyze_dynamics`
-
-Reports parameter/state statistics where implemented. Its CLI help must behave like a normal CLI help command.
-
-## `plot_artifacts`
-
-Reads artifact outputs and renders basic plots. Plotting reads artifacts, not training state.
-
-## Config and override policy
-
-Config files provide the main contract. CLI flags may override fields where implemented, but the effective config must still satisfy validation.
+`analyze_signal`은 PSD/PCA/element PSD를 다룬다. `analyze_fft2d`는 독립 2D FFT 분석이다. `plot_artifacts`는 artifact reader 기반 rendering만 수행한다.

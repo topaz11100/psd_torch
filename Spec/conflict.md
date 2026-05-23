@@ -1,20 +1,12 @@
-# Known Conflicts and Resolutions
+# Conflict log
 
-## Resolved: old root entrypoints vs current package CLI
+현재 알려진 설계 충돌은 없다.
 
-Current resolution: use `src/psd_snn/cli` and `examples/bash`. Old root launchers are removed from the current runnable layer.
+## 의도적 비범위
 
-## Resolved: stale CSV category documents vs current artifact types
+- 실제 dataset ingest/preprocessing.
+- 대규모 training launcher.
+- 출판용 figure style refinement.
+- archive/reference 코드의 current runtime 복구.
 
-Current resolution: current artifact contracts are documented in `Spec/theory/10_artifacts_distance_and_manifests.md` and `Spec/implementation/05_artifact_writer_reader_plotting.md`.
-
-## Resolved: legacy theory text vs current implementation
-
-Current resolution: old theory was used as reference only. PSD-first analysis, dense SNN separation, LIF/RF dynamics, readout separation, and fixed-topology separation were retained. Removed experiment-family text was not restored as current spec.
-
-## Open future work
-
-- Real dataset integration.
-- Large-scale launcher packaging.
-- Paper-style plotting refinement.
-- Deeper fidelity work for paper model families beyond current smoke coverage.
+새 충돌이 생기면 이 문서에 기록한 뒤 code/spec 중 어느 쪽을 수정할지 결정한다.

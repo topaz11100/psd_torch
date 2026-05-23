@@ -1,38 +1,14 @@
-# Config Contract
+# 설정 contract
 
-## Core dataclasses
+현재 설정은 dataclass 기반이다. 핵심 객체는 `ExperimentConfig`, `ModelSpec`, `TopologySpec`, `CellSpec`, `ReadoutSpec`, `ConstraintSpec`, `ProbeSpec`, `SignalAnalysisSpec`이다.
 
-The current config contract is defined in `src/psd_snn/config/specs.py`.
+## validation 원칙
 
-Key objects:
+- `mlp_stack`은 hidden widths가 필요하다.
+- fixed topology는 MLP cell replacement 대상이 아니다.
+- canonical scenario는 `none`, `clip`, `structure`, `clipstructure`다.
+- probe family는 `balanced_global`, `distributed_set`, `label_set`, `label_single`만 허용한다.
+- spectral axis는 `exact` 또는 `userbin`이다.
+- distance metric은 `centered_l2`, `diff_l2`만 허용한다.
 
-- `ExperimentConfig`
-- `ModelSpec`
-- `TopologySpec`
-- `CellSpec`
-- `ReadoutSpec`
-- `ConstraintSpec`
-- `ProbeSpec`
-- `SignalAnalysisSpec`
-- `PSDAnalysisSpec`
-- `FFT2DAnalysisSpec`
-- `TraceSaveSpec`
-
-## Topology and cell validation
-
-- `mlp_stack` uses `CellSpec`.
-- Fixed topologies are selected by topology kind and are not cell replacements.
-- `if`, `lif`, and `rf` are cell kinds.
-- Scenario constraints apply only to MLP hidden layers in the current phase.
-
-## Spectral validation
-
-- Spectral axis is `exact` or `userbin`.
-- User-bin reducer is `mean` or `median`.
-- Distance metrics are `centered_l2` and `diff_l2`.
-- PCA fixed-reference mode requires reference metadata.
-- 2D FFT row-axis binning requires meaningful row-axis semantics.
-
-## Trace validation
-
-`uint8` trace storage is valid only for spike-like series. Non-spike traces use floating dtypes.
+잘못된 cell/bounds 조합은 validator에서 차단한다.

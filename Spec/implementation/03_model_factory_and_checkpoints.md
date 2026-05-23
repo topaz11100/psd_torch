@@ -1,29 +1,7 @@
-# Model Factory and Checkpoints
+# Model factory와 checkpoint
 
-## Model factory
+`build_model`은 topology kind를 기준으로 MLP와 fixed topology를 분리한다. MLP는 `CellSpec`을 사용하고 fixed topology는 독립 factory를 사용한다.
 
-`src/psd_snn/models/factory.py` dispatches model creation.
+Checkpoint payload는 model object pickle이 아니라 state dict와 metadata 중심이다. metadata에는 topology, cell, readout, constraint, checkpoint epoch, hash가 포함된다.
 
-- `mlp_stack`: MLP builder with IF/LIF/RF cell selection.
-- fixed topology kinds: fixed factory path.
-
-## Checkpoint payload
-
-Checkpoint payloads contain:
-
-- `state_dict`
-- sanitized config or model metadata
-- checkpoint epoch
-- run/checkpoint metadata where available
-
-Model object pickle storage is not the current contract.
-
-## Restore policy
-
-Restore loads the state dictionary, rebuilds the model from metadata, loads weights, applies evaluation mode, and moves the model to the requested device.
-
-Unsupported topology is a status/reason outcome, not a silent skip.
-
-## Hashes
-
-`config_hash` and `constraint_hash` are permitted deterministic identifiers. Current artifacts do not require a schema key.
+Restore 실패나 unsupported topology는 status/reason으로 표현되어야 한다.

@@ -1,35 +1,33 @@
-# Current Documentation Inventory
+# 현재 문서 인벤토리
 
-This file records the current documentation map after the PSD/SNN refactor. It is not a legacy entrypoint list.
+이 파일은 리팩터링 이후 현재 유효한 문서 지도를 기록한다. 과거 entrypoint 목록이 아니라 현재 `src/psd_snn` 기준 문서 index다.
 
-## Authoritative current docs
+## 현재 authoritative 문서
 
-| Path | Role |
+| 경로 | 역할 |
 |---|---|
-| `README.md` | Repository overview and current CLI entrypoints |
-| `Spec/README.md` | Current specification index |
-| `Spec/theory/` | Mathematical and conceptual definitions |
-| `Spec/implementation/` | Code-path and artifact contracts |
-| `Spec/traceability.md` | Spec-to-code coverage map |
-| `Spec/conflict.md` | Known conflicts or intentionally unresolved items |
-| `examples/README.md` | User-facing examples and runnable config guide |
-| `docs/final_audit_report.md` | Last final-audit report |
-| `docs/refactor_completion_report.md` | Completion boundary and remaining future work |
+| `README.md` | 저장소 개요와 공식 CLI 안내 |
+| `Spec/README.md` | 현재 theory/implementation 명세 index |
+| `Spec/theory/` | 수학적 정의, 대상 객체, 분석 해설 |
+| `Spec/implementation/` | 코드 경로, 설정, artifact, CLI contract |
+| `Spec/traceability.md` | 명세와 구현 evidence 연결 |
+| `Spec/conflict.md` | 현재 알려진 충돌과 비범위 항목 |
+| `examples/README.md` | 사용자 실행 예시와 config template 안내 |
+| `docs/final_audit_report.md` | 최근 최종 audit 결과 |
+| `docs/refactor_completion_report.md` | 완료 경계와 future work |
 
-## Current runnable layer
+## 현재 실행 계층
 
-| Area | Current path |
+| 영역 | 현재 경로 |
 |---|---|
 | Python package | `src/psd_snn/` |
-| CLI modules | `src/psd_snn/cli/` |
-| Runnable examples | `examples/bash/` |
-| Runnable JSON configs | `examples/configs/runnable/` |
-| Commented templates | `examples/configs/commented/` |
+| CLI module | `src/psd_snn/cli/` |
+| Bash examples | `examples/bash/` |
+| 실행형 JSON config | `examples/configs/runnable/` |
+| 주석형 YAML template | `examples/configs/commented/` |
 | Tests | `tests/` |
 
-## Archive/reference material
-
-The following directories are read-only historical/reference material:
+## Archive/reference
 
 ```text
 old/
@@ -38,8 +36,4 @@ origin/
 references/
 ```
 
-They are useful for understanding source provenance, but they are not current executable contracts.
-
-## Current cleanup boundary
-
-Legacy root shell launchers and stale implementation spec files were removed from the current contract. If historical copies are needed, recover them from Git history or archive bundles rather than reintroducing them into the current root execution layer.
+위 경로는 provenance와 비교를 위한 보존 자료다. 현재 실행 계약이나 사용자-facing 예시는 아니다.

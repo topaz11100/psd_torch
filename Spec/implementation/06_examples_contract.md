@@ -1,29 +1,9 @@
-# Examples Contract
+# Examples contract
 
-## Canonical examples
+공식 예시는 `examples/` 아래에 있다.
 
-User-facing workflows live under:
+- `examples/bash/`: 실행형 shell workflow.
+- `examples/configs/commented/`: 주석형 YAML template.
+- `examples/configs/runnable/`: parse 가능한 JSON config.
 
-```text
-examples/bash/
-examples/configs/commented/
-examples/configs/runnable/
-```
-
-## Bash scripts
-
-Example shell scripts must:
-
-- use `python -m psd_snn.cli.*`,
-- set `PYTHONPATH=src`,
-- use smoke-friendly defaults,
-- avoid external dataset download,
-- document arguments and accepted values.
-
-## Config templates
-
-Commented YAML templates are explanatory. Runnable JSON files are parser/smoke inputs.
-
-## Archive boundary
-
-Historical root launchers are not current examples. Archive/reference directories are read-only context.
+root-level 과거 launcher는 current example layer가 아니다.
