@@ -5,6 +5,7 @@ import torch
 from psd_snn.analysis.signal_map.emitter import bt_to_srt
 from psd_snn.analysis.spectral.accumulator import PSDAccumulator
 from psd_snn.analysis.signal.fft2d import fft2d_exact, fft2d_userbin
+from psd_snn.analysis.signal.pca_basis_store import PCABasisStore, PCABasisKey, PCAFitRequest, PCAApplyRequest
 
 @dataclass
 class SignalMapRecord:
@@ -40,6 +41,7 @@ class SignalAnalysisRunner:
     def __init__(self, spec):
         self.spec = spec
         self.results = []
+        self.pca_basis_store = PCABasisStore(getattr(getattr(spec, "artifact", None), "output_dir", None))
 
     def update_signal_maps(self, map_records: list[SignalMapRecord]):
         ps = self.spec.psd
@@ -69,22 +71,29 @@ class SignalAnalysisRunner:
                     self.results.append({'type':'spectral_matrix_1d','representative':'element_psd','matrix':mat.tolist(),'freq':freq,'spectral_axis':'exact','meta':rec.metadata})
             elif method == 'pca':
                 k = ps.representative.pca.n_components
-                x = maps.permute(0,2,1).reshape(-1, maps.shape[1])  # (S*T,R)
-                mu = x.mean(0, keepdim=True)
-                xc = x - mu if ps.representative.pca.center else x
-                _, _, v = torch.linalg.svd(xc, full_matrices=False)
-                w = v[:k].T
-                # sign convention
-                for ci in range(w.shape[1]):
-                    idx = torch.argmax(torch.abs(w[:,ci]))
-                    if w[idx,ci] < 0: w[:,ci] *= -1
-                basis_id = _basis_id(w, mu)
-                y = ((maps.permute(0,2,1) - mu) @ w).permute(0,2,1)  # S,K,T
-                pk = _to_power(y, ps.centering, ps.window).mean(dim=1)
-                acc = PSDAccumulator(axis_policy=ps.spectral_axis, userbin_edges=ps.userbin_edges, userbin_reducer=ps.userbin_reducer, allow_empty_bins=ps.allow_empty_bins, empty_bin_fill='nan' if ps.empty_bin_policy=='nan' else 'zero')
-                acc.update(freq, pk.tolist())
-                self.results.append({'type':'spectral_curve','representative':'pca','pca_basis_id':basis_id,'n_components':k,**acc.finalize(to_db=(ps.scale_outputs in {'db','both'})), 'meta':rec.metadata})
-                self.results.append({'type':'pca_basis','pca_basis_id':basis_id,'basis':w.tolist(),'mean':mu.squeeze(0).tolist()})
+                pca = ps.representative.pca
+                md = rec.metadata
+                key = PCABasisKey(reference_checkpoint_epoch=pca.reference_checkpoint, reference_checkpoint_id=md.get('reference_checkpoint_id'), reference_split=md.get('reference_split', md.get('split','unknown')), reference_scope=md.get('reference_scope', md.get('scope','unknown')), reference_probe_family=md.get('reference_probe_family', md.get('probe_family','unknown')), layer_index=int(md.get('layer_index',0)), layer_name=str(md.get('layer_name','unknown')), signal_kind=str(md.get('signal_kind','hidden')), series=str(md.get('series','spike')), n_components=k, row_count=int(maps.shape[1]), centering=bool(pca.center))
+                if pca.basis_mode == 'fixed_reference':
+                    y, basis = self.pca_basis_store.apply(PCAApplyRequest(maps=maps, key=key))
+                    basis_id = basis.basis_id
+                else:
+                    basis = self.pca_basis_store.fit(PCAFitRequest(maps=maps, key=key, created_from=md))
+                    self.pca_basis_store.save_tensor_artifact(basis)
+                    basis_id = basis.basis_id
+                    y = ((maps.permute(0,2,1) - basis.mean) @ basis.components).permute(0,2,1)
+                pk = _to_power(y, ps.centering, ps.window).mean(dim=0)  # K,F
+                if ps.spectral_axis == 'userbin':
+                    rows=[]
+                    for ci in range(pk.shape[0]):
+                        acc = PSDAccumulator(axis_policy='userbin', userbin_edges=ps.userbin_edges, userbin_reducer=ps.userbin_reducer, allow_empty_bins=ps.allow_empty_bins, empty_bin_fill='nan' if ps.empty_bin_policy=='nan' else 'zero')
+                        acc.update(freq, [pk[ci].tolist()])
+                        out = acc.finalize(to_db=(ps.scale_outputs in {'db','both'}))
+                        rows.append(out['power']); uf = out['freq']
+                    self.results.append({'type':'spectral_matrix_1d','representative':'pca','pca_basis_id':basis_id,'matrix':rows,'freq':uf,'spectral_axis':'userbin','meta':{**md,'pca_basis_mode':pca.basis_mode,'pca_reference_checkpoint_epoch':key.reference_checkpoint_epoch,'pca_reference_split':key.reference_split,'pca_reference_scope':key.reference_scope,'pca_reference_probe_family':key.reference_probe_family,'n_components':k,'sign_convention':key.sign_convention}})
+                else:
+                    self.results.append({'type':'spectral_matrix_1d','representative':'pca','pca_basis_id':basis_id,'matrix':pk.tolist(),'freq':freq,'spectral_axis':'exact','meta':{**md,'pca_basis_mode':pca.basis_mode,'pca_reference_checkpoint_epoch':key.reference_checkpoint_epoch,'pca_reference_split':key.reference_split,'pca_reference_scope':key.reference_scope,'pca_reference_probe_family':key.reference_probe_family,'n_components':k,'sign_convention':key.sign_convention}})
+                self.results.append({'type':'pca_basis','pca_basis_id':basis_id,'basis':basis.components.tolist(),'mean':basis.mean.squeeze(0).tolist(),'row_count':basis.row_count,'n_components':basis.n_components,'reference_checkpoint_epoch':key.reference_checkpoint_epoch,'reference_split':key.reference_split,'reference_scope':key.reference_scope,'reference_probe_family':key.reference_probe_family,'layer_index':key.layer_index,'layer_name':key.layer_name,'signal_kind':key.signal_kind,'series':key.series,'centering':key.centering,'sign_convention':key.sign_convention,'explained_variance':basis.explained_variance.tolist(),'explained_variance_ratio':basis.explained_variance_ratio.tolist(),'basis_artifact_path':basis.artifact_path,'meta':rec.metadata})
 
     def run_fft2d(self, map_records: list[SignalMapRecord]):
         f2=self.spec.fft2d

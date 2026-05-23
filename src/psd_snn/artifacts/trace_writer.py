@@ -15,7 +15,7 @@ class TraceArtifactWriter:
                 ch = x[s0:s0+chunk_size]
                 p = self.out / f"trace_{r.layer_index}_{r.series}_{s0}.pt"
                 torch.save(ch.to(torch.uint8), p)
-                self.rows.append({'artifact_type':'trace_manifest','layer_index':r.layer_index,'layer_name':r.layer_name,'series':r.series,'path':str(p),'shape':str(tuple(ch.shape)),'dtype':'uint8','sample_start':s0,'sample_count':ch.shape[0],'time_length':ch.shape[1]})
+                self.rows.append({'artifact_type':'trace_manifest','run_id':getattr(r,'run_id',None),'checkpoint_epoch':getattr(r,'checkpoint_epoch',None),'split':getattr(r,'split',None),'scope':getattr(r,'scope',None),'probe_family':getattr(r,'probe_family',None),'probe_manifest_id':getattr(r,'probe_manifest_id',None),'exclusion_family':getattr(r,'exclusion_family',None),'layer_index':r.layer_index,'layer_name':r.layer_name,'series':r.series,'path':str(p),'shape':str(tuple(ch.shape)),'dtype':'uint8','layout':'B,T,*','compression':'none','sample_start':s0,'sample_count':ch.shape[0],'time_length':ch.shape[1]})
     def write_manifest(self):
         mp = self.out/'trace_manifest.csv'
         if not self.rows: return mp
