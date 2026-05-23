@@ -2,26 +2,6 @@ from __future__ import annotations
 from pathlib import Path
 import csv
 
-
-def matrix_distance(a, b, metric='centered_l2', diff_axis='time_frequency'):
-    import math
-    import torch
-    A=torch.tensor(a); B=torch.tensor(b)
-    if metric=='centered_l2':
-        da=(A-A.mean()).reshape(-1); db=(B-B.mean()).reshape(-1)
-        return float(torch.sqrt(((da-db)**2).sum()))
-    if metric=='diff_l2':
-        if diff_axis=='time_frequency':
-            da=A[:,1:]-A[:,:-1]; db=B[:,1:]-B[:,:-1]
-        elif diff_axis=='row_frequency':
-            da=A[1:,:]-A[:-1,:]; db=B[1:,:]-B[:-1,:]
-        else:
-            da=torch.cat([(A[:,1:]-A[:,:-1]).reshape(-1),(A[1:,:]-A[:-1,:]).reshape(-1)])
-            db=torch.cat([(B[:,1:]-B[:,:-1]).reshape(-1),(B[1:,:]-B[:-1,:]).reshape(-1)])
-            return float(torch.sqrt(((da-db)**2).sum()))
-        return float(torch.sqrt(((da-db)**2).sum()))
-    raise ValueError('unsupported metric')
-
 class SummaryWriter:
     def __init__(self, out_dir: str):
         self.out = Path(out_dir); self.out.mkdir(parents=True, exist_ok=True)
@@ -37,13 +17,15 @@ class SummaryWriter:
             common={'run_id':meta.get('run_id'),'checkpoint_epoch':meta.get('checkpoint_epoch'),'split':meta.get('split'),'scope':meta.get('scope'),'probe_family':meta.get('probe_family'),'layer_name':meta.get('layer_name'),'layer_index':meta.get('layer_index'),'signal_kind':meta.get('signal_kind'),'series':meta.get('series'),'status':'ok','reason':None}
             if r['type']=='spectral_curve':
                 for i,(f,v) in enumerate(zip(r['freq'], r['power'])):
-                    manifest.append(self._analysis_manifest_row({**r,'analysis_method':'psd'})); curve.append({'artifact_type':'spectral_curve','representative':r['representative'],'pca_basis_id':r.get('pca_basis_id'),'frequency_index':i,'frequency':f,'value':v,'spectral_axis':r['axis_policy'], **common})
+                    manifest.append(self._analysis_manifest_row({**r,'analysis_method':'psd'})); curve.append({'artifact_type':'spectral_curve','representative':r['representative'],'component_id':r.get('component_id'),'pca_basis_id':r.get('pca_basis_id'),'frequency_index':i,'frequency':f,'value':v,'spectral_axis':r['axis_policy'], **common})
             elif r['type']=='spectral_matrix_1d':
                 for ri,row in enumerate(r['matrix']):
                     for fi,v in enumerate(row):
-                        manifest.append(self._analysis_manifest_row({**r,'analysis_method':'psd'})); mat.append({'artifact_type':'spectral_matrix_1d','representative':r['representative'],'row_index':ri,'frequency_index':fi,'value':v,'spectral_axis':r['spectral_axis'], **common})
+                        manifest.append(self._analysis_manifest_row({**r,'analysis_method':'psd'})); mat.append({'artifact_type':'spectral_matrix_1d','representative':r['representative'],'component_id':ri if r['representative']=='pca' else None,'pca_basis_id':r.get('pca_basis_id'),'row_index':ri,'frequency_index':fi,'value':v,'spectral_axis':r['spectral_axis'], **common})
             elif r['type']=='pca_basis':
-                pca.append({'artifact_type':'pca_basis','pca_basis_id':r['pca_basis_id'],'n_rows':len(r['basis']),'n_cols':len(r['basis'][0]) if r['basis'] else 0})
+                ev=r.get('explained_variance',[]); evr=r.get('explained_variance_ratio',[])
+                for i in range(len(ev)):
+                    pca.append({'artifact_type':'pca_basis','run_id':meta.get('run_id'),'pca_basis_id':r['pca_basis_id'],'reference_checkpoint_epoch':r.get('reference_checkpoint_epoch'),'reference_split':r.get('reference_split'),'reference_scope':r.get('reference_scope'),'reference_probe_family':r.get('reference_probe_family'),'layer_index':r.get('layer_index'),'layer_name':r.get('layer_name'),'signal_kind':r.get('signal_kind'),'series':r.get('series'),'component_id':i,'explained_variance':ev[i],'explained_variance_ratio':evr[i] if i < len(evr) else None,'basis_artifact_path':r.get('basis_artifact_path')})
             elif r['type']=='spectral_matrix_2d':
                 matrix_id=r.get('matrix_id','m0')
                 for ri,row in enumerate(r['matrix']):

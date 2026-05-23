@@ -19,14 +19,14 @@ def _records_checkpoint(args, cfg):
     x = torch.randn(16, 32, cfg.model.topology.input_dim)
     y = torch.tensor([i % cfg.model.topology.output_dim for i in range(16)])
     dataset = {'test_inputs': x, 'test_labels': y.tolist()}
-    batches = build_probe_batches(dataset, ProbeRequest(split='test', probe_family=args.probe_family, sample_count=args.sample_count, seed=0), batch_size=args.batch_size)
+    batches = build_probe_batches(dataset, ProbeRequest(split='test', probe_family=args.probe_family, sample_count=args.sample_count, seed=0, exclusion_family=args.exclusion_family, exclusion_sample_count=args.exclusion_sample_count, exclusion_seed=args.exclusion_seed), batch_size=args.batch_size)
     out=[]; ta=TraceAdapter(restored.model)
     for b in batches:
         _, traces = ta.run_with_trace(b.inputs, probe_family=b.probe_family, label='na')
         for tr in traces:
             if tr.series != 'spike':
                 continue
-            out.append(SignalMapRecord(bt_to_srt(tr.tensor), {'run_id':args.run_id,'checkpoint_epoch':bundle.checkpoint_epoch,'split':b.split,'scope':b.scope,'probe_family':b.probe_family,'series':tr.series,'layer_name':tr.layer_name}))
+            out.append(SignalMapRecord(bt_to_srt(tr.tensor), {'run_id':args.run_id,'checkpoint_epoch':bundle.checkpoint_epoch,'split':b.split,'scope':b.scope,'probe_family':b.probe_family,'probe_manifest_id':b.probe_manifest_id,'exclusion_family':(b.probe_metadata or {}).get('exclusion_family'),'exclusion_scope':(b.probe_metadata or {}).get('exclusion_scope'),'series':tr.series,'layer_name':tr.layer_name}))
     return out
 
 
@@ -36,6 +36,9 @@ def main(argv=None):
     ap.add_argument('--mode', choices=['synthetic', 'checkpoint'], default='synthetic')
     ap.add_argument('--checkpoint')
     ap.add_argument('--probe_family', default='balanced_global')
+    ap.add_argument('--exclusion_family', default=None)
+    ap.add_argument('--exclusion_sample_count', type=int, default=None)
+    ap.add_argument('--exclusion_seed', type=int, default=None)
     ap.add_argument('--sample_count', type=int, default=8)
     ap.add_argument('--batch_size', type=int, default=4)
     ap.add_argument('--device', default='cpu')
