@@ -1,0 +1,1 @@
+{"model":{"topology":{"kind":"mlp_stack","input_dim":4,"hidden_widths":[6],"output_dim":2},"cell":{"kind":"rf","recurrent":true},"constraints":{"scenario":{"scenario":"clipstructure"},"structure":{"enabled":true,"group_count":2},"clip":{"enabled":true,"rf_frequency_bounds":[[0.1,2.0]],"rf_damping_bounds":[[0.05,0.5]]}}}}

@@ -1,0 +1,1 @@
+{"model":{"topology":{"kind":"mlp_stack","input_dim":4,"hidden_widths":[6],"output_dim":2},"cell":{"kind":"if","threshold_mode":"trainable"},"constraints":{"scenario":{"scenario":"clip"},"structure":{"enabled":false},"clip":{"enabled":true,"threshold_bounds":[[0.5,1.5]]}}}}
