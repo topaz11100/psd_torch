@@ -1,0 +1,1 @@
+{"model":{"topology":{"kind":"mlp_stack","input_dim":8,"hidden_widths":[16],"output_dim":3},"cell":{"kind":"lif"},"readout":{"kind":"final_mem"}},"signal_analysis":{"psd":{"representative":{"method":"mean","pca":{"n_components":2,"basis_mode":"fit_per_checkpoint"}},"spectral_axis":"exact"},"artifact":{"output_dir":".example_out/sig_mean"}}}

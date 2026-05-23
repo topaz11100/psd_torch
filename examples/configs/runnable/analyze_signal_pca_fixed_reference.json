@@ -1,0 +1,1 @@
+{"model":{"topology":{"kind":"mlp_stack","input_dim":8,"hidden_widths":[16],"output_dim":3},"cell":{"kind":"lif"},"readout":{"kind":"final_mem"}},"signal_analysis":{"psd":{"representative":{"method":"pca","pca":{"n_components":2,"basis_mode":"fixed_reference","reference_checkpoint":1}},"spectral_axis":"exact"},"artifact":{"output_dir":".example_out/sig_pca_ref"}}}
