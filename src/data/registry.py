@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import os
 import warnings
 from pathlib import Path
@@ -137,6 +137,48 @@ def dataset_for_view(dataset: PreparedDatasetProtocol, view_name: str) -> Prepar
     return ViewDataset(dataset, view_name)
 
 
+def _select_static_image_training_view(manifest: Mapping[str, Any], *, model_family: str, default_view: str) -> str:
+    """Select the runtime training view for static-image CNN vs dense model families."""
+
+    psd_axis_kind = str(manifest.get('psd_axis_kind', ''))
+    available = tuple(str(v) for v in manifest.get('available_views', ()))
+    if psd_axis_kind != 'static_repeat':
+        return str(default_view)
+    family = str(model_family)
+    if family in {'cnn_lif', 'cnn_rf', 'cnn'}:
+        for candidate in (manifest.get('cnn_training_view_name'), 'model_input_cnn', 'cnn_input', 'model_input'):
+            if isinstance(candidate, str) and (not available or candidate in available):
+                return candidate
+        return str(default_view)
+    for candidate in (manifest.get('flatten_training_view_name'), 'model_input_flatten', 'sequence_input', 'flatten_input'):
+        if isinstance(candidate, str) and (not available or candidate in available):
+            return candidate
+    return str(default_view)
+
+
+def select_training_view_for_model(bundle: DatasetBundle, *, model_family: str) -> DatasetBundle:
+    """Return a bundle whose primary split view matches the model family.
+
+    Static image datasets may physically store both CNN-shaped and flattened
+    split payloads. CNN families consume the CNN view; dense LIF/RF families
+    consume the flattened time-major view. Other datasets keep the manifest
+    default training view unchanged.
+    """
+
+    manifest = load_json(bundle.manifest_path)
+    if not isinstance(manifest, dict):
+        raise ValueError(f'Prepared manifest must be a JSON object: {bundle.manifest_path}')
+    selected = _select_static_image_training_view(manifest, model_family=str(model_family), default_view=bundle.training_view_name)
+    if selected == bundle.training_view_name:
+        return bundle
+    return replace(
+        bundle,
+        train_dataset=dataset_for_view(bundle.train_dataset, selected),
+        test_dataset=dataset_for_view(bundle.test_dataset, selected),
+        training_view_name=selected,
+    )
+
+
 def resolve_dataset_bundle(
     dataset_name: str,
     *,
@@ -188,6 +230,27 @@ def resolve_dataset_bundle(
             )
         resolved_paths[split_name] = path
 
+    files_by_view_raw = manifest.get('files_by_view', {})
+    files_by_view = files_by_view_raw if isinstance(files_by_view_raw, Mapping) else {}
+    view_paths: dict[str, dict[str, Path]] = {}
+    for view_name, split_map in files_by_view.items():
+        if not isinstance(split_map, Mapping):
+            continue
+        resolved_split_paths: dict[str, Path] = {}
+        for split_name in ('train', 'test'):
+            relpath = split_map.get(split_name)
+            if not isinstance(relpath, str):
+                continue
+            path = (dataset_root / relpath).resolve()
+            if not path.exists():
+                raise FileNotFoundError(
+                    f'Prepared manifest references missing {view_name}.{split_name} payload: {path}. '
+                    f'Manifest path: {manifest_path}.'
+                )
+            resolved_split_paths[split_name] = path
+        if set(resolved_split_paths) == {'train', 'test'}:
+            view_paths[str(view_name)] = resolved_split_paths
+
     training_view_name = str(manifest.get('training_view_name', spec.training_view_name))
     psd_view_name = str(manifest.get('psd_view_name', spec.psd_view_name))
     psd_axis_kind = str(manifest.get('psd_axis_kind', spec.psd_axis_kind))
@@ -200,6 +263,16 @@ def resolve_dataset_bundle(
         )
     train_records = load_single_structured_split(resolved_paths['train'], mmap_mode='r')
     test_records = load_single_structured_split(resolved_paths['test'], mmap_mode='r')
+    train_records_by_view = {
+        view_name: load_single_structured_split(paths['train'], mmap_mode='r')
+        for view_name, paths in view_paths.items()
+        if paths['train'] != resolved_paths['train']
+    }
+    test_records_by_view = {
+        view_name: load_single_structured_split(paths['test'], mmap_mode='r')
+        for view_name, paths in view_paths.items()
+        if paths['test'] != resolved_paths['test']
+    }
     shared_metadata = dict(manifest)
     train_dataset = PreparedStructuredSplitDataset(
         dataset_name=canonical,
@@ -208,6 +281,7 @@ def resolve_dataset_bundle(
         metadata={**shared_metadata, 'split': 'train', 'dataset_token': canonical},
         primary_view_name=training_view_name,
         max_samples=max_samples,
+        records_by_view=train_records_by_view,
     )
     test_dataset = PreparedStructuredSplitDataset(
         dataset_name=canonical,
@@ -216,6 +290,7 @@ def resolve_dataset_bundle(
         metadata={**shared_metadata, 'split': 'test', 'dataset_token': canonical},
         primary_view_name=training_view_name,
         max_samples=max_samples,
+        records_by_view=test_records_by_view,
     )
     sequence_length, input_dim = _sequence_shape_from_singlefile_manifest(manifest, canonical)
     class_label_values: set[int] = set()
@@ -411,4 +486,5 @@ __all__ = [
     'loader_runtime_policy',
     'make_loader',
     'resolve_dataset_bundle',
+    'select_training_view_for_model',
 ]

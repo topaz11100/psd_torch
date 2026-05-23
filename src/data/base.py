@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
 import numpy as np
 import torch
@@ -210,21 +210,29 @@ def _reconstruct_structured_view(
         raise KeyError(f'View {view!r} is unsupported for dataset {dataset!r}.')
 
     if dataset in {'mnist', 'cifar-10', 'cifar-100'}:
-        repeated = tensor.to(dtype=torch.float32)
-        if repeated.ndim != 4:
-            raise ValueError(f'{dataset} prepared samples must have shape (T,C,H,W), got {tuple(repeated.shape)}.')
-        first_frame = repeated[0].contiguous()
-        flatten_channel_major = first_frame.reshape(int(first_frame.shape[0]), -1).contiguous()
-        sequence_flatten = repeated.reshape(int(repeated.shape[0]), -1).contiguous()
-        if view == 'original_input':
-            return first_frame
-        if view in {'model_input', 'psd_input', 'image_psd_view'}:
-            return repeated.contiguous()
-        if view == 'sequence_input':
-            return sequence_flatten
-        if view == 'flatten_input':
-            return flatten_channel_major
-        raise KeyError(f'View {view!r} is unsupported for dataset {dataset!r}.')
+        value = tensor.to(dtype=torch.float32)
+        if value.ndim == 4:
+            repeated = value
+            first_frame = repeated[0].contiguous()
+            flatten_channel_major = first_frame.reshape(int(first_frame.shape[0]), -1).contiguous()
+            sequence_flatten = repeated.reshape(int(repeated.shape[0]), -1).contiguous()
+            if view == 'original_input':
+                return first_frame
+            if view in {'model_input', 'model_input_cnn', 'cnn_input', 'psd_input', 'image_psd_view'}:
+                return repeated.contiguous()
+            if view in {'sequence_input', 'model_input_flatten'}:
+                return sequence_flatten
+            if view == 'flatten_input':
+                return flatten_channel_major
+            raise KeyError(f'View {view!r} is unsupported for dataset {dataset!r}.')
+        if value.ndim == 2:
+            if view in {'model_input', 'model_input_flatten', 'flatten_input', 'sequence_input'}:
+                return value.contiguous()
+            raise ValueError(
+                f'{dataset} prepared flat samples have shape (T,F) and can only serve flatten views; '
+                f'view {view!r} requested shape {tuple(value.shape)}.'
+            )
+        raise ValueError(f'{dataset} prepared samples must have shape (T,C,H,W) or (T,F), got {tuple(value.shape)}.')
 
     if dataset in {'n-mnist', 'cifar10-dvs', 'dvs128-gesture'}:
         original = tensor.to(dtype=torch.float32)
@@ -257,12 +265,21 @@ class PreparedStructuredSplitDataset(Dataset[tuple[torch.Tensor, int]]):
         metadata: dict[str, Any],
         primary_view_name: str,
         max_samples: int | None = None,
+        records_by_view: Mapping[str, np.ndarray] | None = None,
     ) -> None:
         self.dataset_name = str(dataset_name)
         self.split_name = str(split_name)
         self.metadata = dict(metadata)
         self.primary_view_name = str(primary_view_name)
         self._records = records if max_samples is None else records[: int(max_samples)]
+        self._num_samples = int(self._records.shape[0])
+        raw_records_by_view = {} if records_by_view is None else dict(records_by_view)
+        self._records_by_view: dict[str, np.ndarray] = {}
+        for view_name, view_records in raw_records_by_view.items():
+            sliced = view_records if max_samples is None else view_records[: int(max_samples)]
+            self._records_by_view[str(view_name)] = sliced
+        for alias in ('model_input', 'model_input_cnn', 'cnn_input', 'psd_input', 'image_psd_view', 'original_input'):
+            self._records_by_view.setdefault(alias, self._records)
         self._num_samples = int(self._records.shape[0])
         if self._num_samples <= 0:
             raise ValueError('PreparedStructuredSplitDataset cannot represent an empty split.')
@@ -271,6 +288,16 @@ class PreparedStructuredSplitDataset(Dataset[tuple[torch.Tensor, int]]):
         self.labels = torch.as_tensor(label_array, dtype=torch.long).reshape(-1)
         self.targets = self.labels
         self.sample_indices = [int(v) for v in sample_index_array.reshape(-1).tolist()]
+        for view_name, view_records in self._records_by_view.items():
+            if int(view_records.shape[0]) != self._num_samples:
+                raise ValueError(
+                    f'Prepared view {view_name!r} length mismatch for {self.dataset_name}:{self.split_name}: '
+                    f'{int(view_records.shape[0])} vs {self._num_samples}.'
+                )
+            if 'label' in view_records.dtype.fields and not np.array_equal(np.array(view_records['label']), label_array):
+                raise ValueError(f'Prepared view {view_name!r} label array does not match the primary split payload.')
+            if 'sample_index' in view_records.dtype.fields and not np.array_equal(np.array(view_records['sample_index']), sample_index_array):
+                raise ValueError(f'Prepared view {view_name!r} sample_index array does not match the primary split payload.')
         self._sequence_input_rule = None if self.metadata.get('sequence_input_rule') is None else str(self.metadata.get('sequence_input_rule'))
         available = self.available_views()
         if self.primary_view_name not in available:
@@ -286,8 +313,9 @@ class PreparedStructuredSplitDataset(Dataset[tuple[torch.Tensor, int]]):
         return self._num_samples
 
     def _sample_view(self, index: int, view_name: str) -> torch.Tensor:
+        records = self._records_by_view.get(str(view_name), self._records)
         return _reconstruct_structured_view(
-            self._records['input'][int(index)],
+            records['input'][int(index)],
             dataset_name=self.dataset_name,
             view_name=view_name,
             sequence_input_rule=self._sequence_input_rule,
@@ -308,7 +336,9 @@ class PreparedStructuredSplitDataset(Dataset[tuple[torch.Tensor, int]]):
             return ('model_input', 'psd_input', 'model_input_psd_view', 'sequence_input')
         if self.dataset_name in {'mnist', 'cifar-10', 'cifar-100', 'n-mnist', 'cifar10-dvs', 'dvs128-gesture'}:
             if self.dataset_name in {'mnist', 'cifar-10', 'cifar-100'}:
-                return ('model_input', 'psd_input', 'image_psd_view', 'original_input', 'flatten_input', 'sequence_input')
+                declared = tuple(str(v) for v in self.metadata.get('available_views', ()))
+                defaults = ('model_input', 'model_input_cnn', 'cnn_input', 'model_input_flatten', 'psd_input', 'image_psd_view', 'original_input', 'flatten_input', 'sequence_input')
+                return tuple(dict.fromkeys((*declared, *defaults)))
             return ('model_input', 'psd_input', 'event_frame_psd_view', 'original_input', 'flatten_input', 'sequence_input')
         return (self.primary_view_name,)
 
@@ -332,6 +362,7 @@ class PreparedStructuredSplitDataset(Dataset[tuple[torch.Tensor, int]]):
             metadata=self.metadata,
             primary_view_name=view_name,
             max_samples=self._num_samples,
+            records_by_view=self._records_by_view,
         )
 
 

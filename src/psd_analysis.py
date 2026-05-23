@@ -14,7 +14,7 @@ import numpy as np
 import torch
 
 from src.data.base import canonicalize_model_input_batch
-from src.data.registry import dataset_for_view, make_loader, resolve_dataset_bundle
+from src.data.registry import dataset_for_view, make_loader, resolve_dataset_bundle, select_training_view_for_model
 from src.model.model_registry import ModelSpec, canonicalize_model_token
 from src.model.snn_builder import build_snn_classifier
 from src.readout.readout import build_readout
@@ -128,7 +128,13 @@ def _model_family(spec: ModelSpec) -> str:
     return str(spec.family)
 
 
-def _resolve_bundle(payload: Mapping[str, Any], *, cli_dataset: str, cli_prep_root: str):
+def _resolve_bundle(
+    payload: Mapping[str, Any],
+    *,
+    cli_dataset: str,
+    cli_prep_root: str,
+    model_spec: ModelSpec | None = None,
+):
     requested_dataset = str(cli_dataset)
     checkpoint_dataset = str(payload.get('dataset_token') or payload.get('training_args', {}).get('dataset') or '')
     if not checkpoint_dataset:
@@ -136,7 +142,15 @@ def _resolve_bundle(payload: Mapping[str, Any], *, cli_dataset: str, cli_prep_ro
     if checkpoint_dataset != requested_dataset:
         raise ValueError(f'--dataset {requested_dataset!r} does not match checkpoint dataset_token {checkpoint_dataset!r}.')
     prep_root = Path(cli_prep_root).expanduser().resolve()
-    return resolve_dataset_bundle(requested_dataset, prep_root=prep_root)
+    bundle = resolve_dataset_bundle(requested_dataset, prep_root=prep_root)
+    resolved_spec = model_spec
+    if resolved_spec is None:
+        token = str(payload.get('model_token') or payload.get('training_args', {}).get('model') or '')
+        if token:
+            resolved_spec = canonicalize_model_token(token)
+    if resolved_spec is not None:
+        bundle = select_training_view_for_model(bundle, model_family=resolved_spec.family)
+    return bundle
 
 
 def _manifest_dict(path: Path) -> dict[str, Any]:
@@ -1150,10 +1164,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         payload = _load_checkpoint(checkpoint_path, map_location='cpu')
         seed = int(args.seed if args.seed is not None else payload.get('seed', 0))
         _seed_everything(seed)
-        bundle = _resolve_bundle(payload, cli_dataset=args.dataset, cli_prep_root=args.prep_root)
+        model, _readout, model_spec, readout_mode = _build_model_from_checkpoint(payload, device=device)
+        bundle = _resolve_bundle(payload, cli_dataset=args.dataset, cli_prep_root=args.prep_root, model_spec=model_spec)
         manifest = _manifest_dict(bundle.manifest_path)
         _validate_axis_metadata(manifest, payload)
-        model, _readout, model_spec, readout_mode = _build_model_from_checkpoint(payload, device=device)
         prep_profile = str(manifest.get('prep_profile', manifest.get('psd_axis_kind', bundle.psd_axis_kind)))
         run_id = f'{bundle.dataset_name}_{model_spec.canonical_token}_{readout_mode}_analysis_seed{seed}'
         checkpoint_base = _checkpoint_common_base(payload=payload, checkpoint_path=checkpoint_path, model_spec=model_spec, readout_mode=readout_mode, run_id=run_id, prep_profile=prep_profile, seed=seed)

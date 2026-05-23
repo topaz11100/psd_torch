@@ -290,10 +290,20 @@ def _singlefile_storage_contract(dataset_token: str) -> _SingleFileStorageContra
         )
     if canonical in {'mnist', 'cifar-10', 'cifar-100'}:
         return _SingleFileStorageContract(
-            stored_view_name='model_input',
+            stored_view_name='model_input_cnn',
             training_view_name='model_input',
             psd_view_name=spec.psd_view_name,
-            available_views=('model_input', 'psd_input', spec.psd_view_name, 'original_input', 'flatten_input', 'sequence_input'),
+            available_views=(
+                'model_input',
+                'model_input_cnn',
+                'cnn_input',
+                'model_input_flatten',
+                'psd_input',
+                spec.psd_view_name,
+                'original_input',
+                'flatten_input',
+                'sequence_input',
+            ),
         )
     if canonical in {'n-mnist', 'cifar10-dvs', 'dvs128-gesture'}:
         return _SingleFileStorageContract(
@@ -506,6 +516,7 @@ def _write_streamed_structured_split(
     input_dtype: np.dtype,
     sample_iter: Any,
     max_samples: int | None,
+    file_stem: str | None = None,
 ) -> dict[str, Any]:
     """Write one split by consuming one already-preprocessed sample at a time."""
 
@@ -525,8 +536,9 @@ def _write_streamed_structured_split(
         ('label', np.int64),
         ('input', input_dtype, input_shape),
     ])
-    final_path = dataset_root / f'{split_name}.npy'
-    tmp_path = dataset_root / f'{split_name}.tmp.npy'
+    output_stem = str(split_name if file_stem is None else file_stem)
+    final_path = dataset_root / f'{output_stem}.npy'
+    tmp_path = dataset_root / f'{output_stem}.tmp.npy'
     written = 0
     try:
         writer = np.lib.format.open_memmap(tmp_path, mode='w+', dtype=record_dtype, shape=(int(total),))
@@ -615,6 +627,7 @@ def _save_streaming_manifest(
         psd_axis_kind=str(psd_axis_kind),
         training_view_name=contract.training_view_name,
         psd_view_name=contract.psd_view_name,
+        files={'train': str(split_infos['train']['path']), 'test': str(split_infos['test']['path'])},
         stored_view_name=contract.stored_view_name,
         stored_view_name_by_split={'train': contract.stored_view_name, 'test': contract.stored_view_name},
         available_views=list(contract.available_views),
@@ -667,6 +680,7 @@ def _iter_torchvision_stored_samples(
     *,
     dataset_token: str,
     permutation: torch.Tensor | None = None,
+    static_storage_view: str = 'cnn',
 ):
     """Yield one official stored sample at a time from a torchvision split."""
 
@@ -682,7 +696,13 @@ def _iter_torchvision_stored_samples(
             yield int(index), int(label), model_input
         elif canonical in {'mnist', 'cifar-10', 'cifar-100'}:
             repeated = np.repeat(array[None, ...], _STATIC_IMAGE_REPEAT_T, axis=0).astype(np.float32, copy=False)
-            yield int(index), int(label), repeated
+            storage_view = str(static_storage_view).strip().lower()
+            if storage_view in {'flatten', 'flat', 'model_input_flatten'}:
+                yield int(index), int(label), repeated.reshape(int(repeated.shape[0]), -1).astype(np.float32, copy=False)
+            elif storage_view in {'cnn', 'image', 'model_input_cnn'}:
+                yield int(index), int(label), repeated
+            else:
+                raise ValueError(f'Unsupported static_storage_view {static_storage_view!r}.')
         else:
             raise ValueError(f'Unsupported torchvision streaming dataset {dataset_token!r}.')
 
@@ -706,6 +726,7 @@ def _stream_write_mnist_family_bundle(
         overwrite=bool(overwrite),
         prep_profile_name=profile_name,
     )
+    contract = _singlefile_storage_contract(dataset_token)
     if dataset_token in {'s-mnist', 'ps-mnist'}:
         input_shape = (784, 1)
         psd_axis_kind = 'temporal'
@@ -717,32 +738,84 @@ def _stream_write_mnist_family_bundle(
             permutation = torch.randperm(input_shape[0], generator=generator)
             metadata_extra['permutation_seed'] = int(context.seed)
             metadata_extra['permutation'] = [int(v) for v in permutation.tolist()]
+        split_infos: dict[str, dict[str, Any]] = {}
+        for split_name, train_flag in tqdm((('train', True), ('test', False)), desc=f'{dataset_token}:splits', leave=False):
+            raw_dataset = datasets.MNIST(root=str(dataset_root), train=bool(train_flag), transform=transforms.ToTensor(), download=bool(context.download))
+            split_infos[split_name] = _write_streamed_structured_split(
+                dataset_token=dataset_token,
+                split_name=split_name,
+                dataset_root=out_dir,
+                total_count=len(raw_dataset),
+                input_shape=tuple(input_shape),
+                input_dtype=np.dtype(np.float32),
+                sample_iter=_iter_torchvision_stored_samples(raw_dataset, dataset_token=dataset_token, permutation=permutation),
+                max_samples=max_samples,
+            )
     else:
-        input_shape = (_STATIC_IMAGE_REPEAT_T, 1, 28, 28)
+        cnn_shape = (_STATIC_IMAGE_REPEAT_T, 1, 28, 28)
+        flat_shape = (_STATIC_IMAGE_REPEAT_T, 1 * 28 * 28)
         psd_axis_kind = 'static_repeat'
         dataset_root = context.raw_data_root / 'mnist'
-        permutation = None
+        split_infos = {}
+        flat_split_infos: dict[str, dict[str, Any]] = {}
+        for split_name, train_flag in tqdm((('train', True), ('test', False)), desc=f'{dataset_token}:splits', leave=False):
+            raw_dataset = datasets.MNIST(root=str(dataset_root), train=bool(train_flag), transform=transforms.ToTensor(), download=bool(context.download))
+            split_infos[split_name] = _write_streamed_structured_split(
+                dataset_token=dataset_token,
+                split_name=split_name,
+                dataset_root=out_dir,
+                total_count=len(raw_dataset),
+                input_shape=tuple(cnn_shape),
+                input_dtype=np.dtype(np.float32),
+                sample_iter=_iter_torchvision_stored_samples(raw_dataset, dataset_token=dataset_token, static_storage_view='cnn'),
+                max_samples=max_samples,
+                file_stem=f'{split_name}_cnn',
+            )
+            flat_split_infos[split_name] = _write_streamed_structured_split(
+                dataset_token=dataset_token,
+                split_name=split_name,
+                dataset_root=out_dir,
+                total_count=len(raw_dataset),
+                input_shape=tuple(flat_shape),
+                input_dtype=np.dtype(np.float32),
+                sample_iter=_iter_torchvision_stored_samples(raw_dataset, dataset_token=dataset_token, static_storage_view='flatten'),
+                max_samples=max_samples,
+                file_stem=f'{split_name}_flatten',
+            )
+        cnn_files = {'train': str(split_infos['train']['path']), 'test': str(split_infos['test']['path'])}
+        flat_files = {'train': str(flat_split_infos['train']['path']), 'test': str(flat_split_infos['test']['path'])}
         metadata_extra = {
             'normalization_rule': 'ToTensor_[0,1]',
             'flatten_order': 'raster',
             'original_shape': [1, 28, 28],
-            'sequence_input_rule': 'prepared_static_repeat_TCHW',
+            'sequence_input_rule': 'prepared_static_repeat_TCHW_and_flatten_TF',
             'cnn_input_shape': [_STATIC_IMAGE_REPEAT_T, 1, 28, 28],
+            'flatten_input_shape': [_STATIC_IMAGE_REPEAT_T, 1 * 28 * 28],
+            'cnn_training_view_name': 'model_input_cnn',
+            'flatten_training_view_name': 'model_input_flatten',
+            'files_by_view': {
+                'model_input': cnn_files,
+                'model_input_cnn': cnn_files,
+                'cnn_input': cnn_files,
+                'psd_input': cnn_files,
+                'image_psd_view': cnn_files,
+                'original_input': cnn_files,
+                'model_input_flatten': flat_files,
+                'flatten_input': flat_files,
+                'sequence_input': flat_files,
+            },
+            'stored_shape_by_view': {
+                'model_input_cnn': list(cnn_shape),
+                'cnn_input': list(cnn_shape),
+                'model_input_flatten': list(flat_shape),
+                'flatten_input': list(flat_shape),
+                'sequence_input': list(flat_shape),
+            },
+            'stored_dtype_by_view': {
+                'model_input_cnn': 'float32',
+                'model_input_flatten': 'float32',
+            },
         }
-    contract = _singlefile_storage_contract(dataset_token)
-    split_infos: dict[str, dict[str, Any]] = {}
-    for split_name, train_flag in tqdm((('train', True), ('test', False)), desc=f'{dataset_token}:splits', leave=False):
-        raw_dataset = datasets.MNIST(root=str(dataset_root), train=bool(train_flag), transform=transforms.ToTensor(), download=bool(context.download))
-        split_infos[split_name] = _write_streamed_structured_split(
-            dataset_token=dataset_token,
-            split_name=split_name,
-            dataset_root=out_dir,
-            total_count=len(raw_dataset),
-            input_shape=tuple(input_shape),
-            input_dtype=np.dtype(np.float32),
-            sample_iter=_iter_torchvision_stored_samples(raw_dataset, dataset_token=dataset_token, permutation=permutation),
-            max_samples=max_samples,
-        )
     _save_streaming_manifest(
         dataset_token=dataset_token,
         context=context,
@@ -776,6 +849,7 @@ def _stream_write_cifar10_family_bundle(
         overwrite=bool(overwrite),
         prep_profile_name=profile_name,
     )
+    contract = _singlefile_storage_contract(dataset_token)
     if dataset_token == 's-cifar10':
         input_shape = (1024, 3)
         psd_axis_kind = 'temporal'
@@ -786,34 +860,86 @@ def _stream_write_cifar10_family_bundle(
             'flatten_order': 'raster',
             'color_preserving': True,
         }
+        split_infos: dict[str, dict[str, Any]] = {}
+        for split_name, train_flag in tqdm((('train', True), ('test', False)), desc=f'{dataset_token}:splits', leave=False):
+            raw_dataset = dataset_cls(root=str(dataset_root), train=bool(train_flag), transform=transforms.ToTensor(), download=bool(context.download),)
+            split_infos[split_name] = _write_streamed_structured_split(
+                dataset_token=dataset_token,
+                split_name=split_name,
+                dataset_root=out_dir,
+                total_count=len(raw_dataset),
+                input_shape=tuple(input_shape),
+                input_dtype=np.dtype(np.float32),
+                sample_iter=_iter_torchvision_stored_samples(raw_dataset, dataset_token=dataset_token),
+                max_samples=max_samples,
+            )
     else:
-        input_shape = (_STATIC_IMAGE_REPEAT_T, 3, 32, 32)
+        cnn_shape = (_STATIC_IMAGE_REPEAT_T, 3, 32, 32)
+        flat_shape = (_STATIC_IMAGE_REPEAT_T, 3 * 32 * 32)
         psd_axis_kind = 'static_repeat'
         dataset_root = context.raw_data_root / dataset_token
         dataset_cls = datasets.CIFAR100 if dataset_token == 'cifar-100' else datasets.CIFAR10
+        split_infos = {}
+        flat_split_infos: dict[str, dict[str, Any]] = {}
+        for split_name, train_flag in tqdm((('train', True), ('test', False)), desc=f'{dataset_token}:splits', leave=False):
+            raw_dataset = dataset_cls(root=str(dataset_root), train=bool(train_flag), transform=transforms.ToTensor(), download=bool(context.download),)
+            split_infos[split_name] = _write_streamed_structured_split(
+                dataset_token=dataset_token,
+                split_name=split_name,
+                dataset_root=out_dir,
+                total_count=len(raw_dataset),
+                input_shape=tuple(cnn_shape),
+                input_dtype=np.dtype(np.float32),
+                sample_iter=_iter_torchvision_stored_samples(raw_dataset, dataset_token=dataset_token, static_storage_view='cnn'),
+                max_samples=max_samples,
+                file_stem=f'{split_name}_cnn',
+            )
+            flat_split_infos[split_name] = _write_streamed_structured_split(
+                dataset_token=dataset_token,
+                split_name=split_name,
+                dataset_root=out_dir,
+                total_count=len(raw_dataset),
+                input_shape=tuple(flat_shape),
+                input_dtype=np.dtype(np.float32),
+                sample_iter=_iter_torchvision_stored_samples(raw_dataset, dataset_token=dataset_token, static_storage_view='flatten'),
+                max_samples=max_samples,
+                file_stem=f'{split_name}_flatten',
+            )
+        cnn_files = {'train': str(split_infos['train']['path']), 'test': str(split_infos['test']['path'])}
+        flat_files = {'train': str(flat_split_infos['train']['path']), 'test': str(flat_split_infos['test']['path'])}
         metadata_extra = {
             'normalization_rule': 'ToTensor_[0,1]',
             'flatten_order': 'raster',
             'original_shape': [3, 32, 32],
             'color_preserving': True,
-            'sequence_input_rule': 'prepared_static_repeat_TCHW',
+            'sequence_input_rule': 'prepared_static_repeat_TCHW_and_flatten_TF',
             'cnn_input_shape': [_STATIC_IMAGE_REPEAT_T, 3, 32, 32],
+            'flatten_input_shape': [_STATIC_IMAGE_REPEAT_T, 3 * 32 * 32],
+            'cnn_training_view_name': 'model_input_cnn',
+            'flatten_training_view_name': 'model_input_flatten',
+            'files_by_view': {
+                'model_input': cnn_files,
+                'model_input_cnn': cnn_files,
+                'cnn_input': cnn_files,
+                'psd_input': cnn_files,
+                'image_psd_view': cnn_files,
+                'original_input': cnn_files,
+                'model_input_flatten': flat_files,
+                'flatten_input': flat_files,
+                'sequence_input': flat_files,
+            },
+            'stored_shape_by_view': {
+                'model_input_cnn': list(cnn_shape),
+                'cnn_input': list(cnn_shape),
+                'model_input_flatten': list(flat_shape),
+                'flatten_input': list(flat_shape),
+                'sequence_input': list(flat_shape),
+            },
+            'stored_dtype_by_view': {
+                'model_input_cnn': 'float32',
+                'model_input_flatten': 'float32',
+            },
         }
-    contract = _singlefile_storage_contract(dataset_token)
-    split_infos: dict[str, dict[str, Any]] = {}
-    for split_name, train_flag in tqdm((('train', True), ('test', False)), desc=f'{dataset_token}:splits', leave=False):
-        raw_dataset = dataset_cls(root=str(dataset_root), train=bool(train_flag), transform=transforms.ToTensor(),
-                                  download=bool(context.download),)
-        split_infos[split_name] = _write_streamed_structured_split(
-            dataset_token=dataset_token,
-            split_name=split_name,
-            dataset_root=out_dir,
-            total_count=len(raw_dataset),
-            input_shape=tuple(input_shape),
-            input_dtype=np.dtype(np.float32),
-            sample_iter=_iter_torchvision_stored_samples(raw_dataset, dataset_token=dataset_token),
-            max_samples=max_samples,
-        )
     _save_streaming_manifest(
         dataset_token=dataset_token,
         context=context,

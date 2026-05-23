@@ -55,7 +55,7 @@ RUN_STAMP="${RUN_STAMP:-$(date +%Y%m%d_%H%M%S)}"
 # 값의 모든 선택지: canonical token 은 `cifar-10`, `cifar10-dvs`, `deap`, `dvs128-gesture`, `mnist`, `n-mnist`, `ps-mnist`, `s-cifar10`, `s-mnist`, `shd`, `ssc` 이다.
 # 값의 의미: 각 token 마다 독립 data preparation job 하나를 실행한다.
 # 값 주는법: `DATA_PREP_SET="s-mnist shd"` 또는 `DATA_PREP_SET="s-mnist,shd"` 처럼 준다.
-DATA_PREP_SET_RAW="s-mnist shd deap uci-har"
+DATA_PREP_SET_RAW="s-mnist,ps-mnist,s-cifar10,shd,ssc,deap,uci-har,mnist,cifar-10,cifar-100,n-mnist,cifar10-dvs,dvs128-gesture"
 
 # 인수: SEED
 # 기능: preprocessing metadata 에 기록할 seed 를 지정한다.

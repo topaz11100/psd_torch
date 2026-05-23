@@ -10,7 +10,7 @@ PSD project 의 numeric artifact 는 CSV 로 저장한다. 이전처럼 모든 a
 2. `category` 값만 보면 해당 CSV 의 column 양식을 알 수 있어야 한다.
 3. plot 재구성에 필요한 좌표와 값은 CSV 안에 직접 들어 있어야 한다.
 4. 필요 없는 column 을 빈칸으로 잔뜩 남기지 않는다.
-5. PSD curve, dispersion, pair distance, drift distance 는 서로 다른 category 와 독립 CSV file 로 저장한다.
+5. PSD curve, dispersion, pair distance, layer distance 는 서로 다른 category 와 독립 CSV file 로 저장한다.
 
 ## 2. 공통 prefix column
 
@@ -31,9 +31,9 @@ created_at
 
 | column | 의미 |
 | --- | --- |
-| `schema_version` | CSV schema version. 기본값은 `psd_category_csv_v2` |
+| `schema_version` | CSV schema version. 기본값은 `psd_category_csv_20260502` |
 | `category` | category별 schema routing key |
-| `source_program` | `data_prep`, `dataset_psd`, `model_training`, `psd_analysis`, `plotting`, `reinterpretation` 중 하나 |
+| `source_program` | `data_prep`, `dataset_psd`, `model_training`, `psd_analysis`, `2d_fft_analysis`, `element_psd`, `checkpoint_accuracy_analysis`, `plotting`, `reinterpretation` 중 하나 |
 | `status` | `ok`, `failed`, `rendered`, `skipped_unsupported_category`, `skipped_existing` 등 |
 | `message` | optional warning, error, skip reason |
 | `dataset` | canonical dataset token |
@@ -51,14 +51,19 @@ Official category 는 아래를 포함한다.
 | `dataset_dispersion` | `dataset_psd.py` | scope, signal, extractor, variant, scale, statistic 조합 하나 |
 | `analysis_curve` | `psd_analysis.py` | checkpoint, layer, probe scope, signal, series, extractor, reducer, variant, scale 조합 하나 |
 | `analysis_dispersion` | `psd_analysis.py` | checkpoint, layer, probe scope, signal, series, extractor, variant, scale, statistic 조합 하나 |
+| `analysis_2d_fft` | `2d_fft_analysis.py` | checkpoint, layer, probe scope, label condition, signal, series, variant, scale 조합 하나 |
+| `element_psd` | `element_psd.py` | checkpoint, layer, probe scope, label condition, signal, series, variant, scale 조합 하나 |
+| `checkpoint_accuracy` | `checkpoint_accuracy_analysis.py` | checkpoint, split 조합 하나 |
 | `pair_distance` | `psd_analysis.py` | checkpoint, layer, source/target scope, source/target series, extractor, reducer, variant, scale 조합 하나 |
 | `layer_distance_profile` | `psd_analysis.py` | 특정 checkpoint 의 layer relation curve distance |
 | `layer_distance_trend` | `psd_analysis.py` | epoch 축 layer relation curve distance trend |
+| `layer_dispersion_profile` | `psd_analysis.py` | 특정 checkpoint 의 layer-wise dispersion scalar profile |
+| `layer_dispersion_trend` | `psd_analysis.py` | epoch 축 layer-wise dispersion scalar trend |
 | `filter_snapshot` | `psd_analysis.py` | checkpoint, layer, filter/neuron parameter family 하나 |
 | `filter_trend` | `psd_analysis.py` | layer, filter/neuron parameter family 하나 |
 | `accuracy_loss_join` | `psd_analysis.py` | 기존 CSV 호환용. 새 산출물에서는 생성하지 않음 |
 | `pairwise_dependency_appendix` | `psd_analysis.py` | optional appendix metric 하나 |
-| `analysis_manifest` | `psd_analysis.py` | analysis artifact inventory 하나 |
+| `analysis_manifest` | `psd_analysis.py`, `2d_fft_analysis.py`, `element_psd.py` | analysis artifact inventory 하나 |
 | `dataset_psd_manifest` | `dataset_psd.py` | dataset baseline artifact inventory 하나 |
 | `plotting_manifest` | `plotting.py` | rendering status table 하나 |
 | `reinterpretation_metric` | `reinterpretation/driver.py` | paper experiment metric table 하나 |
@@ -70,7 +75,7 @@ Unsupported `category` 는 plotting 에서 global error 가 아니라 `skipped_u
 ### 4.1 `training_metric`
 
 ```text
-schema_version,category,source_program,status,message,dataset,run_id,created_at,model_token,model_family,readout_mode,seed,epoch,scope,metric,value,value_unit
+schema_version,category,source_program,status,message,dataset,run_id,created_at,prep_profile,psd_axis_kind,psd_time_axis,psd_row_axes,psd_flatten_rule,psd_logical_shape,static_repeat_T,model_token,model_family,readout_mode,seed,epoch,scope,metric,value,value_unit
 ```
 
 `scope` 는 `train`, `validation`, `test` 처럼 supervised metric 이 평가된 범위를 기록한다. 이 scope 는 `psd_analysis` 나 `dataset_psd` 의 split 선택 인수가 아니다.
@@ -78,7 +83,7 @@ schema_version,category,source_program,status,message,dataset,run_id,created_at,
 ### 4.2 `dataset_curve`
 
 ```text
-schema_version,category,source_program,status,message,dataset,run_id,created_at,scope,probe_family,label,signal_kind,extractor,reducer,variant,scale,frequency,frequency_unit,bin_left,bin_right,value,value_unit
+schema_version,category,source_program,status,message,dataset,run_id,created_at,prep_profile,psd_axis_kind,psd_time_axis,psd_row_axes,psd_flatten_rule,psd_logical_shape,static_repeat_T,scope,probe_family,label,signal_kind,extractor,reducer,variant,scale,frequency,frequency_unit,bin_left,bin_right,value,value_unit
 ```
 
 규칙:
@@ -94,7 +99,7 @@ schema_version,category,source_program,status,message,dataset,run_id,created_at,
 ### 4.3 `dataset_dispersion`
 
 ```text
-schema_version,category,source_program,status,message,dataset,run_id,created_at,scope,probe_family,label,signal_kind,extractor,variant,scale,statistic,frequency,frequency_unit,bin_left,bin_right,value,value_unit
+schema_version,category,source_program,status,message,dataset,run_id,created_at,prep_profile,psd_axis_kind,psd_time_axis,psd_row_axes,psd_flatten_rule,psd_logical_shape,static_repeat_T,scope,probe_family,label,signal_kind,extractor,variant,scale,statistic,frequency,frequency_unit,bin_left,bin_right,value,value_unit
 ```
 
 `statistic` 은 `variance`, `mad`, `q25`, `q75` 등을 사용할 수 있다.
@@ -102,7 +107,7 @@ schema_version,category,source_program,status,message,dataset,run_id,created_at,
 ### 4.4 `analysis_curve`
 
 ```text
-schema_version,category,source_program,status,message,dataset,run_id,created_at,model_token,model_family,readout_mode,seed,checkpoint_path,checkpoint_epoch,layer,layer_index,scope,probe_family,label,signal_kind,series,extractor,reducer,variant,scale,frequency,frequency_unit,bin_left,bin_right,value,value_unit
+schema_version,category,source_program,status,message,dataset,run_id,created_at,prep_profile,psd_axis_kind,psd_time_axis,psd_row_axes,psd_flatten_rule,psd_logical_shape,static_repeat_T,model_token,model_family,readout_mode,seed,checkpoint_path,checkpoint_epoch,layer,layer_index,scope,probe_family,label,signal_kind,series,extractor,reducer,variant,scale,frequency,frequency_unit,bin_left,bin_right,value,value_unit
 ```
 
 규칙:
@@ -115,7 +120,7 @@ schema_version,category,source_program,status,message,dataset,run_id,created_at,
 ### 4.5 `analysis_dispersion`
 
 ```text
-schema_version,category,source_program,status,message,dataset,run_id,created_at,model_token,model_family,readout_mode,seed,checkpoint_path,checkpoint_epoch,layer,layer_index,scope,probe_family,label,signal_kind,series,extractor,variant,scale,statistic,frequency,frequency_unit,bin_left,bin_right,value,value_unit
+schema_version,category,source_program,status,message,dataset,run_id,created_at,prep_profile,psd_axis_kind,psd_time_axis,psd_row_axes,psd_flatten_rule,psd_logical_shape,static_repeat_T,model_token,model_family,readout_mode,seed,checkpoint_path,checkpoint_epoch,layer,layer_index,scope,probe_family,label,signal_kind,series,extractor,variant,scale,statistic,frequency,frequency_unit,bin_left,bin_right,value,value_unit
 ```
 
 규칙:
@@ -126,10 +131,10 @@ schema_version,category,source_program,status,message,dataset,run_id,created_at,
 ### 4.6 `pair_distance`
 
 ```text
-schema_version,category,source_program,status,message,dataset,run_id,created_at,model_token,model_family,readout_mode,seed,checkpoint_epoch,layer,layer_index,source_scope,target_scope,source_signal_kind,source_series,target_signal_kind,target_series,extractor,reducer,variant,scale,distance_metric,value,value_unit
+schema_version,category,source_program,status,message,dataset,run_id,created_at,prep_profile,psd_axis_kind,psd_time_axis,psd_row_axes,psd_flatten_rule,psd_logical_shape,static_repeat_T,model_token,model_family,readout_mode,seed,checkpoint_epoch,layer,layer_index,source_scope,target_scope,source_signal_kind,source_series,target_signal_kind,target_series,extractor,reducer,variant,scale,distance_metric,value,value_unit
 ```
 
-`distance_metric` 은 `l2`, `cosine_distance`, `area_distance` 등 구현이 지원하는 metric token 을 사용한다.
+`distance_metric` 은 현재 구현에서 `distance_raw`, `distance_cen`, `diff_l2_raw`, `diff_l2_cen` 같은 curve distance output token 을 사용한다.
 
 규칙:
 
@@ -139,26 +144,34 @@ schema_version,category,source_program,status,message,dataset,run_id,created_at,
 ### 4.7 `layer_distance_profile` 와 `layer_distance_trend`
 
 ```text
-schema_version,category,source_program,status,message,dataset,run_id,created_at,model_token,model_family,readout_mode,seed,checkpoint_epoch_a,checkpoint_epoch_b,layer,layer_index,scope,signal_kind,series,reference_signal_kind,reference_series,extractor,reducer,variant,scale,distance_metric,value,value_unit
+schema_version,category,source_program,status,message,dataset,run_id,created_at,prep_profile,psd_axis_kind,psd_time_axis,psd_row_axes,psd_flatten_rule,psd_logical_shape,static_repeat_T,model_token,model_family,readout_mode,seed,checkpoint_path,checkpoint_epoch,scope,probe_family,label,track_name,source_layer,source_layer_index,source_signal_kind,source_series,target_layer,target_layer_index,target_signal_kind,target_series,relation_type,comparison_index,comparison_label,extractor,reducer,variant,scale,distance_metric,value,value_unit
 ```
 
-Drift 는 같은 checkpoint 안에서 input PSD 를 reference 로 두고 대상 layer/series PSD 와의 개형 거리를 checkpoint 축으로 기록한다. 여러 checkpoint 가 있으면 epoch별 input-reference distance trend 를 만든다.
+`layer_distance_profile` 과 `layer_distance_trend` 는 같은 checkpoint 의 input-reference 또는 adjacent layer relation 에 대한 representative PSD curve distance 를 기록한다. 여러 checkpoint 가 있으면 같은 relation coordinate 를 checkpoint epoch 축으로 누적한다.
 
 규칙:
 
 1. `scope` 는 prepared probe scope 만 기록한다.
-2. train/test full split 전체집합 scope 는 drift distance 에 쓰지 않는다.
+2. train/test full split 전체집합 scope 는 layer distance 에 쓰지 않는다.
+
+### 4.7.1 `layer_dispersion_profile` 와 `layer_dispersion_trend`
+
+```text
+schema_version,category,source_program,status,message,dataset,run_id,created_at,prep_profile,psd_axis_kind,psd_time_axis,psd_row_axes,psd_flatten_rule,psd_logical_shape,static_repeat_T,model_token,model_family,readout_mode,seed,checkpoint_path,checkpoint_epoch,scope,probe_family,label,layer,layer_index,signal_kind,series,extractor,variant,scale,dispersion_statistic,dispersion_reduction,value,value_unit
+```
+
+`layer_dispersion_profile` 과 `layer_dispersion_trend` 는 layer 내부 PSD dispersion 을 variance 또는 MAD 기준 scalar 로 기록한다.
 
 ### 4.8 `filter_snapshot`
 
 ```text
-schema_version,category,source_program,status,message,dataset,run_id,created_at,model_token,model_family,seed,checkpoint_epoch,layer,layer_index,parameter_name,statistic,value,value_unit
+schema_version,category,source_program,status,message,dataset,run_id,created_at,prep_profile,psd_axis_kind,psd_time_axis,psd_row_axes,psd_flatten_rule,psd_logical_shape,static_repeat_T,model_token,model_family,readout_mode,seed,checkpoint_path,checkpoint_epoch,layer,layer_index,parameter_name,statistic,value,value_unit
 ```
 
 ### 4.9 `filter_trend`
 
 ```text
-schema_version,category,source_program,status,message,dataset,run_id,created_at,model_token,model_family,seed,layer,layer_index,parameter_name,checkpoint_epoch,statistic,value,value_unit
+schema_version,category,source_program,status,message,dataset,run_id,created_at,prep_profile,psd_axis_kind,psd_time_axis,psd_row_axes,psd_flatten_rule,psd_logical_shape,static_repeat_T,model_token,model_family,readout_mode,seed,checkpoint_path,layer,layer_index,parameter_name,checkpoint_epoch,statistic,value,value_unit
 ```
 
 ### 4.10 `plotting_manifest`
@@ -204,15 +217,15 @@ layer_distance_profile__epoch_<e>__<relation_type>__<scope>__<track_name>__<extr
 ### 8.1 `analysis_curve`
 
 ```text
-schema_version,category,source_program,status,message,dataset,run_id,created_at,model_token,model_family,readout_mode,seed,checkpoint_path,checkpoint_epoch,layer,layer_index,scope,probe_family,label,signal_kind,series,extractor,reducer,variant,scale,frequency,frequency_unit,bin_left,bin_right,value,value_unit
-psd_category_csv_v2,analysis_curve,psd_analysis,ok,,shd,run001,2026-04-30T00:00:00Z,lif_soft_fixed,dense,mean,0,checkpoints/epoch_000017.pt,17,layer_1,1,balanced_global,balanced_global,,hidden,spike,psd_exact,mean,raw,raw,0.10,normalized_frequency,,,0.031,power
+schema_version,category,source_program,status,message,dataset,run_id,created_at,prep_profile,psd_axis_kind,psd_time_axis,psd_row_axes,psd_flatten_rule,psd_logical_shape,static_repeat_T,model_token,model_family,readout_mode,seed,checkpoint_path,checkpoint_epoch,layer,layer_index,scope,probe_family,label,signal_kind,series,extractor,reducer,variant,scale,frequency,frequency_unit,bin_left,bin_right,value,value_unit
+psd_category_csv_20260502,analysis_curve,psd_analysis,ok,,shd,run001,2026-04-30T00:00:00Z,model_input,temporal,time,rows,none,T100,100,lif_soft_fixed,dense_snn,mean,0,checkpoints/epoch_000017.pt,17,layer_1,1,train_balanced_global,balanced_global,,hidden,spike,psd_exact,mean,raw,raw,0.10,normalized_frequency,,,0.031,power
 ```
 
 ### 8.2 `pair_distance`
 
 ```text
-schema_version,category,source_program,status,message,dataset,run_id,created_at,model_token,model_family,readout_mode,seed,checkpoint_epoch,layer,layer_index,source_scope,target_scope,source_signal_kind,source_series,target_signal_kind,target_series,extractor,reducer,variant,scale,distance_metric,value,value_unit
-psd_category_csv_v2,pair_distance,psd_analysis,ok,,shd,run001,2026-04-30T00:00:00Z,lif_soft_fixed,dense,mean,0,17,layer_1,1,balanced_global,distribution_global,hidden,spike,hidden,spike,psd_exact,mean,raw,db,distance_raw,0.271,dimensionless
+schema_version,category,source_program,status,message,dataset,run_id,created_at,prep_profile,psd_axis_kind,psd_time_axis,psd_row_axes,psd_flatten_rule,psd_logical_shape,static_repeat_T,model_token,model_family,readout_mode,seed,checkpoint_epoch,layer,layer_index,source_scope,target_scope,source_signal_kind,source_series,target_signal_kind,target_series,extractor,reducer,variant,scale,distance_metric,value,value_unit
+psd_category_csv_20260502,pair_distance,psd_analysis,ok,,shd,run001,2026-04-30T00:00:00Z,model_input,temporal,time,rows,none,T100,100,lif_soft_fixed,dense_snn,mean,0,17,layer_1,1,train_balanced_global,test_balanced_global,hidden,spike,hidden,spike,psd_exact,mean,raw,db,distance_raw,0.271,dimensionless
 ```
 
 
@@ -242,3 +255,120 @@ psd_category_csv_v2,pair_distance,psd_analysis,ok,,shd,run001,2026-04-30T00:00:0
 - 새 category 는 `layer_distance_profile`, `layer_distance_trend`, `layer_dispersion_profile`, `layer_dispersion_trend` 이다.
 - `drift_distance` 와 `accuracy_loss_join` 은 기존 CSV 읽기 호환용 schema 로만 남기고, 새 `psd_analysis` 산출물에서는 생성하지 않는다.
 - `write_common_csv` 는 schema column 이 아닌 `extra_columns` 값도 버리지 않고 보존한다.
+
+## 2026-05-16 보정: matrix-valued checkpoint analysis category
+
+새 checkpoint-only matrix analysis 는 아래 category 를 추가한다.
+
+| category | source_program | 의미 |
+| --- | --- | --- |
+| `analysis_2d_fft` | `2d_fft_analysis` | MLP probe input map 과 layer output map 의 2-D FFT power matrix |
+| `element_psd` | `element_psd` | MLP probe input map 과 layer output map 의 element-wise exact PSD matrix |
+
+### `analysis_2d_fft`
+
+`analysis_2d_fft` 는 한 CSV 에 하나의 checkpoint, input/layer, scope, label condition, signal, series, variant, scale 조합만 저장한다.
+
+고정 column 은 아래 좌표를 포함한다.
+
+```text
+model_token
+model_family
+readout_mode
+seed
+checkpoint_path
+checkpoint_epoch
+layer
+layer_index
+scope
+probe_family
+label
+sample_role
+sample_index
+signal_kind
+series
+variant
+scale
+row_frequency_index
+row_frequency
+row_frequency_unit
+row_count
+time_length
+time_frequency_bin_count
+time_frequency_grid
+value_unit
+```
+
+Dynamic value column 은 `time_freq_000000`, `time_freq_000001`, ... 형식이다. 각 row 는 input/layer row-axis FFT frequency 하나를 의미하고, dynamic column 은 time-axis FFT frequency bin 을 의미한다.
+
+### `element_psd`
+
+`element_psd` 는 한 CSV 에 하나의 checkpoint, input/layer, scope, label condition, signal, series, variant, scale 조합만 저장한다.
+
+고정 column 은 아래 좌표를 포함한다.
+
+```text
+model_token
+model_family
+readout_mode
+seed
+checkpoint_path
+checkpoint_epoch
+layer
+layer_index
+scope
+probe_family
+label
+sample_role
+sample_index
+signal_kind
+series
+variant
+scale
+neuron_index
+neuron_axis_order
+time_length
+frequency_bin_count
+frequency_grid
+frequency_unit
+value_unit
+```
+
+Dynamic value column 은 `freq_000000`, `freq_000001`, ... 형식이다. 각 row 는 input element 또는 neuron 하나를 의미하고, dynamic column 은 exact one-sided frequency bin 을 의미한다.
+
+두 category 모두 기존 category-based CSV prefix 와 axis metadata column 을 유지한다. Figure file, binary bundle, category column 없는 CSV 는 official output 이 아니다.
+
+
+## 2026-05-17 보정: checkpoint accuracy analysis category
+
+새 checkpoint-only accuracy analysis 는 아래 category 를 추가한다.
+
+| category | source_program | 의미 |
+| --- | --- | --- |
+| `checkpoint_accuracy` | `checkpoint_accuracy_analysis` | 저장된 checkpoint 의 train/test full split 추론 정확도 |
+
+### `checkpoint_accuracy`
+
+`checkpoint_accuracy` 는 한 row 에 하나의 checkpoint 와 하나의 split 에 대한 accuracy summary 를 저장한다.
+
+고정 column 은 아래 좌표를 포함한다.
+
+```text
+model_token
+model_family
+readout_mode
+seed
+checkpoint_path
+checkpoint_epoch
+scope
+accuracy
+correct
+total
+value_unit
+```
+
+규칙:
+
+1. `scope` 는 `train` 또는 `test` 다.
+2. `accuracy` 는 `correct / total` 값이며 `value_unit=fraction` 을 사용한다.
+3. loss 는 official `checkpoint_accuracy` output 이 아니다.

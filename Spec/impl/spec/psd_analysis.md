@@ -17,8 +17,10 @@
 | `--anal_batch` | yes | 한 analysis forward pass 에서 GPU 로 보내는 sample 수의 최대값 |
 | `--gpu_index` | yes | analysis 용 CUDA device index |
 | `--enable_pairwise_dependency_appendix` | optional | optional appendix metric 활성화 |
+| `--analysis_distance_metric` | optional | pair/layer shape distance metric. `centered_l2` 또는 `diff_l2` |
 | `--seed` | optional | analysis seed, 기본값은 checkpoint seed |
 | `--num_workers` | optional | probe loading 용 data-loader worker, plotting worker 아님 |
+| `--low_vram` | optional | `1` 이면 trace 를 CPU 로 stage 하여 VRAM 사용량을 줄임 |
 
 금지 CLI:
 
@@ -73,7 +75,7 @@ Analysis output 에는 value-scale 선택 CLI 가 없어야 한다. `psd_analysi
 2. directory 바로 안의 모든 regular file 은 suffix 가 `.pt` 여야 한다.
 3. subdirectory 는 invalid 다.
 4. hidden non-`.pt` file 은 invalid 다.
-5. file 은 checkpoint epoch 의 ascending order 로 분석한다. epoch metadata 가 없으면 manifest CSV 에 warning row 를 기록한 뒤에만 lexical filename order 를 사용한다.
+5. file 은 checkpoint epoch 의 ascending order 로 분석한다. checkpoint 중 하나라도 epoch metadata 가 없으면 manifest CSV 에 warning row 를 기록한 뒤 lexical filename order 를 사용한다.
 
 Directory mode 는 recursive 가 아니다. recursive traversal 은 checkpoint file 이 아니라 CSV file 에 대해 `plotting.py` 가 담당한다.
 
@@ -108,14 +110,12 @@ program 은 다음을 수행하면 안 된다.
 
 `psd_analysis.py` 는 train/test 중 하나를 고르는 train/test selector 를 받지 않는다. 또한 train/test 전체집합을 analysis scope 로 쓰지 않는다. Checkpoint analysis 는 prepared data 에 정의된 probe set 만 분석한다.
 
-필수 probe scope:
+현재 구현의 필수 probe scope:
 
-1. `train_same_label_label_<c>`
-2. `test_same_label_label_<c>`
-3. `train_balanced_global`
-4. `test_balanced_global`
-5. `train_distribution_global`
-6. `test_distribution_global`
+1. `train_balanced_global`
+2. `test_balanced_global`
+
+현재 `same_label` 및 `distribution_global` scope 는 checkpoint analysis 산출물로 생성하지 않는다.
 
 금지 scope:
 
@@ -144,13 +144,15 @@ program 은 다음을 수행하면 안 된다.
 | --- | --- |
 | `analysis_curve` | 각 checkpoint, scope, layer, signal, series, extractor, reducer, variant, scale 의 representative PSD curve |
 | `analysis_dispersion` | 각 checkpoint, scope, layer, signal, series, extractor, variant, scale 의 PSD-domain variance, MAD summary |
-| `pair_distance` | same-layer 와 cross-family PSD distance summary |
+| `pair_distance` | 같은 layer, signal, series 에 대한 cross-scope PSD distance summary |
 | `layer_distance_profile` | 특정 checkpoint 의 input-reference 및 adjacent layer shape-distance profile |
 | `layer_distance_trend` | multiple checkpoint 분석 시 input-reference 및 adjacent layer shape-distance trend |
+| `layer_dispersion_profile` | 특정 checkpoint 의 layer-wise variance/MAD scalar profile |
+| `layer_dispersion_trend` | multiple checkpoint 분석 시 layer-wise variance/MAD scalar trend |
 | `filter_snapshot` | applicable 한 경우 selected checkpoint filter/neuron parameter summary |
 | `filter_trend` | multiple checkpoint 분석 시 checkpoint-axis trend |
 | `accuracy_loss_join` | 기존 CSV 호환용. 새 산출물에서는 생성하지 않음 |
-| `pairwise_dependency_appendix` | 활성화 시 optional cross-spectrum/coherence appendix metric |
+| `pairwise_dependency_appendix` | 활성화 시 optional representative curve correlation appendix metric |
 | `analysis_manifest` | per-checkpoint artifact inventory 와 validation status |
 
 모든 category 는 `Spec/impl/spec/csv_schema.md` 를 따르는 CSV 로 쓴다.
@@ -165,7 +167,7 @@ probe_scope
   x signal_kind
   x extractor in {psd_exact}
   x reducer in {mean, median}
-  x variant in {raw, cen}
+  x variant in {raw, centered}
   x scale in {raw, db}
 ```
 
@@ -227,7 +229,7 @@ analysis program 은 checkpoint metadata 에서 model 을 reconstruct 한다.
 
 ## 11. pairwise dependency appendix
 
-appendix 는 optional 이며 `--enable_pairwise_dependency_appendix` 로만 제어한다.
+appendix 는 optional 이며 `--enable_pairwise_dependency_appendix` 로만 제어한다. 현재 appendix metric 은 representative PSD curve correlation 이다.
 
 규칙:
 

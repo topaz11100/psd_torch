@@ -20,7 +20,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from src.data.registry import make_loader, resolve_dataset_bundle
+from src.data.registry import make_loader, resolve_dataset_bundle, select_training_view_for_model
 from src.model.model_registry import ModelSpec, canonicalize_model_token
 from src.model.training import build_optimizer, evaluate_one_epoch, train_one_epoch
 from src.model.snn_builder import build_snn_classifier
@@ -306,6 +306,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     device = _resolve_device(int(args.gpu_index))
     model_spec = canonicalize_model_token(args.model)
     bundle = resolve_dataset_bundle(dataset_token, prep_root=prep_root)
+    bundle = select_training_view_for_model(bundle, model_family=model_spec.family)
     manifest = _read_manifest(bundle.manifest_path)
     input_shape = _input_shape_from_manifest(manifest, model_spec)
 
