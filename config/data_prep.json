@@ -1,0 +1,1 @@
+{"data_prep":{"dataset":"mnist","raw_data_root":"/ABS/PATH/TO/raw_data","prep_root":"/ABS/PATH/TO/prepared","seed":0,"force_overwrite":false,"download":false,"max_samples":null,"prep_profile":"project_standard","deap_label_axis":"valence","deap_num_classes":3,"shd_dt_ms":1.0,"shd_max_time":1.2,"ssc_dt_ms":1.0,"ssc_max_time":1.0}}

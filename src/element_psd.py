@@ -2,29 +2,28 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+if __package__ is None or __package__ == '':
+    _SCRIPT_DIR = Path(__file__).resolve().parent
+    _PROJECT_ROOT = _SCRIPT_DIR.parent
+    try:
+        sys.path.remove(str(_SCRIPT_DIR))
+    except ValueError:
+        pass
+    if str(_PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(_PROJECT_ROOT))
+
 import argparse
 import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-import torch
 
-import src.psd_analysis as psd_common
-from src.analysis_matrix_common import (
-    ProbeMapKey,
-    checkpoint_output_dir,
-    collect_mlp_output_maps,
-    common_base_for_key,
-    layer_folder,
-    manifest_row,
-    safe_token,
-    validate_mlp_only,
-    value_columns,
-    write_matrix_csv,
-)
-from src.data.registry import dataset_for_view
-from src.signal.psd_utils import apply_centering, exact_periodogram_from_maps, power_to_db
 from src.util.csv_schema import common_row, write_common_csv
+from src.util.config_cli import parse_args_with_config
+
 
 SOURCE_PROGRAM = 'element_psd'
 VARIANTS = ('raw', 'centered')
@@ -42,6 +41,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--seed', type=int, default=None, help='Analysis seed. Defaults to checkpoint seed when omitted.')
     parser.add_argument('--num_workers', type=int, default=0, help='Probe loading DataLoader worker count.')
     parser.add_argument('--low_vram', type=int, default=0, help='Use CPU trace staging to reduce VRAM use: 0 or 1.')
+    parser.add_argument('--config', default=None, help='JSON 설정 파일 경로(.json)')
     return parser
 
 
@@ -179,7 +179,7 @@ def _checkpoint_base(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_arg_parser()
-    args = parser.parse_args(argv)
+    args = parse_args_with_config(parser, argv=argv, stage_key='element_psd')
     if int(args.anal_batch) < 1:
         parser.error('--anal_batch must be >= 1.')
     if int(args.num_workers) < 0:

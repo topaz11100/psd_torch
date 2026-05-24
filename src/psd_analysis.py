@@ -2,35 +2,36 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+if __package__ is None or __package__ == '':
+    _SCRIPT_DIR = Path(__file__).resolve().parent
+    _PROJECT_ROOT = _SCRIPT_DIR.parent
+    try:
+        sys.path.remove(str(_SCRIPT_DIR))
+    except ValueError:
+        pass
+    if str(_PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(_PROJECT_ROOT))
+
 import argparse
 from collections import defaultdict
 import itertools
 import json
 from pathlib import Path
-import random
 from typing import Any, Mapping, Sequence
 
-import numpy as np
-import torch
 
-from src.data.base import canonicalize_model_input_batch
-from src.data.registry import dataset_for_view, make_loader, resolve_dataset_bundle, select_training_view_for_model
-from src.model.model_registry import ModelSpec, canonicalize_model_token
-from src.model.snn_builder import build_snn_classifier
-from src.readout.readout import build_readout
-from src.signal.family_spectral_analysis import (
-    compute_family_spectral_summary,
-    curve_axis_from_summary,
-    curve_pointwise_distance,
-    pair_distance_from_summaries,
-    representative_curve_from_summary,
-)
-from src.signal.psd_utils import tensor_to_channel_major_maps, trace_tensor_to_channel_major_maps
-from src.stat.probe_selection import build_probe_index_bundle, dataset_targets, subset_from_indices
-from src.util.config import load_json
 from src.util.csv_schema import common_row, write_common_csv
+from src.util.config_cli import parse_args_with_config
+
 
 SOURCE_PROGRAM = 'psd_analysis'
+
+
+def _load_json_light(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
 ALL_CURVE_EXTRACTORS = ('psd_exact',)
 ALL_VALUE_SCALES = ('raw', 'db')
 LOW_VRAM = False
@@ -43,12 +44,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--output_root', required=True, help='Root directory for analysis CSV outputs.')
     parser.add_argument('--anal_batch', required=True, type=int, help='Maximum samples per analysis forward pass.')
     parser.add_argument('--gpu_index', required=True, type=int, help='CUDA device index for analysis.')
-    # Deprecated compatibility argument. Exact-only analysis ignores it.
-    parser.add_argument('--userbin_edges', nargs='*', type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument('--enable_pairwise_dependency_appendix', action='store_true')
     parser.add_argument('--analysis_distance_metric', default='centered_l2', choices=('centered_l2', 'diff_l2'), help='PSD curve distance for pair/layer shape distances: centered_l2 or unnormalized first-difference L2.')
     parser.add_argument('--seed', type=int, default=None)
     parser.add_argument('--num_workers', type=int, default=0)
+    parser.add_argument('--config', default=None, help='JSON 설정 파일 경로(.json)')
     parser.add_argument('--low_vram', type=int, default=0)
     return parser
 
@@ -114,10 +114,7 @@ def _require_cuda_device(gpu_index: int) -> torch.device:
 
 
 def _seed_everything(seed: int) -> None:
-    random.seed(int(seed))
-    np.random.seed(int(seed))
-    torch.manual_seed(int(seed))
-    torch.cuda.manual_seed_all(int(seed))
+    seed_everything(int(seed))
 
 
 def _model_family(spec: ModelSpec) -> str:
@@ -154,7 +151,7 @@ def _resolve_bundle(
 
 
 def _manifest_dict(path: Path) -> dict[str, Any]:
-    payload = load_json(path)
+    payload = _load_json_light(path)
     if not isinstance(payload, dict):
         raise ValueError(f'Prepared manifest must be a JSON object: {path}')
     return payload
@@ -378,9 +375,6 @@ def _collect_signal_maps(
                 for inputs, _target in loader:
                     model_inputs = _prepared_input_for_model(model, inputs, device=device)
                     result = model(model_inputs, capture_hidden=True)
-                    input_trace = result.input_record if getattr(result, 'input_record', None) is not None else model_inputs
-                    input_maps = trace_tensor_to_channel_major_maps(input_trace.detach())
-                    collected[('input', 0, 'input', 'x_probe', scope, family, label)].append(input_maps.detach())
                     for record in list(result.hidden_records):
                         layer_name = str(record.layer_name)
                         layer_index = int(layer_index_by_name.get(layer_name, len(layer_index_by_name) + 1))
@@ -422,11 +416,6 @@ def _collect_signal_maps(
                     try:
                         model_inputs = _prepared_input_for_model(model, inputs, device=device)
                         result = model(model_inputs, capture_hidden=True)
-
-                        input_trace = result.input_record if getattr(result, 'input_record', None) is not None else model_inputs
-                        collected[('input', 0, 'input', 'x_probe', scope, family, label)].append(
-                            _trace_to_cpu_maps(input_trace)
-                        )
 
                         for record in result.hidden_records:
                             layer_name = str(record.layer_name)
@@ -823,101 +812,6 @@ def _pair_rows_for_checkpoint(
                                 appendix_rows.append(common_row(**failure))
     return pair_rows, appendix_rows
 
-def _input_reference_trace_rows_for_checkpoint(
-    *,
-    summaries: Mapping[tuple[str, int, str, str, str, str, int | None], Mapping[str, Any]],
-    common_by_key: Mapping[tuple[str, int, str, str, str, str, int | None], dict[str, Any]],
-    checkpoint_epoch: int,
-    extractors: tuple[str, ...],
-    distance_metric: str = 'centered_l2',
-) -> list[dict[str, str]]:
-    """Build input-reference distance rows for one checkpoint.
-
-    The distance is the selected pointwise shape distance between the PSD of the
-    input probe series and the PSD of each non-input layer/series in the same
-    probe family/scope/label. This keeps the existing drift_distance category as
-    the checkpoint-axis trend artifact while avoiding checkpoint-to-checkpoint
-    self-drift semantics.
-    """
-
-    rows: list[dict[str, str]] = []
-    input_by_probe: dict[tuple[str, str, int | None], tuple[tuple[str, int, str, str, str, str, int | None], Mapping[str, Any]]] = {}
-    for key, summary in summaries.items():
-        _layer_name, layer_index, signal_kind, series, scope, family, label = key
-        if int(layer_index) == 0 and str(signal_kind) == 'input' and str(series) == 'x_probe':
-            input_by_probe[(scope, family, label)] = (key, summary)
-
-    for key, target_summary in sorted(summaries.items(), key=lambda item: (item[0][1], item[0][0], item[0][2], item[0][3], item[0][4])):
-        _layer_name, layer_index, signal_kind, series, scope, family, label = key
-        if int(layer_index) == 0 and str(signal_kind) == 'input' and str(series) == 'x_probe':
-            continue
-        ref_pair = input_by_probe.get((scope, family, label))
-        if ref_pair is None:
-            continue
-        ref_key, input_summary = ref_pair
-        base = dict(common_by_key[key])
-        reference_signal_kind = common_by_key[ref_key].get('signal_kind', 'input')
-        reference_series = common_by_key[ref_key].get('series', 'x_probe')
-        for reducer in ('mean', 'median'):
-            for extractor in extractors:
-                for scale in ALL_VALUE_SCALES:
-                    try:
-                        distances = pair_distance_from_summaries(dict(input_summary), dict(target_summary), reducer=reducer, extractor=extractor, scale=scale, distance_metric=distance_metric)
-                    except Exception as exc:
-                        kwargs = dict(base)
-                        kwargs.update(
-                            category='drift_distance', status='failed', message=str(exc),
-                            checkpoint_epoch_a=checkpoint_epoch, checkpoint_epoch_b=checkpoint_epoch,
-                            reference_signal_kind=reference_signal_kind, reference_series=reference_series,
-                            extractor=extractor, reducer=reducer, variant='raw', scale=scale, distance_metric='failed',
-                        )
-                        rows.append(common_row(**kwargs))
-                        continue
-                    for metric, value in distances.items():
-                        if metric == 'reference_curve_axis':
-                            continue
-                        kwargs = dict(base)
-                        kwargs.update(
-                            category='drift_distance', checkpoint_epoch_a=checkpoint_epoch, checkpoint_epoch_b=checkpoint_epoch,
-                            reference_signal_kind=reference_signal_kind, reference_series=reference_series,
-                            extractor=extractor, reducer=reducer,
-                            variant='centered' if metric.endswith('_cen') else 'raw', scale=scale,
-                            distance_metric=metric, value=float(value), value_unit='dimensionless',
-                        )
-                        rows.append(common_row(**kwargs))
-
-        for extractor in extractors:
-            for scale in ALL_VALUE_SCALES:
-                for metric in ('variance', 'mad'):
-                    for centering in ('raw', 'cen'):
-                        try:
-                            left = np.asarray(input_summary['dispersion'][extractor][metric][scale][centering], dtype=np.float64)
-                            right = np.asarray(target_summary['dispersion'][extractor][metric][scale][centering], dtype=np.float64)
-                            value = curve_pointwise_distance(left, right, metric=distance_metric)
-                        except Exception as exc:
-                            kwargs = dict(base)
-                            kwargs.update(
-                                category='drift_distance', status='failed', message=str(exc),
-                                checkpoint_epoch_a=checkpoint_epoch, checkpoint_epoch_b=checkpoint_epoch,
-                                reference_signal_kind=reference_signal_kind, reference_series=reference_series,
-                                extractor=extractor, reducer='none',
-                                variant='centered' if centering == 'cen' else 'raw', scale=scale,
-                                distance_metric=f'dispersion_{metric}_failed',
-                            )
-                            rows.append(common_row(**kwargs))
-                            continue
-                        kwargs = dict(base)
-                        kwargs.update(
-                            category='drift_distance', checkpoint_epoch_a=checkpoint_epoch, checkpoint_epoch_b=checkpoint_epoch,
-                            reference_signal_kind=reference_signal_kind, reference_series=reference_series,
-                            extractor=extractor, reducer='none',
-                            variant='centered' if centering == 'cen' else 'raw', scale=scale,
-                            distance_metric=f'dispersion_{metric}', value=float(value), value_unit='dimensionless',
-                        )
-                        rows.append(common_row(**kwargs))
-    return rows
-
-
 def _target_track_name(signal_kind: str, series: str) -> str | None:
     signal = str(signal_kind)
     name = str(series)
@@ -1022,42 +916,15 @@ def _layer_distance_rows_for_checkpoint(
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     profile_rows: list[dict[str, str]] = []
     trend_rows: list[dict[str, str]] = []
-    inputs: dict[tuple[str, str, int | None], tuple[tuple[str, int, str, str, str, str, int | None], Mapping[str, Any]]] = {}
     targets: dict[tuple[str, str, int | None, str], list[tuple[tuple[str, int, str, str, str, str, int | None], Mapping[str, Any]]]] = defaultdict(list)
     for key, summary in summaries.items():
         layer, layer_index, signal_kind, series, scope, family, label = key
-        if int(layer_index) == 0 and str(signal_kind) == 'input' and str(series) == 'x_probe':
-            inputs[(scope, family, label)] = (key, summary)
-            continue
         track = _target_track_name(str(signal_kind), str(series))
         if track is not None:
             targets[(scope, family, label, track)].append((key, summary))
-    for (scope, family, label, track), nodes in sorted(targets.items(), key=lambda item: (item[0][0], item[0][3])):
-        input_pair = inputs.get((scope, family, label))
-        if input_pair is None:
-            continue
-        input_key, input_summary = input_pair
+    for (_scope, _family, _label, track), nodes in sorted(targets.items(), key=lambda item: (item[0][0], item[0][3])):
         ordered = sorted(nodes, key=lambda item: (int(item[0][1]), str(item[0][0]), str(item[0][2]), str(item[0][3])))
-        for index, (target_key, target_summary) in enumerate(ordered, start=1):
-            rows = _distance_rows_for_pair(
-                category='layer_distance_profile',
-                source_key=input_key,
-                source_summary=input_summary,
-                target_key=target_key,
-                target_summary=target_summary,
-                common_by_key=common_by_key,
-                relation_type='input_reference',
-                comparison_index=index,
-                track_name=track,
-                extractors=extractors,
-                distance_metric=distance_metric,
-            )
-            profile_rows.extend(rows)
-            for row in rows:
-                trend = dict(row)
-                trend['category'] = 'layer_distance_trend'
-                trend_rows.append(common_row(**trend))
-        adjacency_chain = [(input_key, input_summary)] + ordered
+        adjacency_chain = ordered
         for index, ((source_key, source_summary), (target_key, target_summary)) in enumerate(zip(adjacency_chain, adjacency_chain[1:]), start=1):
             rows = _distance_rows_for_pair(
                 category='layer_distance_profile',
@@ -1136,14 +1003,13 @@ def _checkpoint_common_base(*, payload: Mapping[str, Any], checkpoint_path: Path
 def main(argv: Sequence[str] | None = None) -> int:
     global LOW_VRAM
     parser = build_arg_parser()
-    args = parser.parse_args(argv)
+    args = parse_args_with_config(parser, argv=argv, stage_key='psd_analysis')
     LOW_VRAM = bool(int(args.low_vram))
     if int(args.anal_batch) < 1:
         parser.error('--anal_batch must be >= 1.')
     if int(args.num_workers) < 0:
         parser.error('--num_workers must be >= 0.')
     # Exact-only analysis: userbin aggregation is intentionally disabled.
-    userbin_edges = None
 
     output_root = Path(args.output_root).expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
@@ -1179,7 +1045,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         if hasattr(model, 'iter_named_layers'):
             for idx, (name, _layer) in enumerate(model.iter_named_layers(), start=1):
                 layer_index_by_name[str(name)] = idx
-        layer_index_by_name.setdefault('input', 0)
         maps_by_key: dict[tuple[str, int, str, str, str, str, int | None], torch.Tensor] = {}
         for split_name, split_dataset in (('train', bundle.train_dataset), ('test', bundle.test_dataset)):
             analysis_dataset = dataset_for_view(split_dataset, bundle.training_view_name)
@@ -1207,7 +1072,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         for key, maps in sorted(maps_by_key.items(), key=lambda item: (item[0][1], item[0][0], item[0][2], item[0][3], item[0][4])):
             layer_name, layer_index, signal_kind, series, scope, family, label = key
-            summary = compute_family_spectral_summary(maps, window=None, overlap=0, userbin_edges=userbin_edges, include_spectrogram=False, include_userbin=False)
+            summary = compute_family_spectral_summary(maps, window=None, overlap=0, userbin_edges=None, include_spectrogram=False, include_userbin=False)
             summaries[key] = summary
             base = dict(checkpoint_base)
             base.update(layer=layer_name, layer_index=layer_index, scope=scope, probe_family=family, label='' if label is None else int(label), signal_kind=signal_kind, series=series)
@@ -1233,7 +1098,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _write_layer_rows(checkpoint_dir, dispersion_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='analysis_dispersion')
         _write_artifact(checkpoint_dir / 'pair_distance.csv', pair_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='pair_distance')
         _write_layer_rows(checkpoint_dir, filter_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='filter_snapshot')
-        for relation_type in ('input_reference', 'adjacent'):
+        for relation_type in ('adjacent',):
             relation_rows = [row for row in layer_distance_profile_rows if row.get('relation_type') == relation_type]
             _write_rows_to_dir(checkpoint_dir / 'layer_distance_profile' / relation_type, relation_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='layer_distance_profile')
         for statistic in ('variance', 'mad'):
@@ -1250,7 +1115,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             kwargs = dict(base)
             kwargs.update(category='filter_trend', layer=layer_name, layer_index=layer_index, checkpoint_epoch=epoch, parameter_name=parameter, statistic=stat_name, value=stat_value, value_unit='count' if stat_name == 'count' else 'parameter_value')
             filter_trend_rows.append(common_row(**kwargs))
-    for relation_type in ('input_reference', 'adjacent'):
+    for relation_type in ('adjacent',):
         relation_rows = [row for row in layer_distance_trend_rows if row.get('relation_type') == relation_type]
         _write_rows_to_dir(traces_dir / 'layer_distance_trend' / relation_type, relation_rows, manifest_rows=manifest_rows, manifest_base=manifest_base, artifact_name='layer_distance_trend')
     for statistic in ('variance', 'mad'):

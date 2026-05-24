@@ -7,29 +7,37 @@ not run model/layer PSD analysis and does not render figures.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+if __package__ is None or __package__ == '':
+    _SCRIPT_DIR = Path(__file__).resolve().parent
+    _PROJECT_ROOT = _SCRIPT_DIR.parent
+    try:
+        sys.path.remove(str(_SCRIPT_DIR))
+    except ValueError:
+        pass
+    if str(_PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(_PROJECT_ROOT))
+
 import argparse
 import json
 import os
 from pathlib import Path
 import tempfile
 import shutil
-import random
 from typing import Any, Sequence
 
-import numpy as np
-import torch
-from tqdm import tqdm
 
-from src.data.registry import make_loader, resolve_dataset_bundle, select_training_view_for_model
-from src.model.model_registry import ModelSpec, canonicalize_model_token
-from src.model.training import build_optimizer, evaluate_one_epoch, train_one_epoch
-from src.model.snn_builder import build_snn_classifier
-from src.readout.readout import build_readout
-from src.util.config import load_json
+from src.util.config_cli import parse_args_with_config
 from src.util.csv_schema import common_row, write_common_csv
 
 CHECKPOINT_SCHEMA_VERSION = 'psd_checkpoint_v1'
 SOURCE_PROGRAM = 'model_training'
+
+
+def _load_json_light(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -62,6 +70,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         default=None,
                         help='Optional .pt checkpoint path. Loads model state_dict and continues from checkpoint epoch + 1.',
                     )
+    parser.add_argument('--config', default=None, help='JSON 설정 파일 경로(.json)')
     return parser
 
 
@@ -94,7 +103,7 @@ def _resolve_prepared_paths(dataset: str, prep_root: str) -> tuple[Path, Path]:
     manifest_path = dataset_root / 'manifest.json'
     if not manifest_path.exists():
         raise FileNotFoundError(f'--prep_root must contain <dataset>/manifest.json; missing {manifest_path}')
-    manifest = load_json(manifest_path)
+    manifest = _load_json_light(manifest_path)
     manifest_dataset = str(manifest.get('dataset_name', dataset)) if isinstance(manifest, dict) else str(dataset)
     if manifest_dataset != str(dataset):
         raise ValueError(f'--dataset {dataset!r} does not match manifest dataset_name {manifest_dataset!r}.')
@@ -130,15 +139,6 @@ def _resolve_device(gpu_index: int) -> torch.device:
     return torch.device('cpu')
 
 
-def _seed_everything(seed: int) -> None:
-    value = int(seed)
-    random.seed(value)
-    np.random.seed(value)
-    torch.manual_seed(value)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(value)
-
-
 def _model_family(spec: ModelSpec) -> str:
     if spec.family in {'cnn_lif', 'cnn_rf'}:
         return 'cnn'
@@ -171,7 +171,7 @@ def _hidden_spec_normalized(model_spec: ModelSpec, model_metadata: dict[str, Any
 
 
 def _read_manifest(bundle_manifest: Path) -> dict[str, Any]:
-    value = load_json(bundle_manifest)
+    value = _load_json_light(bundle_manifest)
     if not isinstance(value, dict):
         raise ValueError(f'Prepared manifest must be a JSON object: {bundle_manifest}')
     return value
@@ -267,7 +267,7 @@ def _training_metric_rows(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_arg_parser()
-    args = parser.parse_args(argv)
+    args = parse_args_with_config(parser, argv=argv, stage_key='model_training')
 
     if int(args.batch_size) < 1:
         parser.error('--batch_size must be >= 1.')

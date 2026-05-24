@@ -1,9 +1,4 @@
-"""Global random-seed helpers.
-
-The project relies on deterministic probe selection and reproducible training
-loops. These helpers centralize the seed / worker policy so the entrypoints do
-not silently diverge.
-"""
+"""전역 시드 헬퍼 모음."""
 
 from __future__ import annotations
 
@@ -12,9 +7,6 @@ import random
 
 import numpy as np
 import torch
-
-
-_DEFAULT_CUBLAS_WORKSPACE_CONFIG = ':4096:8'
 
 
 def build_torch_generator(seed: int | None) -> torch.Generator | None:
@@ -50,15 +42,9 @@ def seed_dataloader_worker(_worker_id: int) -> None:
 
 
 def seed_everything(seed: int) -> int:
-    """Seed Python, NumPy, and Torch deterministically.
-
-    This function is called once near each official entrypoint / driver start so
-    that Python hashing, NumPy RNG, Torch CPU RNG, Torch CUDA RNG, and cuDNN
-    algorithm selection stay aligned.
-    """
+    """Python/NumPy/Torch 시드를 고정하되 deterministic 모드는 사용하지 않는다."""
 
     seed = int(seed)
-    os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', _DEFAULT_CUBLAS_WORKSPACE_CONFIG)
     os.environ['PYTHONHASHSEED'] = str(seed)
     random.seed(seed)
     np.random.seed(seed)
@@ -66,10 +52,10 @@ def seed_everything(seed: int) -> int:
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
     try:
-        torch.use_deterministic_algorithms(True)
+        torch.use_deterministic_algorithms(False)
     except Exception:
         pass
     return seed

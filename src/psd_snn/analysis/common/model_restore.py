@@ -28,7 +28,7 @@ def restore_model_from_bundle(bundle, *, device: str = "cpu", strict_load: bool 
         if cfg_dict is None:
             raise ValueError("checkpoint missing config")
         cfg = _from_dict(cfg_dict)
-                try:
+        try:
             model = build_model(cfg.model)
         except UnsupportedTopologyError as ue:
             return ModelRestoreResult(None, cfg.model, cfg.model.topology, cfg.model.cell, cfg.model.readout, bundle.constraint_hash, bundle.checkpoint_epoch, 'unsupported_topology', reason=str(ue))

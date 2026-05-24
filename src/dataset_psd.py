@@ -2,29 +2,35 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+if __package__ is None or __package__ == '':
+    _SCRIPT_DIR = Path(__file__).resolve().parent
+    _PROJECT_ROOT = _SCRIPT_DIR.parent
+    try:
+        sys.path.remove(str(_SCRIPT_DIR))
+    except ValueError:
+        pass
+    if str(_PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(_PROJECT_ROOT))
+
 import argparse
 from collections import defaultdict
 import json
 from pathlib import Path
-import random
 from typing import Any, Mapping, Sequence
 
-import numpy as np
-import torch
 
-from src.data.registry import dataset_for_view, make_loader, resolve_dataset_bundle
-from src.signal.family_spectral_analysis import curve_axis_from_summary
-from src.signal.psd_utils import (
-    apply_centering,
-    exact_periodogram_from_maps,
-    power_to_db,
-    tensor_to_channel_major_maps_explicit,
-)
-from src.stat.probe_selection import build_probe_index_bundle, dataset_targets, subset_from_indices
-from src.util.config import load_json
 from src.util.csv_schema import common_row, write_common_csv
+from src.util.config_cli import parse_args_with_config
+
 
 SOURCE_PROGRAM = 'dataset_psd'
+
+
+def _load_json_light(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
 ALL_CURVE_EXTRACTORS = ('psd_exact',)
 ALL_VALUE_SCALES = ('raw', 'db')
 
@@ -36,9 +42,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--output_root', required=True, help='Output directory for category CSV files.')
     parser.add_argument('--batch_size', required=True, type=int)
     parser.add_argument('--gpu_index', required=True, type=int)
-    # Deprecated compatibility argument. Exact-only analysis ignores it.
-    parser.add_argument('--userbin_edges', nargs='*', type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument('--seed', required=True, type=int)
+    parser.add_argument('--config', default=None, help='JSON 설정 파일 경로(.json)')
     parser.add_argument('--num_workers', type=int, default=0)
     return parser
 
@@ -81,11 +86,7 @@ def _expected_rows_time(manifest: Mapping[str, Any]) -> tuple[int | None, int | 
     return None, None
 
 def _seed_everything(seed: int) -> None:
-    random.seed(int(seed))
-    np.random.seed(int(seed))
-    torch.manual_seed(int(seed))
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(int(seed))
+    seed_everything(int(seed))
 
 
 def _quota(dataset: Any) -> int:
@@ -248,7 +249,6 @@ def _streaming_summary(
     device: torch.device,
     manifest: Mapping[str, Any],
     psd_axis_kind: str,
-    userbin_edges: Sequence[float] | None = None,
 ) -> dict[str, Any]:
     loader = make_loader(
         dataset,
@@ -329,7 +329,6 @@ def _streaming_summary(
         'curve_extractors': list(ALL_CURVE_EXTRACTORS),
         'spectrogram_saved': False,
         'freq': freq_ref.detach().cpu().numpy(),
-        'userbin_edges': None,
         'userbin_centers': None,
         'representative': {'mean': {}, 'median': {}},
         'dispersion': {},
@@ -407,7 +406,7 @@ def _write_grouped(root_dir: Path, rows: list[dict[str, str]], *, manifest_rows:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_arg_parser()
-    args = parser.parse_args(argv)
+    args = parse_args_with_config(parser, argv=argv, stage_key='dataset_psd')
     if int(args.batch_size) < 1:
         parser.error('--batch_size must be >= 1.')
     if int(args.num_workers) < 0:
@@ -418,7 +417,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     dataset_token = str(args.dataset)
     prep_root = Path(args.prep_root).expanduser().resolve()
     bundle = resolve_dataset_bundle(dataset_token, prep_root=prep_root)
-    manifest = load_json(bundle.manifest_path)
+    manifest = _load_json_light(bundle.manifest_path)
     if not isinstance(manifest, Mapping):
         raise ValueError(f'Prepared manifest must be a JSON object: {bundle.manifest_path}')
     _validate_axis_metadata(manifest)
@@ -448,7 +447,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 device=device,
                 manifest=manifest,
                 psd_axis_kind=bundle.psd_axis_kind,
-                userbin_edges=None,
             )
             base = dict(common_base)
             base.update(scope=scope, probe_family=family, label='' if label is None else int(label), signal_kind='input')

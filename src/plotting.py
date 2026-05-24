@@ -38,6 +38,19 @@ python plot_psd_batch_recursive.py \
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+if __package__ is None or __package__ == '':
+    _SCRIPT_DIR = Path(__file__).resolve().parent
+    _PROJECT_ROOT = _SCRIPT_DIR.parent
+    try:
+        sys.path.remove(str(_SCRIPT_DIR))
+    except ValueError:
+        pass
+    if str(_PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(_PROJECT_ROOT))
+
 import argparse
 import csv
 import math
@@ -49,6 +62,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
+
+from src.util.config_cli import parse_args_with_config
 
 
 FIGSIZE = (14, 4)          # 3.5:1, matching the requested/existing style
@@ -158,6 +173,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Overwrite existing figure files.",
     )
+    parser.add_argument('--config', default=None, help='JSON 설정 파일 경로(.json)')
     parser.add_argument(
         "--manifest_name",
         default="recursive_plot_manifest.csv",
@@ -1018,7 +1034,7 @@ def _load_artifacts(csv_files: Sequence[Path]) -> tuple[list[CsvArtifact], list[
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_arg_parser()
-    args = parser.parse_args(argv)
+    args = parse_args_with_config(parser, argv=argv, stage_key='plotting')
 
     input_path = Path(args.input).expanduser().resolve()
     if args.output and args.output_root:
