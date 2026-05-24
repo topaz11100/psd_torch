@@ -136,6 +136,23 @@ def _label_single_indices_outside_balanced(
     return selected
 
 
+
+
+def _probe_quota(dataset: Any) -> int:
+    """probe 선택에 사용할 label별 균형 quota를 계산한다."""
+
+    targets = dataset_targets(dataset)
+    counts: dict[int, int] = {}
+    for target in targets:
+        counts[int(target)] = counts.get(int(target), 0) + 1
+    if not counts:
+        raise ValueError('Cannot build probes for an empty dataset split.')
+
+    target_total = 100
+    num_classes = len(counts)
+    per_label = max(1, target_total // max(1, num_classes))
+    return max(1, min(per_label, min(counts.values())))
+
 def iter_matrix_probe_scopes(dataset: Any, *, split_name: str, seed: int) -> list[ProbeScope]:
     """Return balanced-global and one-sample-per-label probe scopes.
 
@@ -144,7 +161,7 @@ def iter_matrix_probe_scopes(dataset: Any, *, split_name: str, seed: int) -> lis
     excluding every index already used by the balanced-global scope.
     """
 
-    quota = psd_common._probe_quota(dataset)
+    quota = _probe_quota(dataset)
     bundle = build_probe_index_bundle(
         dataset,
         split_name=split_name,
@@ -164,12 +181,15 @@ def iter_matrix_probe_scopes(dataset: Any, *, split_name: str, seed: int) -> lis
             subset=subset_from_indices(dataset, bundle.balanced_global),
         )
     ]
-    label_single_indices = _label_single_indices_outside_balanced(
-        dataset,
-        split_name=split_name,
-        seed=int(seed),
-        balanced_indices=bundle.balanced_global,
-    )
+    try:
+        label_single_indices = _label_single_indices_outside_balanced(
+            dataset,
+            split_name=split_name,
+            seed=int(seed),
+            balanced_indices=bundle.balanced_global,
+        )
+    except ValueError:
+        label_single_indices = {}
     for label, dataset_index in sorted(label_single_indices.items(), key=lambda item: item[0]):
         sample_index = int(sample_indices[dataset_index]) if dataset_index < len(sample_indices) else dataset_index
         scopes.append(
@@ -253,7 +273,10 @@ def collect_mlp_output_maps(
                 result = None
                 model_inputs = None
                 try:
-                    model_inputs = psd_common._prepared_input_for_model(model, inputs, device=device)
+                    if hasattr(model, 'input_dim') and hasattr(model, 'sequence_length'):
+                        model_inputs = psd_common._prepared_input_for_model(model, inputs, device=device)
+                    else:
+                        model_inputs = torch.as_tensor(inputs, dtype=torch.float32, device=device)
                     result = model(model_inputs, capture_hidden=True)
                     for record in result.hidden_records:
                         layer_name = str(record.layer_name)

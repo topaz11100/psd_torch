@@ -13,7 +13,6 @@ def _parse_seed_from_argv(argv: Sequence[str]) -> str:
     """argv에서 시드를 읽고, 없으면 --config의 seed를 보조로 사용한다."""
     argv = list(argv)
     config_path: str | None = None
-    stage_key = 'data_prep'
     for index, token in enumerate(argv):
         if token == '--seed' and index + 1 < len(argv):
             return str(argv[index + 1])
@@ -29,10 +28,11 @@ def _parse_seed_from_argv(argv: Sequence[str]) -> str:
             if path.suffix.lower() == '.json' and path.exists():
                 payload = json.loads(path.read_text(encoding='utf-8'))
                 if isinstance(payload, dict):
-                    if stage_key in payload and isinstance(payload[stage_key], dict) and 'seed' in payload[stage_key]:
-                        return str(payload[stage_key]['seed'])
                     if 'seed' in payload:
                         return str(payload['seed'])
+                    for value in payload.values():
+                        if isinstance(value, dict) and 'seed' in value:
+                            return str(value['seed'])
         except Exception:
             pass
     return '0'

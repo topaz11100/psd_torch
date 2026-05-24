@@ -30,6 +30,40 @@ VARIANTS = ('raw', 'centered')
 SCALES = ('raw', 'db')
 
 
+def _load_runtime_dependencies() -> None:
+    """Element PSD 실행에 필요한 무거운 의존성을 지연 로드한다."""
+
+    global torch, tqdm, psd_common
+    global ProbeMapKey, checkpoint_output_dir, collect_mlp_output_maps, common_base_for_key
+    global layer_folder, manifest_row, safe_token, validate_mlp_only, value_columns, write_matrix_csv
+    global dataset_for_view, apply_centering, exact_periodogram_from_maps, power_to_db
+    import torch as _torch
+    from tqdm import tqdm as _tqdm
+    import src.psd_analysis as _psd_common
+
+    _psd_common._load_runtime_dependencies()
+    from src.analysis_matrix_common import ProbeMapKey as _ProbeMapKey, checkpoint_output_dir as _checkpoint_output_dir, collect_mlp_output_maps as _collect_mlp_output_maps, common_base_for_key as _common_base_for_key, layer_folder as _layer_folder, manifest_row as _manifest_row, safe_token as _safe_token, validate_mlp_only as _validate_mlp_only, value_columns as _value_columns, write_matrix_csv as _write_matrix_csv
+    from src.data.registry import dataset_for_view as _dataset_for_view
+    from src.signal.psd_utils import apply_centering as _apply_centering, exact_periodogram_from_maps as _exact_periodogram_from_maps, power_to_db as _power_to_db
+    torch = _torch
+    tqdm = _tqdm
+    psd_common = _psd_common
+    ProbeMapKey = _ProbeMapKey
+    checkpoint_output_dir = _checkpoint_output_dir
+    collect_mlp_output_maps = _collect_mlp_output_maps
+    common_base_for_key = _common_base_for_key
+    layer_folder = _layer_folder
+    manifest_row = _manifest_row
+    safe_token = _safe_token
+    validate_mlp_only = _validate_mlp_only
+    value_columns = _value_columns
+    write_matrix_csv = _write_matrix_csv
+    dataset_for_view = _dataset_for_view
+    apply_centering = _apply_centering
+    exact_periodogram_from_maps = _exact_periodogram_from_maps
+    power_to_db = _power_to_db
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description='Checkpoint-only element-wise PSD analysis for MLP probe output maps.')
     parser.add_argument('--checkpoint', required=True, help='Single .pt checkpoint file or strict .pt-only checkpoint directory.')
@@ -109,7 +143,7 @@ def _rows_for_element_matrix(
             variant=variant,
             scale=scale,
             neuron_index=neuron_index,
-            neuron_axis_order='input_element_index_zero_based' if str(base.get('signal_kind')) == 'input' else 'dense_layer_output_index_zero_based',
+            neuron_axis_order='dense_layer_output_index_zero_based',
             time_length=int(time_length),
             frequency_bin_count=frequency_bin_count,
             frequency_grid='exact_one_sided_index_over_time_length',
@@ -184,6 +218,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error('--anal_batch must be >= 1.')
     if int(args.num_workers) < 0:
         parser.error('--num_workers must be >= 0.')
+    _load_runtime_dependencies()
     psd_common.LOW_VRAM = bool(int(args.low_vram))
 
     output_root = Path(args.output_root).expanduser().resolve()
@@ -196,7 +231,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     manifest_rows: list[dict[str, str]] = []
     first_manifest_base: dict[str, Any] | None = None
 
-    for checkpoint_path in checkpoint_files:
+    for checkpoint_path in tqdm(checkpoint_files, desc='element_psd:checkpoints', leave=False):
         payload = psd_common._load_checkpoint(checkpoint_path, map_location='cpu')
         seed = int(args.seed if args.seed is not None else payload.get('seed', 0))
         psd_common._seed_everything(seed)
@@ -241,7 +276,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             input_is_single_file=input_is_single_file,
         )
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        for key, maps in sorted(maps_by_key.items(), key=lambda item: (item[0][1], item[0][0], item[0][4], item[0][6] if item[0][6] is not None else -1, item[0][3])):
+        for key, maps in tqdm(sorted(maps_by_key.items(), key=lambda item: (item[0][1], item[0][0], item[0][4], item[0][6] if item[0][6] is not None else -1, item[0][3])), desc='element_psd:artifacts', leave=False):
             for variant in VARIANTS:
                 for scale in SCALES:
                     _write_element_psd_artifact(

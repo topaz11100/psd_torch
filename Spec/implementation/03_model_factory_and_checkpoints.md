@@ -1,7 +1,16 @@
 # Model factory와 checkpoint
 
-`build_model`은 topology kind를 기준으로 MLP와 fixed topology를 분리한다. MLP는 `CellSpec`을 사용하고 fixed topology는 독립 factory를 사용한다.
+`src/model/model_registry.py`가 model token을 canonical spec으로 바꾼다. `src/model/snn_builder.py`가 모델을 생성한다.
 
-Checkpoint payload는 model object pickle이 아니라 state dict와 metadata 중심이다. metadata에는 topology, cell, readout, constraint, checkpoint epoch, hash가 포함된다.
+Checkpoint는 `.pt` 파일이며 최소 다음 metadata를 포함해야 한다.
 
-Restore 실패나 unsupported topology는 status/reason으로 표현되어야 한다.
+- model token/config
+- readout config
+- dataset token
+- prepared data reference
+- axis metadata reference
+- seed
+- epoch
+- state_dict
+
+분석 entrypoint는 checkpoint metadata와 CLI/config dataset 값이 일치하는지 확인한다.

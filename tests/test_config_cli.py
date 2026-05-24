@@ -52,13 +52,24 @@ def test_all_config_json_valid():
 
 
 def test_bash_wrappers_reference_config():
-    names = ['data_prep','dataset_psd','dataset_fft','model_training','psd_analysis','element_psd','fft2d_analysis','plotting']
-    for name in names:
+    script_targets = {
+        'data_prep': 'src/data_prep.py',
+        'dataset_psd': 'src/dataset_psd.py',
+        'dataset_fft': 'src/dataset_fft.py',
+        'model_training': 'src/model_training.py',
+        'psd_analysis': 'src/psd_analysis.py',
+        'element_psd': 'src/element_psd.py',
+        'fft2d_analysis': 'src/2d_fft_analysis.py',
+        'plotting': 'src/plotting.py',
+    }
+    for name, target in script_targets.items():
         script = Path('bash') / f'{name}.sh'
         assert script.exists()
         text = script.read_text(encoding='utf-8')
         assert f'config/{name}.json' in text
         assert '--config "$CONFIG_PATH"' in text
+        assert target in text
+        assert Path(target).exists()
 
 
 def test_no_bbalanced_typo():
@@ -68,7 +79,6 @@ def test_no_bbalanced_typo():
 
 
 def test_model_training_config_only_parses_required(tmp_path: Path):
-    pytest.importorskip('torch')
     from src.model_training import build_arg_parser
 
     cfg = tmp_path / 'train.json'

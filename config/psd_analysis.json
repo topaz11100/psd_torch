@@ -1,1 +1,14 @@
-{"psd_analysis":{"checkpoint":"/ABS/PATH/TO/output/checkpoints","dataset":"mnist","prep_root":"/ABS/PATH/TO/prepared","output_root":"/ABS/PATH/TO/output/psd_analysis","anal_batch":128,"gpu_index":0,"seed":0,"num_workers":0,"low_vram":0,"analysis_distance_metric":"centered_l2"}}
+{
+  "psd_analysis": {
+    "checkpoint": "/ABS/PATH/TO/output/checkpoints",
+    "dataset": "mnist",
+    "prep_root": "/ABS/PATH/TO/prepared",
+    "output_root": "/ABS/PATH/TO/output/psd_analysis",
+    "anal_batch": 128,
+    "gpu_index": 0,
+    "seed": 0,
+    "num_workers": 0,
+    "low_vram": 0,
+    "analysis_distance_metric": "centered_l2"
+  }
+}

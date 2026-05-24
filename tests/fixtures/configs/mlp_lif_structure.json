@@ -1,1 +1,0 @@
-{"model":{"topology":{"kind":"mlp_stack","input_dim":4,"hidden_widths":[6,6],"output_dim":2},"cell":{"kind":"lif","recurrent":true},"constraints":{"scenario":{"scenario":"structure"},"structure":{"enabled":true,"group_count":2,"apply_recurrent":true},"clip":{"enabled":false}}}}

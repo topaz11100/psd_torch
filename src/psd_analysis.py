@@ -36,6 +36,53 @@ ALL_CURVE_EXTRACTORS = ('psd_exact',)
 ALL_VALUE_SCALES = ('raw', 'db')
 LOW_VRAM = False
 
+
+def _load_runtime_dependencies() -> None:
+    """PSD 분석 실행에 필요한 무거운 의존성을 지연 로드한다."""
+
+    global np, torch, tqdm, seed_everything
+    global canonicalize_model_input_batch
+    global dataset_for_view, make_loader, resolve_dataset_bundle, select_training_view_for_model
+    global ModelSpec, canonicalize_model_token, build_snn_classifier, build_readout
+    global compute_family_spectral_summary, curve_axis_from_summary, curve_pointwise_distance
+    global pair_distance_from_summaries, representative_curve_from_summary
+    global trace_tensor_to_channel_major_maps
+    global build_probe_index_bundle, dataset_targets, subset_from_indices
+    import numpy as _np
+    import torch as _torch
+    from tqdm import tqdm as _tqdm
+    from src.util.random import seed_everything as _seed_everything
+    from src.data.base import canonicalize_model_input_batch as _canonicalize_model_input_batch
+    from src.data.registry import dataset_for_view as _dataset_for_view, make_loader as _make_loader, resolve_dataset_bundle as _resolve_dataset_bundle, select_training_view_for_model as _select_training_view_for_model
+    from src.model.model_registry import ModelSpec as _ModelSpec, canonicalize_model_token as _canonicalize_model_token
+    from src.model.snn_builder import build_snn_classifier as _build_snn_classifier
+    from src.readout.readout import build_readout as _build_readout
+    from src.signal.family_spectral_analysis import compute_family_spectral_summary as _compute_family_spectral_summary, curve_axis_from_summary as _curve_axis_from_summary, curve_pointwise_distance as _curve_pointwise_distance, pair_distance_from_summaries as _pair_distance_from_summaries, representative_curve_from_summary as _representative_curve_from_summary
+    from src.signal.psd_utils import trace_tensor_to_channel_major_maps as _trace_tensor_to_channel_major_maps
+    from src.stat.probe_selection import build_probe_index_bundle as _build_probe_index_bundle, dataset_targets as _dataset_targets, subset_from_indices as _subset_from_indices
+    np = _np
+    torch = _torch
+    tqdm = _tqdm
+    seed_everything = _seed_everything
+    canonicalize_model_input_batch = _canonicalize_model_input_batch
+    dataset_for_view = _dataset_for_view
+    make_loader = _make_loader
+    resolve_dataset_bundle = _resolve_dataset_bundle
+    select_training_view_for_model = _select_training_view_for_model
+    ModelSpec = _ModelSpec
+    canonicalize_model_token = _canonicalize_model_token
+    build_snn_classifier = _build_snn_classifier
+    build_readout = _build_readout
+    compute_family_spectral_summary = _compute_family_spectral_summary
+    curve_axis_from_summary = _curve_axis_from_summary
+    curve_pointwise_distance = _curve_pointwise_distance
+    pair_distance_from_summaries = _pair_distance_from_summaries
+    representative_curve_from_summary = _representative_curve_from_summary
+    trace_tensor_to_channel_major_maps = _trace_tensor_to_channel_major_maps
+    build_probe_index_bundle = _build_probe_index_bundle
+    dataset_targets = _dataset_targets
+    subset_from_indices = _subset_from_indices
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description='Checkpoint-only PSD analysis entrypoint.')
     parser.add_argument('--checkpoint', required=True, help='Single .pt checkpoint file or strict .pt-only checkpoint directory.')
@@ -372,7 +419,7 @@ def _collect_signal_maps(
                     pin_memory=device.type == 'cuda',
                     seed=int(seed),
                 )
-                for inputs, _target in loader:
+                for inputs, _target in tqdm(loader, desc=f'{SOURCE_PROGRAM}:{scope}', leave=False):
                     model_inputs = _prepared_input_for_model(model, inputs, device=device)
                     result = model(model_inputs, capture_hidden=True)
                     for record in list(result.hidden_records):
@@ -409,7 +456,7 @@ def _collect_signal_maps(
                     seed=int(seed),
                 )
 
-                for inputs, _target in loader:
+                for inputs, _target in tqdm(loader, desc=f'{SOURCE_PROGRAM}:{scope}', leave=False):
                     result = None
                     model_inputs = None
 
@@ -1011,6 +1058,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error('--num_workers must be >= 0.')
     # Exact-only analysis: userbin aggregation is intentionally disabled.
 
+    _load_runtime_dependencies()
+
     output_root = Path(args.output_root).expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     checkpoint_input = Path(args.checkpoint).expanduser().resolve()
@@ -1026,7 +1075,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     filter_trend_history: dict[tuple[str, int, str, str], list[tuple[int, float, dict[str, Any]]]] = defaultdict(list)
     first_manifest_base: dict[str, Any] | None = None
 
-    for checkpoint_path in checkpoint_files:
+    for checkpoint_path in tqdm(checkpoint_files, desc='psd_analysis:checkpoints', leave=False):
         payload = _load_checkpoint(checkpoint_path, map_location='cpu')
         seed = int(args.seed if args.seed is not None else payload.get('seed', 0))
         _seed_everything(seed)
@@ -1070,7 +1119,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         family_rows: list[dict[str, str]] = []
         dispersion_rows: list[dict[str, str]] = []
 
-        for key, maps in sorted(maps_by_key.items(), key=lambda item: (item[0][1], item[0][0], item[0][2], item[0][3], item[0][4])):
+        for key, maps in tqdm(sorted(maps_by_key.items(), key=lambda item: (item[0][1], item[0][0], item[0][2], item[0][3], item[0][4])), desc='psd_analysis:summaries', leave=False):
             layer_name, layer_index, signal_kind, series, scope, family, label = key
             summary = compute_family_spectral_summary(maps, window=None, overlap=0, userbin_edges=None, include_spectrogram=False, include_userbin=False)
             summaries[key] = summary

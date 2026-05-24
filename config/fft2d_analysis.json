@@ -1,1 +1,13 @@
-{"fft2d_analysis":{"checkpoint":"/ABS/PATH/TO/output/checkpoints","dataset":"mnist","prep_root":"/ABS/PATH/TO/prepared","output_root":"/ABS/PATH/TO/output/fft2d_analysis","anal_batch":128,"gpu_index":0,"seed":0,"num_workers":0,"low_vram":0}}
+{
+  "fft2d_analysis": {
+    "checkpoint": "/ABS/PATH/TO/output/checkpoints",
+    "dataset": "mnist",
+    "prep_root": "/ABS/PATH/TO/prepared",
+    "output_root": "/ABS/PATH/TO/output/fft2d_analysis",
+    "anal_batch": 128,
+    "gpu_index": 0,
+    "seed": 0,
+    "num_workers": 0,
+    "low_vram": 0
+  }
+}

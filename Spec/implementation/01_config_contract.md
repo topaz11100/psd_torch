@@ -1,14 +1,14 @@
-# 설정 contract
+# JSON 설정 계약
 
-현재 설정은 dataclass 기반이다. 핵심 객체는 `ExperimentConfig`, `ModelSpec`, `TopologySpec`, `CellSpec`, `ReadoutSpec`, `ConstraintSpec`, `ProbeSpec`, `SignalAnalysisSpec`이다.
+모든 stage는 `--config <json>`을 지원한다. JSON은 stage key 아래에 설정 객체를 둔다.
 
-## validation 원칙
+```json
+{
+  "model_training": {
+    "dataset": "mnist",
+    "prep_root": "/ABS/PATH/TO/prepared"
+  }
+}
+```
 
-- `mlp_stack`은 hidden widths가 필요하다.
-- fixed topology는 MLP cell replacement 대상이 아니다.
-- canonical scenario는 `none`, `clip`, `structure`, `clipstructure`다.
-- probe family는 `balanced_global`, `distributed_set`, `label_set`, `label_single`만 허용한다.
-- spectral axis는 `exact` 또는 `userbin`이다.
-- distance metric은 `centered_l2`, `diff_l2`만 허용한다.
-
-잘못된 cell/bounds 조합은 validator에서 차단한다.
+CLI 인자가 JSON 값을 override한다. 알 수 없는 key는 오류다. `.yaml`, `.yml`은 지원하지 않는다.

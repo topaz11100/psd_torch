@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 PROJECT_STANDARD_PREP_PROFILE = "project_standard"
-REINTERPRETATION_PREP_PROFILES = (
+REFERENCE_PREP_PROFILES = (
     "need_high_cifar10_dvs_t16",
     "drf_shd_t250",
     "dh_snn_shd_t1000",
@@ -11,4 +11,4 @@ REINTERPRETATION_PREP_PROFILES = (
 
 
 def available_prep_profiles() -> tuple[str, ...]:
-    return (PROJECT_STANDARD_PREP_PROFILE, *sorted(REINTERPRETATION_PREP_PROFILES))
+    return (PROJECT_STANDARD_PREP_PROFILE, *sorted(REFERENCE_PREP_PROFILES))

@@ -1,78 +1,58 @@
-# PSD/SNN 분석 워크스페이스
+# PSD/SNN 신호분석 프로젝트
 
-이 저장소는 SNN 레이어 신호의 시간 구조를 PSD, PCA, 2D FFT, 거리 지표로 분석하기 위해 리팩터링한 작업 공간이다. 현재 공식 구현은 `src/psd_snn` 아래에 있으며, 학습, checkpoint 분석, 동역학 통계, artifact 입출력, plotting을 분리한다.
+이 저장소는 SNN 모델과 입력 데이터의 시간 신호를 PSD, element-wise PSD, 2D FFT, 거리 지표, 시각화 artifact로 분리해 분석하는 프로젝트다. 실행 단위는 root `src/*.py` entrypoint, root `config/*.json`, root `bash/*.sh` wrapper로 고정한다.
 
-## 현재 공식 패키지
-
-```text
-src/psd_snn/
-  cli/          # train, analyze_signal, analyze_fft2d, analyze_dynamics, plot_artifacts
-  config/       # dataclass 기반 설정과 validator
-  models/       # MLP topology, IF/LIF/RF cell, fixed topology smoke models
-  analysis/     # probe, trace, signal map, PSD/PCA/FFT2D, distance
-  artifacts/    # summary writer, trace writer, reader, plotting
-  training/     # 최소 synthetic training/checkpoint smoke 경로
-```
-
-`src/psd_snn` 밖의 과거 구현은 현재 실행 계약이 아니다. 역사적 출처와 비교가 필요하면 archive/reference 디렉터리를 확인한다.
-
-## 현재 CLI
-
-```bash
-PYTHONPATH=src python -m psd_snn.cli.train --help
-PYTHONPATH=src python -m psd_snn.cli.analyze_signal --help
-PYTHONPATH=src python -m psd_snn.cli.analyze_fft2d --help
-PYTHONPATH=src python -m psd_snn.cli.analyze_dynamics --help
-PYTHONPATH=src python -m psd_snn.cli.plot_artifacts --help
-```
-
-사용 예시는 `examples/`가 공식 진입점이다.
-
-```bash
-source examples/bash/00_env.sh
-examples/bash/12_end_to_end_train_analyze_plot.sh
-```
-
-## 구현 완료 경계
-
-현재 phase는 다음 범위를 완료 대상으로 본다.
-
-- MLP topology와 IF/LIF/RF cell 분리.
-- hidden layer의 spike-only SRNN recurrence.
-- `none`, `clip`, `structure`, `clipstructure` scenario.
-- `final_if`, `final_mem` readout.
-- raw trace `B,T,*`와 SignalMap `S,R,T` 변환.
-- PSD 대표화 `mean`, `median`, `element_psd`, `pca`.
-- fixed-reference PCA basis fit/apply 및 `pca_basis_id` 비교 규칙.
-- 독립 2D FFT 분석과 `spectral_matrix_2d` artifact.
-- exact/userbin 축과 PCA basis를 고려한 strict spectral distance.
-- trace tensor chunk와 manifest/summary CSV.
-- synthetic training checkpoint smoke와 artifact reader/plotting 기본 경로.
-
-## 문서 구조
-
-- `Spec/README.md`: 현재 명세 index.
-- `Spec/theory/`: 대상 객체, 수식, 분석 의도, 해석 기준.
-- `Spec/implementation/`: 현재 코드 경로, 설정, CLI, artifact contract.
-- `examples/README.md`: 실행 예시와 config template 안내.
-- `docs/refactor_completion_report.md`: 완료 경계와 향후 작업.
-- `docs/final_audit_report.md`: 최근 audit 결과.
-
-## Archive/reference 디렉터리
-
-다음 디렉터리는 현재 실행 계층이 아니라 보존 자료다.
+## 공식 실행 단계
 
 ```text
-old/
-Origin/
-origin/
-references/
+raw data
+  -> src/data_prep.py
+  -> src/dataset_psd.py
+  -> src/dataset_fft.py
+  -> src/model_training.py
+  -> src/psd_analysis.py
+  -> src/element_psd.py
+  -> src/2d_fft_analysis.py
+  -> src/plotting.py
 ```
 
-## 향후 작업
+## 공식 디렉터리
 
-- 실제 dataset ingest/preprocessing 연동.
-- 논문 제출용 figure style refinement.
-- multi-run launch packaging.
-- 대규모 학습 orchestration.
-- fixed topology의 논문 원형 충실도 확장.
+```text
+bash/       단계별 shell wrapper
+config/     단계별 JSON 설정과 설정 설명서
+Spec/       이론/구현 명세
+src/        데이터 준비, 학습, 분석, 시각화 코드
+tests/      현재 root pipeline 계약 테스트
+paper/      논문/배경 정리 자료
+Origin/     선택적 외부 저자 코드 어댑터가 참조하는 원천 코드
+```
+
+## 핵심 정책
+
+- 모델 분석(`psd_analysis`, `element_psd`, `2d_fft_analysis`)은 input 레이어를 분석하지 않는다.
+- 입력 데이터 자체의 PSD/FFT는 `dataset_psd`, `dataset_fft`에서 독립적으로 분석한다.
+- 설정 파일은 JSON만 사용한다. YAML 설정은 공식 실행 경로에서 지원하지 않는다.
+- seed는 Python, NumPy, Torch, DataLoader worker/generator에 적용한다.
+- deterministic mode는 성능을 위해 끈다.
+- CSV 산출물과 manifest는 `src/util/csv_schema.py`의 category schema를 따른다.
+
+## 기본 실행 예시
+
+```bash
+bash/data_prep.sh config/data_prep.json
+bash/dataset_psd.sh config/dataset_psd.json
+bash/dataset_fft.sh config/dataset_fft.json
+bash/model_training.sh config/model_training.json
+bash/psd_analysis.sh config/psd_analysis.json
+bash/element_psd.sh config/element_psd.json
+bash/fft2d_analysis.sh config/fft2d_analysis.json
+bash/plotting.sh config/plotting.json
+```
+
+각 JSON의 placeholder 경로(`/ABS/PATH/TO/...`)는 실제 절대경로로 바꿔야 한다. 설정 항목의 의미와 자료형은 `config/README.md`에 정리되어 있다.
+
+## 명세
+
+- `Spec/theory/`: 신호 객체, PSD/FFT 수식, probe, artifact 의미.
+- `Spec/implementation/`: 현재 코드 경로, CLI/config 계약, 출력 schema.

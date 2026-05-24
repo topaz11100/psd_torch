@@ -1,13 +1,15 @@
-# CLI contract
+# CLI 계약
 
-공식 CLI는 package module로 실행한다.
+각 stage는 다음 방식으로 실행한다.
 
 ```bash
-PYTHONPATH=src python -m psd_snn.cli.train --help
-PYTHONPATH=src python -m psd_snn.cli.analyze_signal --help
-PYTHONPATH=src python -m psd_snn.cli.analyze_fft2d --help
-PYTHONPATH=src python -m psd_snn.cli.analyze_dynamics --help
-PYTHONPATH=src python -m psd_snn.cli.plot_artifacts --help
+python src/model_training.py --config config/model_training.json
 ```
 
-`analyze_signal`은 PSD/PCA/element PSD를 다룬다. `analyze_fft2d`는 독립 2D FFT 분석이다. `plot_artifacts`는 artifact reader 기반 rendering만 수행한다.
+Bash wrapper는 같은 config를 기본값으로 사용한다.
+
+```bash
+bash/model_training.sh config/model_training.json
+```
+
+`--help`는 데이터 경로 검증과 heavy dependency import 없이 출력되어야 한다.

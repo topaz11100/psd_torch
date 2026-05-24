@@ -29,6 +29,49 @@ from src.util.config_cli import parse_args_with_config
 SOURCE_PROGRAM = 'dataset_psd'
 
 
+def _load_runtime_dependencies() -> None:
+    """실제 데이터셋 PSD 분석 시점에만 무거운 의존성을 불러온다."""
+
+    global np, torch, tqdm, seed_everything
+    global dataset_for_view, make_loader, resolve_dataset_bundle
+    global curve_axis_from_summary
+    global apply_centering, exact_periodogram_from_maps, power_to_db, tensor_to_channel_major_maps_explicit
+    global build_probe_index_bundle, dataset_targets, subset_from_indices
+
+    import numpy as _np
+    import torch as _torch
+    from tqdm import tqdm as _tqdm
+
+    from src.data.registry import dataset_for_view as _dataset_for_view
+    from src.data.registry import make_loader as _make_loader
+    from src.data.registry import resolve_dataset_bundle as _resolve_dataset_bundle
+    from src.signal.family_spectral_analysis import curve_axis_from_summary as _curve_axis_from_summary
+    from src.signal.psd_utils import apply_centering as _apply_centering
+    from src.signal.psd_utils import exact_periodogram_from_maps as _exact_periodogram_from_maps
+    from src.signal.psd_utils import power_to_db as _power_to_db
+    from src.signal.psd_utils import tensor_to_channel_major_maps_explicit as _tensor_to_channel_major_maps_explicit
+    from src.stat.probe_selection import build_probe_index_bundle as _build_probe_index_bundle
+    from src.stat.probe_selection import dataset_targets as _dataset_targets
+    from src.stat.probe_selection import subset_from_indices as _subset_from_indices
+    from src.util.random import seed_everything as _seed_everything
+
+    np = _np
+    torch = _torch
+    tqdm = _tqdm
+    dataset_for_view = _dataset_for_view
+    make_loader = _make_loader
+    resolve_dataset_bundle = _resolve_dataset_bundle
+    curve_axis_from_summary = _curve_axis_from_summary
+    apply_centering = _apply_centering
+    exact_periodogram_from_maps = _exact_periodogram_from_maps
+    power_to_db = _power_to_db
+    tensor_to_channel_major_maps_explicit = _tensor_to_channel_major_maps_explicit
+    build_probe_index_bundle = _build_probe_index_bundle
+    dataset_targets = _dataset_targets
+    subset_from_indices = _subset_from_indices
+    seed_everything = _seed_everything
+
+
 def _load_json_light(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 ALL_CURVE_EXTRACTORS = ('psd_exact',)
@@ -266,7 +309,7 @@ def _streaming_summary(
     freq_ref: torch.Tensor | None = None
 
     expected_rows, expected_time = _expected_rows_time(manifest)
-    for inputs, _target in loader:
+    for inputs, _target in tqdm(loader, desc='dataset_psd batch', leave=False):
         maps = tensor_to_channel_major_maps_explicit(
             torch.as_tensor(inputs, dtype=torch.float32),
             psd_axis_kind=str(psd_axis_kind),
@@ -412,6 +455,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if int(args.num_workers) < 0:
         parser.error('--num_workers must be >= 0.')
 
+    _load_runtime_dependencies()
     _seed_everything(int(args.seed))
     device = _require_cuda_device(int(args.gpu_index))
     dataset_token = str(args.dataset)
@@ -434,11 +478,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     manifest_rows: list[dict[str, str]] = []
     split_items = (('train', bundle.train_dataset), ('test', bundle.test_dataset))
-    for split_name, split_dataset in split_items:
+    for split_name, split_dataset in tqdm(split_items, desc='dataset_psd split', leave=False):
         psd_dataset = dataset_for_view(split_dataset, bundle.psd_view_name)
         views: list[tuple[str, str, int | None, Any]] = [(f'{split_name}_full', 'full_dataset', None, psd_dataset)]
         views.extend((f'{split_name}_{family_id}', family, label, subset) for family_id, family, label, subset in _probe_subsets(psd_dataset, split_name=split_name, seed=int(args.seed)))
-        for scope, family, label, subset in views:
+        for scope, family, label, subset in tqdm(views, desc=f'dataset_psd {split_name} scope', leave=False):
             summary = _streaming_summary(
                 subset,
                 batch_size=int(args.batch_size),

@@ -1,24 +1,16 @@
 # 구현 구조
 
-현재 공식 구현은 `src/psd_snn` 패키지다. root-level 과거 entrypoint는 현재 실행 계약이 아니다.
+현재 실행 계층은 root `src/*.py` entrypoint다.
 
-## 책임 분리
+| stage | 파일 |
+|---|---|
+| data_prep | `src/data_prep.py` |
+| dataset PSD | `src/dataset_psd.py` |
+| dataset FFT | `src/dataset_fft.py` |
+| training | `src/model_training.py` |
+| model PSD | `src/psd_analysis.py` |
+| element PSD | `src/element_psd.py` |
+| 2D FFT | `src/2d_fft_analysis.py` |
+| plotting | `src/plotting.py` |
 
-- `config`: dataclass 설정과 validation.
-- `models`: MLP, fixed topology, cell, readout, checkpoint metadata.
-- `analysis`: probe, trace, signal map, PSD/PCA/FFT2D, distance.
-- `artifacts`: CSV writer, trace writer, reader, plotting.
-- `cli`: 사용자 실행 entrypoint.
-- `training`: 최소 synthetic training/checkpoint smoke.
-
-## 공식 CLI
-
-```text
-psd_snn.cli.train
-psd_snn.cli.analyze_signal
-psd_snn.cli.analyze_fft2d
-psd_snn.cli.analyze_dynamics
-psd_snn.cli.plot_artifacts
-```
-
-Archive 디렉터리는 구현 참고 자료일 뿐 current runtime layer가 아니다.
+지원 모듈은 `src/data`, `src/model`, `src/neurons`, `src/readout`, `src/signal`, `src/stat`, `src/util`로 나눈다.

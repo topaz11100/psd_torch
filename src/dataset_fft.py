@@ -29,6 +29,42 @@ from src.util.config_cli import parse_args_with_config
 SOURCE_PROGRAM = 'dataset_fft'
 
 
+def _load_runtime_dependencies() -> None:
+    """실제 데이터셋 FFT 분석 시점에만 무거운 의존성을 불러온다."""
+
+    global torch, tqdm, seed_everything
+    global dataset_for_view, make_loader, resolve_dataset_bundle
+    global apply_centering, power_to_db, tensor_to_channel_major_maps_explicit
+    global build_probe_index_bundle, dataset_targets, subset_from_indices
+
+    import torch as _torch
+    from tqdm import tqdm as _tqdm
+
+    from src.data.registry import dataset_for_view as _dataset_for_view
+    from src.data.registry import make_loader as _make_loader
+    from src.data.registry import resolve_dataset_bundle as _resolve_dataset_bundle
+    from src.signal.psd_utils import apply_centering as _apply_centering
+    from src.signal.psd_utils import power_to_db as _power_to_db
+    from src.signal.psd_utils import tensor_to_channel_major_maps_explicit as _tensor_to_channel_major_maps_explicit
+    from src.stat.probe_selection import build_probe_index_bundle as _build_probe_index_bundle
+    from src.stat.probe_selection import dataset_targets as _dataset_targets
+    from src.stat.probe_selection import subset_from_indices as _subset_from_indices
+    from src.util.random import seed_everything as _seed_everything
+
+    torch = _torch
+    tqdm = _tqdm
+    dataset_for_view = _dataset_for_view
+    make_loader = _make_loader
+    resolve_dataset_bundle = _resolve_dataset_bundle
+    apply_centering = _apply_centering
+    power_to_db = _power_to_db
+    tensor_to_channel_major_maps_explicit = _tensor_to_channel_major_maps_explicit
+    build_probe_index_bundle = _build_probe_index_bundle
+    dataset_targets = _dataset_targets
+    subset_from_indices = _subset_from_indices
+    seed_everything = _seed_everything
+
+
 def _load_json_light(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 CATEGORY = 'dataset_fft'
@@ -79,6 +115,15 @@ def _axis_metadata_columns(manifest: Mapping[str, Any], *, psd_axis_kind: str) -
     }
 
 
+def _expected_rows_time(manifest: Mapping[str, Any]) -> tuple[int | None, int | None]:
+    """manifest의 논리 PSD shape에서 row/time 기대값을 읽는다."""
+
+    logical = manifest.get('psd_logical_shape')
+    if isinstance(logical, (list, tuple)) and len(logical) == 2:
+        return int(logical[0]), int(logical[1])
+    return None, None
+
+
 def _quota(dataset: Any) -> int:
     targets = dataset_targets(dataset)
     counts: dict[int, int] = {}
@@ -116,7 +161,7 @@ def _safe_token(value: Any) -> str:
 
 def _manifest_row(*, base: Mapping[str, Any], path: Path, artifact_name: str, scope: str, status: str = 'ok', message: str = '') -> dict[str, Any]:
     row = dict(base)
-    row.update(category='dataset_fft_manifest', artifact_name=artifact_name, scope=scope, status=status, message=message, path=str(path))
+    row.update(category='dataset_fft_manifest', artifact_name=artifact_name, scope=scope, status=status, message=message, output_csv_path=str(path))
     return common_row(**row)
 
 
@@ -183,6 +228,7 @@ def _fft_rows(*, base: Mapping[str, Any], fft_values: torch.Tensor, variant: str
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parse_args_with_config(parser, argv=argv, stage_key='dataset_fft')
+    _load_runtime_dependencies()
     if int(args.batch_size) < 1:
         raise ValueError('--batch_size는 1 이상이어야 합니다.')
     if int(args.num_workers) < 0:
@@ -212,41 +258,48 @@ def main(argv: Sequence[str] | None = None) -> int:
     fft_rows: list[dict[str, Any]] = []
     manifest_rows: list[dict[str, Any]] = []
 
-    for split_name, split_dataset in (('train', bundle.train_dataset), ('test', bundle.test_dataset)):
+    for split_name, split_dataset in tqdm((('train', bundle.train_dataset), ('test', bundle.test_dataset)), desc='dataset_fft split', leave=False):
         analysis_dataset = dataset_for_view(split_dataset, bundle.psd_view_name)
-        for scope, probe_family, label, subset in _probe_subsets(analysis_dataset, split_name=split_name, seed=seed):
-            accumulators: dict[tuple[str, str], torch.Tensor | None] = {(v, s): None for v in VARIANTS for s in SCALES}
+        for scope, probe_family, label, subset in tqdm(list(_probe_subsets(analysis_dataset, split_name=split_name, seed=seed)), desc=f'dataset_fft {split_name} scope', leave=False):
+            accumulators: dict[str, torch.Tensor | None] = {v: None for v in VARIANTS}
             sample_count = 0
             loader = make_loader(
                 subset,
                 batch_size=int(args.batch_size),
                 shuffle=False,
                 num_workers=int(args.num_workers),
-                pin_memory=True,
+                pin_memory=device.type == 'cuda',
                 seed=int(seed),
             )
-            for inputs, _targets in loader:
-                maps = tensor_to_channel_major_maps_explicit(inputs.to(device), metadata=None)
+            expected_rows, expected_time = _expected_rows_time(manifest)
+            for inputs, _targets in tqdm(loader, desc=f'dataset_fft {scope} batch', leave=False):
+                maps = tensor_to_channel_major_maps_explicit(
+                    torch.as_tensor(inputs, dtype=torch.float32).to(device=device, non_blocking=True),
+                    psd_axis_kind=str(bundle.psd_axis_kind),
+                    psd_time_axis=manifest.get('psd_time_axis'),
+                    psd_flatten_rule=manifest.get('psd_flatten_rule'),
+                    psd_logical_shape=manifest.get('psd_logical_shape'),
+                    expected_time=expected_time,
+                    expected_rows=expected_rows,
+                )
                 sample_count += int(maps.shape[0])
                 for variant in VARIANTS:
                     prepared = maps if variant == 'raw' else apply_centering(maps)
                     power = torch.fft.rfft(prepared, dim=-1).abs().square().mean(dim=1)
-                    for scale in SCALES:
-                        scaled = _scaled(power, scale)
-                        accumulators[(variant, scale)] = _update_accumulator(accumulators[(variant, scale)], scaled)
+                    accumulators[variant] = _update_accumulator(accumulators[variant], power)
 
             if sample_count == 0:
                 continue
 
             for variant in VARIANTS:
+                summed = accumulators[variant]
+                if summed is None:
+                    continue
+                mean_power = summed / float(sample_count)
+                base = dict(common_base)
+                base.update(scope=scope, probe_family=probe_family, label='' if label is None else int(label), split=split_name)
                 for scale in SCALES:
-                    summed = accumulators[(variant, scale)]
-                    if summed is None:
-                        continue
-                    mean_fft = summed / float(sample_count)
-                    base = dict(common_base)
-                    base.update(scope=scope, probe_family=probe_family, label='' if label is None else int(label), split=split_name)
-                    fft_rows.extend(_fft_rows(base=base, fft_values=mean_fft, variant=variant, scale=scale))
+                    fft_rows.extend(_fft_rows(base=base, fft_values=_scaled(mean_power, scale), variant=variant, scale=scale))
 
     _write_grouped(output_root, fft_rows, manifest_rows=manifest_rows, manifest_base=common_base, artifact_name=CATEGORY)
     write_common_csv(output_root / 'dataset_fft_manifest.csv', manifest_rows)

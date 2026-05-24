@@ -1,47 +1,19 @@
-# 동역학 통계 이론
+# 동역학 통계
 
-## 1. 목적
+동역학 통계는 PSD/FFT와 별개로 cell parameter의 분포를 기록한다.
 
-동역학 통계는 spectral artifact와 별개로 cell parameter와 내부 상태의 분포를 기록한다. 목적은 “왜 특정 layer의 PSD가 그렇게 생겼는가”를 parameter 관점에서 보조 설명하는 것이다.
+## 주요 parameter
 
-## 2. 파라미터 벡터
+- LIF: `alpha`
+- RF: `center_frequency`, `damping`
+- IF/LIF/RF: threshold
 
-모델 layer $\ell$의 parameter family $p$에 대해 벡터
+각 parameter는 layer, layer_index, statistic, value_unit을 갖는 `filter_snapshot` 또는 `filter_trend` category로 저장된다.
 
-$$
-\theta_{\ell,p}\in\mathbb{R}^{d_\ell}
-$$
+## statistic
 
-를 수집한다. 예시는 다음이다.
+기본 통계는 count, mean, std, min, q25, q50, q75, max다. count는 값의 개수이므로 다른 parameter value와 단위가 다르다.
 
-- LIF membrane decay alpha.
-- RF resonant frequency.
-- RF damping magnitude.
-- RF decay radius.
-- threshold.
+## 해석
 
-각 벡터는 값만이 아니라 다음 metadata를 갖는다.
-
-```text
-layer_index, layer_name, parameter_name, role, unit,
-shape, trainable, lower_bound, upper_bound, group_ids,
-scenario, constraint_hash
-```
-
-## 3. bounds와 group metadata
-
-clip scenario에서 lower/upper bound는 parameter의 해석에 필수다. 예를 들어 같은 alpha 값이라도 어떤 bound interval 안에서 학습되었는지에 따라 의미가 달라진다.
-
-clipstructure에서는 group id도 함께 필요하다.
-
-$$
-\theta_i \in [l_{g_i},u_{g_i}]
-$$
-
-## 4. 내부 상태 통계
-
-internal state statistics는 spike rate, membrane distribution, RF real/imag state 같은 runtime trace summary를 다룬다. 현재 phase에서는 parameter vector collector와 최소 internal state stats interface를 유지한다.
-
-## 5. spectral 분석과의 관계
-
-동역학 통계는 PSD를 대체하지 않는다. PSD는 출력 신호의 시간 구조를 설명하고, dynamics는 그 구조를 만든 cell parameter와 constraint를 설명한다. 두 artifact는 run/checkpoint/layer metadata로 결합된다.
+PSD/FFT가 신호 결과를 보여준다면 동역학 통계는 그 결과를 만든 parameter 조건을 보조 설명한다.

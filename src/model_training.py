@@ -36,6 +36,45 @@ CHECKPOINT_SCHEMA_VERSION = 'psd_checkpoint_v1'
 SOURCE_PROGRAM = 'model_training'
 
 
+def _load_runtime_dependencies() -> None:
+    """실제 학습 실행 시점에만 무거운 의존성을 불러온다."""
+
+    global torch, tqdm, _seed_everything
+    global make_loader, resolve_dataset_bundle, select_training_view_for_model
+    global ModelSpec, canonicalize_model_token
+    global build_optimizer, evaluate_one_epoch, train_one_epoch
+    global build_snn_classifier, build_readout
+
+    import torch as _torch
+    from tqdm import tqdm as _tqdm
+
+    from src.data.registry import make_loader as _make_loader
+    from src.data.registry import resolve_dataset_bundle as _resolve_dataset_bundle
+    from src.data.registry import select_training_view_for_model as _select_training_view_for_model
+    from src.model.model_registry import ModelSpec as _ModelSpec
+    from src.model.model_registry import canonicalize_model_token as _canonicalize_model_token
+    from src.model.training import build_optimizer as _build_optimizer
+    from src.model.training import evaluate_one_epoch as _evaluate_one_epoch
+    from src.model.training import train_one_epoch as _train_one_epoch
+    from src.model.snn_builder import build_snn_classifier as _build_snn_classifier
+    from src.readout.readout import build_readout as _build_readout
+    from src.util.random import seed_everything as _runtime_seed_everything
+
+    torch = _torch
+    tqdm = _tqdm
+    make_loader = _make_loader
+    resolve_dataset_bundle = _resolve_dataset_bundle
+    select_training_view_for_model = _select_training_view_for_model
+    ModelSpec = _ModelSpec
+    canonicalize_model_token = _canonicalize_model_token
+    build_optimizer = _build_optimizer
+    evaluate_one_epoch = _evaluate_one_epoch
+    train_one_epoch = _train_one_epoch
+    build_snn_classifier = _build_snn_classifier
+    build_readout = _build_readout
+    _seed_everything = _runtime_seed_everything
+
+
 def _load_json_light(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -268,7 +307,6 @@ def _training_metric_rows(
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parse_args_with_config(parser, argv=argv, stage_key='model_training')
-
     if int(args.batch_size) < 1:
         parser.error('--batch_size must be >= 1.')
     if float(args.lr) <= 0.0:
@@ -302,6 +340,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     metric_root.mkdir(parents=True, exist_ok=True)
 
+    _load_runtime_dependencies()
     _seed_everything(int(args.seed))
     device = _resolve_device(int(args.gpu_index))
     model_spec = canonicalize_model_token(args.model)
@@ -456,7 +495,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     all_metric_rows: list[dict[str, str]] = []
     latest_snapshot: dict[str, float] = {}
-    for epoch in range(resume_epoch + 1, int(args.epochs) + 1):
+    epoch_iter = range(resume_epoch + 1, int(args.epochs) + 1)
+    for epoch in tqdm(epoch_iter, desc='model_training:epochs', leave=True):
         train_metrics = train_one_epoch(
             model,
             train_loader,

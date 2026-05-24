@@ -227,7 +227,7 @@ def canonicalize_model_token(token: str) -> ModelSpec:
         )
     if _parse_dh_variant(normalized) is not None or _DRF_PATTERN.fullmatch(normalized) is not None:
         raise ValueError(
-            f'Model token {raw!r} belongs to a reinterpretation-only family and is not an official psd_analysis model token.'
+            f'Model token {raw!r} belongs to a reference-only family and is not an official psd_analysis model token.'
         )
     base_token, recurrent, reset_suffix, threshold_suffix = _split_trailing_modifiers(normalized)
     if reset_suffix is not None or threshold_suffix is not None or recurrent:

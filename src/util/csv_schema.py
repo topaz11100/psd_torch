@@ -34,6 +34,7 @@ CATEGORY_COLUMNS: dict[str, tuple[str, ...]] = {
     'training_metric': (*AXIS_METADATA_COLUMNS, 'model_token', 'model_family', 'readout_mode', 'seed', 'epoch', 'scope', 'metric', 'value', 'value_unit'),
     'dataset_curve': (*AXIS_METADATA_COLUMNS, 'scope', 'probe_family', 'label', 'signal_kind', 'extractor', 'reducer', 'variant', 'scale', 'frequency', 'frequency_unit', 'bin_left', 'bin_right', 'value', 'value_unit'),
     'dataset_dispersion': (*AXIS_METADATA_COLUMNS, 'scope', 'probe_family', 'label', 'signal_kind', 'extractor', 'variant', 'scale', 'statistic', 'frequency', 'frequency_unit', 'bin_left', 'bin_right', 'value', 'value_unit'),
+    'dataset_fft': (*AXIS_METADATA_COLUMNS, 'seed', 'split', 'scope', 'probe_family', 'label', 'signal_kind', 'series', 'variant', 'scale', 'row_frequency_index', 'frequency_bin_count', 'frequency_grid', 'value', 'value_unit'),
     'analysis_curve': (*AXIS_METADATA_COLUMNS, 'model_token', 'model_family', 'readout_mode', 'seed', 'checkpoint_path', 'checkpoint_epoch', 'layer', 'layer_index', 'scope', 'probe_family', 'label', 'signal_kind', 'series', 'extractor', 'reducer', 'variant', 'scale', 'frequency', 'frequency_unit', 'bin_left', 'bin_right', 'value', 'value_unit'),
     'analysis_dispersion': (*AXIS_METADATA_COLUMNS, 'model_token', 'model_family', 'readout_mode', 'seed', 'checkpoint_path', 'checkpoint_epoch', 'layer', 'layer_index', 'scope', 'probe_family', 'label', 'signal_kind', 'series', 'extractor', 'variant', 'scale', 'statistic', 'frequency', 'frequency_unit', 'bin_left', 'bin_right', 'value', 'value_unit'),
     'analysis_2d_fft': (*AXIS_METADATA_COLUMNS, 'model_token', 'model_family', 'readout_mode', 'seed', 'checkpoint_path', 'checkpoint_epoch', 'layer', 'layer_index', 'scope', 'probe_family', 'label', 'sample_role', 'sample_index', 'signal_kind', 'series', 'variant', 'scale', 'row_frequency_index', 'row_frequency', 'row_frequency_unit', 'row_count', 'time_length', 'time_frequency_bin_count', 'time_frequency_grid', 'value_unit'),
@@ -51,8 +52,8 @@ CATEGORY_COLUMNS: dict[str, tuple[str, ...]] = {
     'pairwise_dependency_appendix': (*AXIS_METADATA_COLUMNS, 'model_token', 'model_family', 'readout_mode', 'seed', 'checkpoint_epoch', 'layer', 'layer_index', 'source_scope', 'target_scope', 'source_signal_kind', 'source_series', 'target_signal_kind', 'target_series', 'extractor', 'reducer', 'variant', 'scale', 'metric', 'value', 'value_unit'),
     'analysis_manifest': (*AXIS_METADATA_COLUMNS, 'checkpoint_path', 'checkpoint_epoch', 'artifact_name', 'output_csv_path'),
     'dataset_psd_manifest': (*AXIS_METADATA_COLUMNS, 'scope', 'artifact_name', 'output_csv_path'),
+    'dataset_fft_manifest': (*AXIS_METADATA_COLUMNS, 'scope', 'artifact_name', 'output_csv_path'),
     'plotting_manifest': ('input_csv_path', 'output_figure_path', 'render_seconds'),
-    'reinterpretation_metric': (*AXIS_METADATA_COLUMNS, 'experiment_id', 'model_family', 'seed', 'scope', 'signal_kind', 'extractor', 'variant', 'scale', 'metric', 'statistic', 'value', 'value_unit'),
 }
 REQUIRED_COLUMNS = COMMON_PREFIX
 CATEGORY_NAMES = frozenset(CATEGORY_COLUMNS)
@@ -107,7 +108,7 @@ def common_row(**overrides: Any) -> dict[str, str]:
         overrides['parameter_name'] = overrides.get('metric')
     if 'metric' in overrides and 'distance_metric' not in overrides and category in {'pair_distance', 'drift_distance', 'layer_distance_profile', 'layer_distance_trend'}:
         overrides['distance_metric'] = overrides.get('metric')
-    if 'input_csv_path' in overrides and 'output_csv_path' not in overrides and category in {'analysis_manifest', 'dataset_psd_manifest'}:
+    if 'input_csv_path' in overrides and 'output_csv_path' not in overrides and category in {'analysis_manifest', 'dataset_psd_manifest', 'dataset_fft_manifest'}:
         overrides['output_csv_path'] = overrides.get('input_csv_path')
     for key, value in overrides.items():
         key_s = str(key)

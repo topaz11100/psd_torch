@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-import h5py
 import numpy as np
 import torch
 from sklearn.model_selection import train_test_split
@@ -28,6 +27,16 @@ _DEAP_LABEL_AXIS_TO_INDEX = {
 }
 _DEAP_SEGMENTS_PER_TRIAL = 20
 _DEAP_SUBJECT_TEST_RATIO = 0.2
+
+
+def _require_h5py():
+    """HDF5 원본 데이터가 필요한 시점에만 h5py를 불러온다."""
+
+    try:
+        import h5py as _h5py
+    except ModuleNotFoundError as exc:
+        raise RuntimeError('HDF5 기반 데이터 전처리에는 h5py가 필요합니다. h5py를 설치한 뒤 다시 실행하세요.') from exc
+    return _h5py
 
 
 @dataclass(frozen=True)
@@ -51,12 +60,12 @@ _STREAMING_WRITERS: dict[str, StreamingDatasetWriter] = {}
 
 _PROJECT_STANDARD_PREP_PROFILE = 'project_standard'
 _STATIC_IMAGE_REPEAT_T = 4
-_REINTERPRETATION_PREP_PROFILES = {
+_REFERENCE_PREP_PROFILES = {
     'need_high_cifar10_dvs_t16': {
         'dataset_name': 'cifar10-dvs',
-        'origin_code_root': 'Origin/need-high/event',
-        'origin_paper': 'Need High Section 4.1 Table 2 CIFAR10-DVS Max-Former vs MS-QKFormer',
-        'origin_config_path': 'Origin/need-high/event/cifar10dvs.yaml',
+        'reference_source': 'need_high_cifar10_dvs_frame_profile',
+        'reference_description': 'Need High Section 4.1 Table 2 CIFAR10-DVS Max-Former vs MS-QKFormer',
+        'reference_config_note': 'reference frame count and axis metadata only' ,
         'num_frames': 16,
         'training_view_name': 'model_input',
         'psd_view_name': 'event_frame_psd_view',
@@ -73,9 +82,9 @@ _REINTERPRETATION_PREP_PROFILES = {
     },
     'drf_shd_t250': {
         'dataset_name': 'shd',
-        'origin_code_root': 'Origin/neuron_model/D-RF',
-        'origin_paper': 'D-RF Section 5.1 Table 1 SHD D-RF vs BRF',
-        'origin_config_path': 'Origin/neuron_model/D-RF/main_training_parallel.py',
+        'reference_source': 'drf_shd_reference_profile',
+        'reference_description': 'D-RF Section 5.1 Table 1 SHD D-RF vs BRF',
+        'reference_config_note': 'reference SHD time-window profile only',
         'shd_dt_ms': 1.0,
         'shd_max_time': 0.25,
         'training_view_name': 'model_input',
@@ -93,9 +102,9 @@ _REINTERPRETATION_PREP_PROFILES = {
     },
     'dh_snn_shd_t1000': {
         'dataset_name': 'shd',
-        'origin_code_root': 'Origin/neuron_model/DH-SNN',
-        'origin_paper': 'DH-SNN Fig. 3f Fig. 4f Table 1 SHD vanilla SFNN vs DH-SFNN',
-        'origin_config_path': 'Origin/neuron_model/DH-SNN/README.md',
+        'reference_source': 'dh_snn_shd_reference_profile',
+        'reference_description': 'DH-SNN Fig. 3f Fig. 4f Table 1 SHD vanilla SFNN vs DH-SFNN',
+        'reference_config_note': 'reference SHD time-window profile only',
         'shd_dt_ms': 1.0,
         'shd_max_time': 1.0,
         'training_view_name': 'model_input',
@@ -115,7 +124,7 @@ _REINTERPRETATION_PREP_PROFILES = {
 
 
 def available_prep_profiles() -> tuple[str, ...]:
-    return (_PROJECT_STANDARD_PREP_PROFILE, *sorted(_REINTERPRETATION_PREP_PROFILES))
+    return (_PROJECT_STANDARD_PREP_PROFILE, *sorted(_REFERENCE_PREP_PROFILES))
 
 
 def _resolve_prep_profile(dataset_token: str, prep_profile: str | None) -> tuple[str, dict[str, Any]]:
@@ -127,15 +136,15 @@ def _resolve_prep_profile(dataset_token: str, prep_profile: str | None) -> tuple
             'prep_profile_role': 'project_standard',
             'layout_source': 'project_standard_profile',
         }
-    if profile not in _REINTERPRETATION_PREP_PROFILES:
+    if profile not in _REFERENCE_PREP_PROFILES:
         allowed = ', '.join(available_prep_profiles())
         raise ValueError(f'Unsupported prep_profile {profile!r}. Available: {allowed}.')
-    payload = dict(_REINTERPRETATION_PREP_PROFILES[profile])
+    payload = dict(_REFERENCE_PREP_PROFILES[profile])
     expected_dataset = canonicalize_dataset_name(str(payload['dataset_name']))
     if expected_dataset != dataset_token:
         raise ValueError(f'prep_profile {profile!r} is only valid for dataset {expected_dataset!r}, got {dataset_token!r}.')
     payload['prep_profile'] = profile
-    payload['prep_profile_role'] = 'reinterpretation'
+    payload['prep_profile_role'] = 'reference_profile'
     return profile, payload
 
 
@@ -1311,7 +1320,7 @@ def _find_hdf5_file(root: Path, candidates: list[str]) -> Path:
     raise FileNotFoundError(f'Could not locate expected HDF5 file under {root}: {candidates}')
 
 
-def _hdf5_event_label_key(handle: h5py.File) -> str:
+def _hdf5_event_label_key(handle: Any) -> str:
     if 'labels' in handle:
         return 'labels'
     if 'y' in handle:
@@ -1320,11 +1329,13 @@ def _hdf5_event_label_key(handle: h5py.File) -> str:
 
 
 def _hdf5_event_sample_count(path: Path) -> int:
+    h5py = _require_h5py()
     with h5py.File(path, 'r') as handle:
         return int(handle[_hdf5_event_label_key(handle)].shape[0])
 
 
 def _infer_event_unit_shift_from_hdf5_files(paths: list[Path], *, num_units: int) -> tuple[int, str]:
+    h5py = _require_h5py()
     global_min: int | None = None
     global_max: int | None = None
     for path in paths:
@@ -1371,6 +1382,7 @@ def _event_sample_to_binary_time_major(
 
 
 def _iter_heidelberg_hdf5_samples(paths: list[Path], *, unit_shift: int, num_units: int, num_steps: int, dt_s: float):
+    h5py = _require_h5py()
     sample_index = 0
     for path in paths:
         with h5py.File(path, 'r') as handle:

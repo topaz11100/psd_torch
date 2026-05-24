@@ -1,9 +1,7 @@
-# Trace-to-analysis pipeline
+# Trace 신호분석 구현
 
-공식 pipeline은 다음 순서다.
+Dataset 분석은 prepared dataset view를 직접 읽는다. Model 분석은 checkpoint를 복원한 뒤 selected probe를 forward pass하여 hidden/output record를 수집한다.
 
-```text
-ProbeBatch -> TraceAdapter -> LayerTraceRecord -> SignalMapEmitter -> SignalMapRecord -> analyzer -> writer
-```
+공통 변환은 `src/signal/psd_utils.py`의 `tensor_to_channel_major_maps_explicit` 또는 `trace_tensor_to_channel_major_maps`를 사용한다.
 
-TraceAdapter는 batch 단위 state reset과 metadata 주입을 담당한다. SignalMapEmitter는 `B,T,*` trace를 `S,R,T` map으로 바꾼다. 분석 runner는 PSD/PCA/FFT2D를 sample axis 기준으로 누적한다.
+모델 분석 공통 matrix probe 수집은 `src/analysis_matrix_common.py`에 있으며 input map을 수집하지 않는다.

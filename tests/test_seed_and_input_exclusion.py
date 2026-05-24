@@ -1,6 +1,11 @@
 from pathlib import Path
+import sys
 
 import pytest
+
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 
 def test_dataset_fft_uses_dataset_category_and_manifest_name():

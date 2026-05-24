@@ -1,1 +1,0 @@
-{"model":{"topology":{"kind":"mlp_stack","input_dim":8,"hidden_widths":[16],"output_dim":3},"cell":{"kind":"lif"},"readout":{"kind":"final_mem"}},"signal_analysis":{"fft2d":{"enabled":true,"spectral_axis":"exact"},"artifact":{"output_dir":".example_out/fft2d_exact"}}}

@@ -1,1 +1,7 @@
-{"plotting":{"input":"/ABS/PATH/TO/output/psd_analysis","output":"/ABS/PATH/TO/output/plots","overwrite":true}}
+{
+  "plotting": {
+    "input": "/ABS/PATH/TO/output/psd_analysis",
+    "output": "/ABS/PATH/TO/output/plots",
+    "overwrite": true
+  }
+}

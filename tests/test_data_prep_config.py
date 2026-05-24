@@ -8,8 +8,6 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-pytest.importorskip('h5py')
-
 from src.data_prep import build_arg_parser, _validate_args
 from src.util.config_cli import parse_args_with_config
 
