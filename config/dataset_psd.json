@@ -1,0 +1,1 @@
+{"dataset_psd":{"dataset":"mnist","prep_root":"/ABS/PATH/TO/prepared","output_root":"/ABS/PATH/TO/output/dataset_psd","batch_size":128,"gpu_index":0,"seed":0,"num_workers":0}}

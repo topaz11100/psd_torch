@@ -57,7 +57,6 @@ def layer_index_by_name(model: torch.nn.Module) -> dict[str, int]:
     if hasattr(model, 'iter_named_layers'):
         for idx, (name, _layer) in enumerate(model.iter_named_layers(), start=1):
             mapping[str(name)] = idx
-    mapping.setdefault('input', 0)
     return mapping
 
 
@@ -232,7 +231,7 @@ def collect_mlp_output_maps(
     num_workers: int,
     device: torch.device,
 ) -> dict[ProbeMapKey, torch.Tensor]:
-    """Collect input, hidden, and output maps for balanced and label-single probes."""
+    """균형/라벨 단일 프로브에서 hidden/output 맵만 수집한다."""
 
     if int(anal_batch) < 1:
         raise ValueError('anal_batch must be >= 1.')
@@ -256,19 +255,6 @@ def collect_mlp_output_maps(
                 try:
                     model_inputs = psd_common._prepared_input_for_model(model, inputs, device=device)
                     result = model(model_inputs, capture_hidden=True)
-                    input_trace = result.input_record if getattr(result, 'input_record', None) is not None else model_inputs
-                    input_key: ProbeMapKey = (
-                        'input',
-                        0,
-                        'input',
-                        'x_probe',
-                        str(scope.scope),
-                        str(scope.probe_family),
-                        scope.label,
-                        str(scope.sample_role),
-                        scope.sample_index,
-                    )
-                    collected[input_key].append(_trace_maps(input_trace))
                     for record in result.hidden_records:
                         layer_name = str(record.layer_name)
                         _append_output_series(
