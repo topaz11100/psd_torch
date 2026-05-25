@@ -139,7 +139,24 @@ Wrapper 파일 안의 `CONFIG_PATHS=(...)` 배열에 config를 직접 추가해 
 4. **threshold suffix**는 `fixed` 또는 `train`을 명시한다. `train`은 threshold parameter 학습 비교가 목적일 때만 쓴다.
 5. **입력 view**는 model family에 따라 registry에서 선택된다. CNN family는 frame/image view를 사용하므로 `hidden_spec`을 `-`로 둔다.
 
-`dh_snn`, `d_rf`, `tc_lif`, `ts_lif` 계열은 reference-only family로 남아 있으며 공식 root pipeline의 `model` token으로 쓰지 않는다.
+`tc_lif`, `ts_lif`, `dh_snn`, `d_rf` 계열도 공식 root pipeline `model` token으로 지원한다.
+
+추가 family token 규칙(v1):
+
+- **TC-LIF**: `tc_lif`, `tc_lif_R`
+  - alias: `tc`, `tc_R`, `tclif`, `tclif_R`
+- **TS-LIF**: `ts_lif`, `ts_lif_R`
+  - alias: `ts`, `ts_R`, `tslif`, `tslif_R`
+- **DH-SNN**: `dh_snn_<branch>`, `dh_snn_R_<branch>`
+  - alias: `dh`, `dh_R`, `dh_<branch>`, `dh_R_<branch>`
+  - branch 생략 시 canonical은 `dh_snn_4`, `dh_snn_R_4`
+  - branch는 양의 정수만 허용
+- **D-RF(v1)**: `d_rf_<branch>`
+  - branch 생략 시 canonical은 `d_rf_4`
+  - branch는 양의 정수만 허용
+  - `d_rf_R`, `d_rf_R_<branch>`는 지원하지 않는다(DRFLayer true recurrent dynamics 미노출).
+
+주의: 위 TC/TS/DH/D-RF token에는 `soft/hard/fixed/train` suffix를 붙이지 않는다.
 
 ### 대표화 방법 선택법
 
@@ -250,3 +267,37 @@ PCA 규제를 켜면 학습 시작 전에 no-grad reference batch로 layer별 `x
 - DDP에서는 batch_size를 global batch로 해석하며 GPU별 per-rank batch는 batch_size/2이다.
 - DDP에서는 batch_size가 반드시 짝수여야 한다.
 - DDP 실행 시 checkpoint와 metric CSV 저장은 rank0만 수행한다.
+
+
+### 제약(constraint) 적용 범위 주의
+
+이번 토큰 확장 패치 기준으로 `tc_lif`, `ts_lif`, `dh_snn`, `d_rf` family에는 `clip/structure/clipstructure` constraint 모드를 적용하지 않는다.
+## Constraint 설정 (clip / structure / clipstructure)
+
+`model_training`에서 hidden dense layer 전용 constraint를 지원한다.
+
+- `constraint_mode`: `none`, `clip`, `structure`, `clipstructure` (`clip_structure` alias)
+- `alpha_clip_edges` (`lif_alpha_clip_edges` alias): LIF clip 경계, `[0,1]` strictly increasing
+- `w_clip_edges` (`rf_frequency_clip_edges` alias): RF frequency clip 경계, `[0,0.5]` strictly increasing
+  - unit: `normalized_frequency_cyc_per_sample_nyquist_0p5`
+- `band_neuron_ends`: hidden layer별 endpoint CSV (예: `"4,8"`)
+- `tear` (`constraint_tear` alias): 1-based hidden index, 해당 layer부터 constraint 적용
+
+동작 규칙:
+- output layer에는 constraint를 적용하지 않는다.
+- structure mode에서 첫 hidden layer raw input projection에는 feedforward mask를 적용하지 않는다.
+- recurrent 모델은 첫 hidden layer에도 recurrent mask를 적용할 수 있다.
+- RF damping magnitude는 v1에서 CLI clip 대상이 아니다.
+
+v1 지원 family:
+- `lif`, `rf` (dense)
+
+v1 미지원 family:
+- `tc_lif`, `ts_lif`, `dh_snn`, `d_rf`, `spikegru`, `spikformer`, `spikingssm`, `cnn_lif/cnn_rf/vgg/resnet`, conv/residual arch
+- 미지원 family에서 `constraint_mode != none`이면 `ValueError`를 발생시킨다.
+
+resume 정책:
+- checkpoint의 `constraint_metadata`와 현재 실행 constraint mode가 다르면 fail-fast(`ValueError`).
+
+DDP:
+- constraint plan은 deterministic 규칙으로 생성되며 각 rank에서 동일 bounds/mask를 만든다.

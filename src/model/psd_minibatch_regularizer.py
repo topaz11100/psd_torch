@@ -9,11 +9,15 @@ from src.signal.family_spectral_analysis import representative_psd_minibatch_cur
 @dataclass
 class FixedPCALayerReference:
     layer_name: str
+    layer_index: int | None
     dim: int
     x_basis: torch.Tensor
     x_centroid: torch.Tensor
     y_basis: torch.Tensor
     y_centroid: torch.Tensor
+    output_family: str
+    basis_id: str | None = None
+    metadata: dict[str, Any] | None = None
 
 @dataclass
 class PSDRegularizationBreakdown:
@@ -24,6 +28,7 @@ class PSDRegularizationBreakdown:
     per_layer_rep_1d: dict[str, torch.Tensor]
     per_layer_pca_1d: dict[str, torch.Tensor]
     per_layer_pca_mimo: dict[str, torch.Tensor]
+    metadata: dict[str, Any] | None = None
 
 
 def _to_maps(x: torch.Tensor)->torch.Tensor:
@@ -40,25 +45,48 @@ def _select_y(record: LayerRecord, output_family: str)->torch.Tensor:
     if tok=='membrane': return _to_maps(record.membrane)
     raise ValueError('output_family must be spike or membrane')
 
-def compute_fixed_pca_reference_bank(input_batch: torch.Tensor, hidden_records: list[LayerRecord], output_family: str, pca_dim_per_layer: list[int] | None) -> dict[str, FixedPCALayerReference]:
+def compute_fixed_pca_reference_bank(input_batch: torch.Tensor, hidden_records: list[LayerRecord], output_family: str, pca_dim_per_layer: list[int] | None, *, variant: str = 'raw', layer_names: list[str] | None = None, metadata: dict[str, Any] | None = None) -> dict[str, FixedPCALayerReference]:
     with torch.no_grad():
         bank={}
+        tok = str(variant).strip().lower()
+        if tok not in {'raw', 'centered'}:
+            raise ValueError('variant must be raw or centered')
+        if len(hidden_records)==0:
+            raise ValueError('hidden_records must not be empty when building PCA reference bank.')
         current_input = _to_maps(input_batch)
         for i,record in enumerate(hidden_records):
             y_maps=_select_y(record, output_family)
+            if tok=='centered':
+                current_fit = current_input - current_input.mean(dim=-1, keepdim=True)
+                y_fit = y_maps - y_maps.mean(dim=-1, keepdim=True)
+            else:
+                current_fit, y_fit = current_input, y_maps
             dim=pca_dim_from_cli_vector(pca_dim_per_layer, i, int(current_input.shape[1]))
-            x_basis, x_centroid = compute_fixed_pca_basis(current_input, dim)
+            x_basis, x_centroid = compute_fixed_pca_basis(current_fit, dim)
             y_dim=pca_dim_from_cli_vector(pca_dim_per_layer, i, int(y_maps.shape[1]))
-            y_basis, y_centroid = compute_fixed_pca_basis(y_maps, y_dim)
+            y_basis, y_centroid = compute_fixed_pca_basis(y_fit, y_dim)
             d=min(int(x_basis.shape[1]), int(y_basis.shape[1]))
-            bank[record.layer_name]=FixedPCALayerReference(record.layer_name, d, x_basis[:, :d].detach(), x_centroid.detach(), y_basis[:, :d].detach(), y_centroid.detach())
+            layer_name = str(record.layer_name if record.layer_name else f'hidden_{i}')
+            basis_id = f'{layer_name}|{output_family}|dim={d}'
+            bank[layer_name]=FixedPCALayerReference(
+                layer_name=layer_name,
+                layer_index=i,
+                dim=d,
+                x_basis=x_basis[:, :d].detach().requires_grad_(False),
+                x_centroid=x_centroid.detach().requires_grad_(False),
+                y_basis=y_basis[:, :d].detach().requires_grad_(False),
+                y_centroid=y_centroid.detach().requires_grad_(False),
+                output_family=str(output_family),
+                basis_id=basis_id,
+                metadata={'variant': tok, **(metadata or {})},
+            )
             current_input = _to_maps(record.spike)
         return bank
 
 def compute_minibatch_psd_regularizer(input_batch: torch.Tensor, hidden_records: list[LayerRecord], variant: str, output_family: str, lambda_rep_1d: float, lambda_pca_1d: float, lambda_pca_mimo: float, pca_reference_bank: dict[str, FixedPCALayerReference] | None) -> PSDRegularizationBreakdown:
     ref = input_batch.new_zeros(())
     if float(lambda_rep_1d)==0.0 and float(lambda_pca_1d)==0.0 and float(lambda_pca_mimo)==0.0:
-        return PSDRegularizationBreakdown(ref,ref,ref,ref,{},{},{})
+        return PSDRegularizationBreakdown(ref,ref,ref,ref,{},{},{},{'variant': str(variant), 'output_family': str(output_family)})
     if (float(lambda_pca_1d)!=0.0 or float(lambda_pca_mimo)!=0.0) and not pca_reference_bank:
         raise ValueError('PCA lambda is nonzero but pca_reference_bank is missing.')
     rep_parts={}; pca1_parts={}; pcam_parts={}
@@ -93,4 +121,4 @@ def compute_minibatch_psd_regularizer(input_batch: torch.Tensor, hidden_records:
     rep = float(lambda_rep_1d)*rep
     pca1 = float(lambda_pca_1d)*pca1
     pcam = float(lambda_pca_mimo)*pcam
-    return PSDRegularizationBreakdown(rep+pca1+pcam, rep,pca1,pcam, rep_parts,pca1_parts,pcam_parts)
+    return PSDRegularizationBreakdown(rep+pca1+pcam, rep,pca1,pcam, rep_parts,pca1_parts,pcam_parts, {'variant': str(variant), 'output_family': str(output_family)})
