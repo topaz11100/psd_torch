@@ -179,7 +179,7 @@ Wrapper 파일 안의 `CONFIG_PATHS=(...)` 배열에 config를 직접 추가해 
 
 ### PCA 신호분석 설정법
 
-PCA 분석은 row/channel/neuron 축을 고정 basis로 투영해 mode 신호를 만든 뒤 PSD를 계산하는 확장 분석이다. 현재 root pipeline에서 PCA entrypoint가 없으면 `Spec/theory/03_pca_fixed_reference.md`의 원칙에 맞춰 `psd_analysis`에 다음 config 계약을 추가한다.
+PCA 분석은 row/channel/neuron 축을 고정 basis로 투영해 mode 신호를 만든 뒤 PSD를 계산하는 확장 분석이다. 현재 root pipeline의 `psd_analysis`에서 아래 옵션으로 직접 제어한다.
 
 | 인수 | 역할 | 자료형 | 필수 | 허용값/범위 | 예시 |
 |---|---|---:|---:|---|---|
@@ -198,10 +198,11 @@ PCA 분석은 row/channel/neuron 축을 고정 basis로 투영해 mode 신호를
 5. PCA basis metadata에는 dataset, checkpoint, layer, signal family, row semantics, component 수, basis shape를 남긴다.
 
 대표 산출물은 `pca_reference/`, `pca_mode_traces/`, `pca_mimo_traces/`, `pca_cross_traces/`처럼 scalar representative 산출물과 분리한다.
+기본값은 `enable_pca_1d=true`, `enable_pca_mimo=true`, `pca_ref_epoch=1`, `pca_min_train_accuracy=0.0`이며, `pca_ref_epoch`가 checkpoint 목록에 없으면 실행을 실패한다.
 
 ### PCA 대표신호 기반 규제 설정법
 
-현재 `regularization_lambda1`, `regularization_lambda2`는 input-hidden 및 adjacent hidden 사이의 scalar representative PSD 곡선 거리만 계산한다. PCA 대표신호를 이용한 규제는 fixed PCA reference bank가 필요하므로 별도 구현 또는 별도 experiment entrypoint에서 다음 계약으로 둔다.
+현재 `regularization_lambda1`, `regularization_lambda2`는 input-hidden 및 adjacent hidden 사이의 scalar representative PSD 곡선 거리만 계산한다. PCA 대표신호 규제는 아래 별도 옵션(`lambda_psd_*`)으로 추가되고 기존 의미를 바꾸지 않는다.
 
 | 인수 | 역할 | 자료형 | 허용값/범위 | 예시 |
 |---|---|---:|---|---|
@@ -213,6 +214,7 @@ PCA 분석은 row/channel/neuron 축을 고정 basis로 투영해 mode 신호를
 | `pca_dim_per_layer` | fixed PCA reference bank 차원 | integer array | 양의 정수 배열 | `[4]` |
 
 PCA 규제를 켜면 학습 시작 전에 no-grad reference batch로 layer별 `x_basis/y_basis`와 centroid를 고정하고, 학습 minibatch에서는 그 basis만 적용한다. basis 자체는 penalty gradient 대상이 아니다.
+현재 DDP(`ddp=true`)에서 PCA PSD 규제(`lambda_psd_pca_1d` 또는 `lambda_psd_pca_mimo`)는 broadcast 동기화 미구현으로 fail-fast(`ValueError`)로 차단한다.
 
 ## `plotting.json`
 

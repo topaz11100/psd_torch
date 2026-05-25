@@ -20,5 +20,14 @@
     "ddp": false,
     "ddp_world_size": 2,
     "batch_size_is_global": true
+    ,
+    "lambda_psd_rep_1d": 0.0,
+    "lambda_psd_pca_1d": 0.0,
+    "lambda_psd_pca_mimo": 0.0,
+    "psd_reg_variant": "raw",
+    "psd_reg_output_family": "spike",
+    "pca_dim_per_layer": [
+      4
+    ]
   }
 }
