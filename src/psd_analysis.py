@@ -19,6 +19,7 @@ import argparse
 from collections import defaultdict
 import itertools
 import json
+import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -29,6 +30,7 @@ from src.util.cli_common import parse_bool_token
 
 
 SOURCE_PROGRAM = 'psd_analysis'
+PCA_ANALYSIS_SCHEMA_VERSION = 1
 
 
 def _parse_bool_config_value(value: Any, *, default: bool) -> bool:
@@ -115,9 +117,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--num_workers', type=int, default=0)
     parser.add_argument('--config', default=None, help='JSON 설정 파일 경로(.json)')
     parser.add_argument('--low_vram', type=int, default=0)
-    parser.add_argument('--enable_pca_1d', default='true')
-    parser.add_argument('--enable_pca_mimo', default='true')
-    parser.add_argument('--pca_ref_epoch', type=int, default=1)
+    parser.add_argument('--enable_pca_1d', default='false')
+    parser.add_argument('--enable_pca_mimo', default='false')
+    parser.add_argument('--pca_ref_epoch', type=int, default=None)
     parser.add_argument('--pca_min_train_accuracy', type=float, default=0.0)
     parser.add_argument('--pca_dim_per_layer', nargs='*', default=None)
     return parser
@@ -1071,7 +1073,7 @@ def _checkpoint_common_base(*, payload: Mapping[str, Any], checkpoint_path: Path
 
 
 def _validate_pca_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> list[int]:
-    if int(args.pca_ref_epoch) < 1:
+    if args.pca_ref_epoch is not None and int(args.pca_ref_epoch) < 1:
         parser.error('--pca_ref_epoch must be a positive integer.')
     gate = float(args.pca_min_train_accuracy)
     if gate < 0.0 or gate > 1.0:
@@ -1086,6 +1088,34 @@ def _validate_pca_args(args: argparse.Namespace, parser: argparse.ArgumentParser
     return dims
 
 
+def _resolve_train_accuracy(payload: Mapping[str, Any]) -> float | None:
+    metric_snapshot = payload.get('metric_snapshot')
+    if isinstance(metric_snapshot, Mapping):
+        value = metric_snapshot.get('train_accuracy')
+        if value is not None:
+            return float(value)
+    value = payload.get('train_accuracy')
+    if value is not None:
+        return float(value)
+    metrics = payload.get('training_metrics')
+    if isinstance(metrics, Mapping):
+        value = metrics.get('train_accuracy')
+        if value is not None:
+            return float(value)
+    return None
+
+
+def _parse_bool_like(value: Any, *, default: bool) -> bool:
+    return _parse_bool_config_value(value, default=default)
+
+
+def _safe_basis_filename(basis_id: str) -> str:
+    base = re.sub(r'[^a-zA-Z0-9._-]+', '_', str(basis_id)).strip('._')
+    if not base:
+        base = 'basis'
+    return f'{base}.pt'
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     global LOW_VRAM
     parser = build_arg_parser()
@@ -1096,8 +1126,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if int(args.num_workers) < 0:
         parser.error('--num_workers must be >= 0.')
     pca_dims_cli = _validate_pca_args(args, parser)
-    enable_pca_1d = _parse_bool_config_value(args.enable_pca_1d, default=True)
-    enable_pca_mimo = _parse_bool_config_value(args.enable_pca_mimo, default=True)
+    enable_pca_1d = _parse_bool_like(args.enable_pca_1d, default=False)
+    enable_pca_mimo = _parse_bool_like(args.enable_pca_mimo, default=False)
+    pca_enabled = bool(enable_pca_1d or enable_pca_mimo or args.pca_ref_epoch is not None)
+    if pca_enabled and args.pca_ref_epoch is None:
+        raise ValueError('pca_ref_epoch must be provided when enable_pca_1d or enable_pca_mimo is enabled.')
     # Exact-only analysis: userbin aggregation is intentionally disabled.
 
     _load_runtime_dependencies()
@@ -1108,10 +1141,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     input_is_single_file = checkpoint_input.is_file()
     selected_extractors = ALL_CURVE_EXTRACTORS
     checkpoint_files, ordering_warnings = _resolve_checkpoint_files(checkpoint_input)
-    ref_candidates = [p for p in checkpoint_files if int(_load_checkpoint(p, map_location='cpu').get('epoch', -1)) == int(args.pca_ref_epoch)]
-    if not ref_candidates:
-        raise ValueError(f'pca_ref_epoch={int(args.pca_ref_epoch)} is not present in checkpoint list.')
-    pca_ref_checkpoint = ref_candidates[0]
+    pca_ref_checkpoint: Path | None = None
+    if pca_enabled:
+        ref_candidates = [p for p in checkpoint_files if int(_load_checkpoint(p, map_location='cpu').get('epoch', -1)) == int(args.pca_ref_epoch)]
+        if not ref_candidates:
+            raise ValueError(f'pca_ref_epoch={int(args.pca_ref_epoch)} is not present in checkpoint list.')
+        pca_ref_checkpoint = ref_candidates[0]
     device = _require_cuda_device(int(args.gpu_index))
 
     manifest_rows: list[dict[str, str]] = []
@@ -1122,6 +1157,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     first_manifest_base: dict[str, Any] | None = None
     pca_basis_cache: dict[tuple[str, int, str, str, str, int | None], tuple[torch.Tensor, torch.Tensor, dict[str, Any]]] = {}
 
+    pca_reference_dir = output_root / 'pca_reference' / 'basis'
     for checkpoint_path in tqdm(checkpoint_files, desc='psd_analysis:checkpoints', leave=False):
         payload = _load_checkpoint(checkpoint_path, map_location='cpu')
         seed = int(args.seed if args.seed is not None else payload.get('seed', 0))
@@ -1155,9 +1191,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     device=device,
                 )
             )
-        if checkpoint_path == pca_ref_checkpoint:
-            train_accuracy = float(payload.get('metric_snapshot', {}).get('train_accuracy', payload.get('train_accuracy', 1.0)))
-            if train_accuracy < float(args.pca_min_train_accuracy):
+        if pca_enabled and checkpoint_path == pca_ref_checkpoint:
+            train_accuracy = _resolve_train_accuracy(payload)
+            if float(args.pca_min_train_accuracy) > 0.0 and train_accuracy is None:
+                raise ValueError('pca_min_train_accuracy > 0 requires reference checkpoint train accuracy metadata.')
+            if train_accuracy is not None and train_accuracy < float(args.pca_min_train_accuracy):
                 raise ValueError(f'pca_ref_epoch train accuracy {train_accuracy:.6f} is below pca_min_train_accuracy={float(args.pca_min_train_accuracy):.6f}')
             for key, maps in maps_by_key.items():
                 layer_name, layer_index, signal_kind, _series, scope, family, label = key
@@ -1165,22 +1203,50 @@ def main(argv: Sequence[str] | None = None) -> int:
                 dim = pca_dim_from_cli_vector(pca_dims_cli, int(layer_index) - 1, row_count)
                 basis, centroid = compute_fixed_pca_basis(maps, dim)
                 meta = {
+                    'pca_analysis_schema_version': PCA_ANALYSIS_SCHEMA_VERSION,
                     'dataset': str(args.dataset),
+                    'run_id': str(run_id),
                     'checkpoint_path': str(checkpoint_path),
                     'checkpoint_epoch': int(payload.get('epoch', -1)),
+                    'reference_checkpoint_path': str(checkpoint_path),
                     'split': str(scope),
                     'scope': str(scope),
                     'layer': str(layer_name),
+                    'layer_name': str(layer_name),
                     'layer_index': int(layer_index),
                     'family': str(family),
                     'label': '' if label is None else int(label),
                     'signal_kind': str(signal_kind),
                     'row_count': row_count,
-                    'dim': int(dim),
+                    'requested_dim': int((pca_dims_cli[int(layer_index) - 1] if pca_dims_cli and int(layer_index) - 1 < len(pca_dims_cli) else (pca_dims_cli[-1] if pca_dims_cli else min(row_count, 4)))),
+                    'resolved_dim': int(dim),
                     'basis_shape': list(basis.shape),
                     'centroid_shape': list(centroid.shape),
-                    'basis_id': f'epoch_{int(payload.get("epoch",-1))}__{layer_name}__{layer_index}__{scope}__{family}__{signal_kind}',
+                    'basis_id': f'dataset={args.dataset}|run={run_id}|ref_epoch={int(payload.get("epoch",-1))}|split={scope}|scope={scope}|layer={layer_name}|family={family}|kind={signal_kind}|dim={int(dim)}',
+                    'reference_epoch': int(payload.get('epoch', -1)),
+                    'reference_train_accuracy': None if train_accuracy is None else float(train_accuracy),
+                    'pca_min_train_accuracy': float(args.pca_min_train_accuracy),
+                    'source_dtype': str(maps.dtype),
+                    'source_device_after_fit': 'cpu',
                 }
+                pca_reference_dir.mkdir(parents=True, exist_ok=True)
+                basis_file = _safe_basis_filename(str(meta['basis_id']))
+                basis_path = pca_reference_dir / basis_file
+                basis_payload = {
+                    'basis': basis.detach().cpu().requires_grad_(False),
+                    'centroid': centroid.detach().cpu().requires_grad_(False),
+                    'basis_id': str(meta['basis_id']),
+                    'reference_epoch': int(meta['reference_epoch']),
+                    'requested_dim': int(meta['requested_dim']),
+                    'resolved_dim': int(meta['resolved_dim']),
+                    'row_count': int(meta['row_count']),
+                    'layer_index': int(meta['layer_index']),
+                    'layer_name': str(meta['layer_name']),
+                    'family': str(meta['family']),
+                    'signal_kind': str(meta['signal_kind']),
+                }
+                torch.save(basis_payload, basis_path)
+                meta['basis_file'] = str(basis_path.relative_to(output_root))
                 pca_basis_cache[key] = (basis.cpu(), centroid.cpu(), meta)
                 if LOW_VRAM:
                     del basis, centroid
@@ -1210,7 +1276,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             family_rows.extend(curve_rows)
             dispersion_rows.extend(disp_rows)
             cache = pca_basis_cache.get(key)
-            if cache is not None:
+            if pca_enabled and cache is not None:
                 basis, centroid, meta = cache
                 pca_maps = apply_fixed_pca_basis(maps, basis, centroid)
                 for mode in range(int(pca_maps.shape[1])):
@@ -1220,9 +1286,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if enable_pca_1d:
                         mode_curve = representative_curve_from_summary(dict(mode_summary), reducer='mean', extractor='psd_exact', centering='raw', scale='raw').reshape(-1)
                         mode_freq = curve_axis_from_summary(dict(mode_summary), extractor='psd_exact', centering='raw')
-                        for freq_value, curve_value in zip(mode_freq, mode_curve):
+                        for fi, (freq_value, curve_value) in enumerate(zip(mode_freq, mode_curve)):
                             kwargs = dict(base)
-                            kwargs.update(category='analysis_curve', extractor='psd_exact', reducer='mean', variant='raw', scale='raw', frequency=float(freq_value), value=float(curve_value), value_unit='power', series=f'pca_mode_{mode:03d}')
+                            kwargs.update(category='analysis_curve', extractor='psd_exact', reducer='mean', variant='raw', scale='raw', frequency=float(freq_value), frequency_bin=int(fi), value=float(curve_value), value_unit='power', series=f'pca_mode_{mode:03d}', pca_analysis_schema_version=PCA_ANALYSIS_SCHEMA_VERSION, basis_id=str(meta.get('basis_id', '')), pca_mode=int(mode), reference_epoch=int(meta.get('reference_epoch', -1)), resolved_dim=int(meta.get('resolved_dim', pca_maps.shape[1])))
                             pca_mode_rows.append(common_row(**kwargs))
                 if enable_pca_mimo:
                     freqs, mimo = auto_spectral_matrix_from_mode_maps(pca_maps)
@@ -1230,10 +1296,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         for mi in range(int(mimo.shape[1])):
                             for mj in range(int(mimo.shape[2])):
                                 kwargs = dict(base)
-                                kwargs.update(category='analysis_curve', extractor='psd_exact', reducer='mean', variant='raw', scale='raw', frequency=float(freq_value), value=float(mimo[fi, mi, mj].abs().detach().cpu().item()), value_unit='power', series=f'pca_mimo_{mi:03d}_{mj:03d}')
+                                entry = mimo[fi, mi, mj]
+                                kwargs.update(category='analysis_curve', extractor='psd_exact', reducer='mean', variant='raw', scale='raw', frequency=float(freq_value), frequency_bin=int(fi), value=float(entry.abs().detach().cpu().item()), value_real=float(entry.real.detach().cpu().item()), value_imag=float(entry.imag.detach().cpu().item()), value_unit='power', series=f'pca_mimo_{mi:03d}_{mj:03d}', pca_analysis_schema_version=PCA_ANALYSIS_SCHEMA_VERSION, basis_id=str(meta.get('basis_id', '')), source_mode=int(mi), target_mode=int(mj), reference_epoch=int(meta.get('reference_epoch', -1)), resolved_dim=int(meta.get('resolved_dim', pca_maps.shape[1])))
                                 pca_mimo_rows.append(common_row(**kwargs))
                 ref_kwargs = dict(base)
-                ref_kwargs.update(category='analysis_manifest', status='ok', message=json.dumps(meta, ensure_ascii=False), artifact_name='pca_reference', output_csv_path=str(checkpoint_dir / 'pca_reference'))
+                ref_kwargs.update(category='analysis_manifest', status='ok', message=json.dumps(meta, ensure_ascii=False), artifact_name='pca_reference', output_csv_path=str(checkpoint_dir / 'pca_reference'), pca_analysis_schema_version=PCA_ANALYSIS_SCHEMA_VERSION, basis_id=str(meta.get('basis_id', '')), reference_epoch=int(meta.get('reference_epoch', -1)), resolved_dim=int(meta.get('resolved_dim', 0)))
                 pca_reference_rows.append(common_row(**ref_kwargs))
 
         layer_distance_profile_rows, layer_distance_checkpoint_trend_rows = _layer_distance_rows_for_checkpoint(summaries=summaries, common_by_key=common_by_key, extractors=selected_extractors, distance_metric=str(args.analysis_distance_metric))
@@ -1248,26 +1315,63 @@ def main(argv: Sequence[str] | None = None) -> int:
             for parameter, stats in param_map.items():
                 for stat_name, stat_value in stats.items():
                     filter_trend_history[(layer_name, layer_index, parameter, stat_name)].append((int(payload.get('epoch', 0)), float(stat_value), dict(checkpoint_base)))
-        if enable_pca_mimo:
+        if pca_enabled and enable_pca_mimo:
             sorted_keys = sorted(maps_by_key.keys(), key=lambda item: (item[4], item[1], item[0], item[5], str(item[6])))
             for key in sorted_keys:
                 layer_name, layer_index, _signal_kind, _series, scope, family, label = key
                 li_key = (layer_name, layer_index, 'hidden', 'layer_input', scope, family, label)
                 mem_key = (layer_name, layer_index, 'hidden', 'membrane', scope, family, label)
                 spk_key = (layer_name, layer_index, 'hidden', 'spike', scope, family, label)
-                for src_key, dst_key, trace_name in ((li_key, mem_key, 'x_layer_to_y_mem'), (li_key, spk_key, 'x_layer_to_y_spike')):
-                    if src_key in maps_by_key and dst_key in maps_by_key and src_key in pca_basis_cache:
-                        basis, centroid, _meta = pca_basis_cache[src_key]
-                        src_modes = apply_fixed_pca_basis(maps_by_key[src_key], basis, centroid)
-                        dst_modes = apply_fixed_pca_basis(maps_by_key[dst_key], basis, centroid)
+                for src_key, dst_key, trace_name in ((li_key, mem_key, 'layer_input_to_membrane'), (li_key, spk_key, 'layer_input_to_spike')):
+                    if src_key in maps_by_key and dst_key in maps_by_key and src_key in pca_basis_cache and dst_key in pca_basis_cache:
+                        x_basis, x_centroid, x_meta = pca_basis_cache[src_key]
+                        y_basis, y_centroid, y_meta = pca_basis_cache[dst_key]
+                        src_modes = apply_fixed_pca_basis(maps_by_key[src_key], x_basis, x_centroid)
+                        dst_modes = apply_fixed_pca_basis(maps_by_key[dst_key], y_basis, y_centroid)
                         freqs, cross = cross_spectral_matrix_from_mode_maps(src_modes, dst_modes)
                         base = dict(common_by_key[src_key])
                         for fi, freq_value in enumerate(freqs.detach().cpu().numpy().reshape(-1)):
                             for mi in range(int(cross.shape[1])):
                                 for mj in range(int(cross.shape[2])):
                                     kwargs = dict(base)
-                                    kwargs.update(category='analysis_curve', extractor='psd_exact', reducer='mean', variant='raw', scale='raw', frequency=float(freq_value), value=float(cross[fi, mi, mj].abs().detach().cpu().item()), value_unit='power', series=f'pca_cross_{trace_name}_{mi:03d}_{mj:03d}')
+                                    entry = cross[fi, mi, mj]
+                                    kwargs.update(category='analysis_curve', extractor='psd_exact', reducer='mean', variant='raw', scale='raw', frequency=float(freq_value), frequency_bin=int(fi), value=float(entry.abs().detach().cpu().item()), value_real=float(entry.real.detach().cpu().item()), value_imag=float(entry.imag.detach().cpu().item()), value_unit='power', pca_analysis_schema_version=PCA_ANALYSIS_SCHEMA_VERSION, series=f'pca_cross_{trace_name}_{mi:03d}_{mj:03d}', relation=str(trace_name), source_layer_index=int(src_key[1]), source_layer_name=str(src_key[0]), source_signal_kind=str(src_key[3]), target_layer_index=int(dst_key[1]), target_layer_name=str(dst_key[0]), target_signal_kind=str(dst_key[3]), source_mode=int(mi), target_mode=int(mj), x_basis_id=str(x_meta.get('basis_id', '')), y_basis_id=str(y_meta.get('basis_id', '')), x_resolved_dim=int(x_meta.get('resolved_dim', src_modes.shape[1])), y_resolved_dim=int(y_meta.get('resolved_dim', dst_modes.shape[1])), reference_epoch=int(x_meta.get('reference_epoch', -1)))
                                     pca_cross_rows.append(common_row(**kwargs))
+
+            # adjacent hidden output-output relation
+            grouped_keys: dict[tuple[str, str, int | None], list[tuple[str, int, str, str, str, str, int | None]]] = defaultdict(list)
+            for key in sorted_keys:
+                layer_name, layer_index, _signal_kind, series, scope, family, label = key
+                if series in {'spike', 'membrane'}:
+                    grouped_keys[(scope, family, label)].append(key)
+            for (_scope, _family, _label), keys in grouped_keys.items():
+                by_index: dict[int, tuple[str, int, str, str, str, str, int | None]] = {}
+                for key in keys:
+                    idx = int(key[1])
+                    # prefer spike over membrane deterministically
+                    if idx not in by_index or (by_index[idx][3] != 'spike' and key[3] == 'spike'):
+                        by_index[idx] = key
+                ordered = [by_index[i] for i in sorted(by_index.keys())]
+                for src_key, dst_key in zip(ordered[:-1], ordered[1:]):
+                    if int(dst_key[1]) != int(src_key[1]) + 1:
+                        continue
+                    if src_key not in maps_by_key or dst_key not in maps_by_key:
+                        continue
+                    if src_key not in pca_basis_cache or dst_key not in pca_basis_cache:
+                        continue
+                    x_basis, x_centroid, x_meta = pca_basis_cache[src_key]
+                    y_basis, y_centroid, y_meta = pca_basis_cache[dst_key]
+                    src_modes = apply_fixed_pca_basis(maps_by_key[src_key], x_basis, x_centroid)
+                    dst_modes = apply_fixed_pca_basis(maps_by_key[dst_key], y_basis, y_centroid)
+                    freqs, cross = cross_spectral_matrix_from_mode_maps(src_modes, dst_modes)
+                    base = dict(common_by_key[src_key])
+                    for fi, freq_value in enumerate(freqs.detach().cpu().numpy().reshape(-1)):
+                        for mi in range(int(cross.shape[1])):
+                            for mj in range(int(cross.shape[2])):
+                                kwargs = dict(base)
+                                entry = cross[fi, mi, mj]
+                                kwargs.update(category='analysis_curve', extractor='psd_exact', reducer='mean', variant='raw', scale='raw', frequency=float(freq_value), frequency_bin=int(fi), value=float(entry.abs().detach().cpu().item()), value_real=float(entry.real.detach().cpu().item()), value_imag=float(entry.imag.detach().cpu().item()), value_unit='power', pca_analysis_schema_version=PCA_ANALYSIS_SCHEMA_VERSION, series=f'pca_cross_adjacent_hidden_output_{mi:03d}_{mj:03d}', relation='adjacent_hidden_output', source_layer_index=int(src_key[1]), source_layer_name=str(src_key[0]), source_signal_kind=str(src_key[3]), target_layer_index=int(dst_key[1]), target_layer_name=str(dst_key[0]), target_signal_kind=str(dst_key[3]), source_mode=int(mi), target_mode=int(mj), x_basis_id=str(x_meta.get('basis_id', '')), y_basis_id=str(y_meta.get('basis_id', '')), x_resolved_dim=int(x_meta.get('resolved_dim', src_modes.shape[1])), y_resolved_dim=int(y_meta.get('resolved_dim', dst_modes.shape[1])), reference_epoch=int(x_meta.get('reference_epoch', -1)))
+                                pca_cross_rows.append(common_row(**kwargs))
 
         _write_layer_rows(checkpoint_dir, family_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='analysis_curve')
         _write_layer_rows(checkpoint_dir, dispersion_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='analysis_dispersion')
@@ -1281,10 +1385,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             _write_rows_to_dir(checkpoint_dir / 'layer_dispersion_profile' / statistic, statistic_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='layer_dispersion_profile')
         if bool(args.enable_pairwise_dependency_appendix):
             _write_artifact(checkpoint_dir / 'pairwise_dependency_appendix.csv', appendix_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='pairwise_dependency_appendix')
-        _write_layer_rows(checkpoint_dir, pca_reference_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='pca_reference')
-        if enable_pca_1d:
+        if pca_enabled:
+            _write_layer_rows(checkpoint_dir, pca_reference_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='pca_reference')
+        if pca_enabled and enable_pca_1d:
             _write_layer_rows(checkpoint_dir, pca_mode_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='pca_mode_traces')
-        if enable_pca_mimo:
+        if pca_enabled and enable_pca_mimo:
             _write_layer_rows(checkpoint_dir, pca_mimo_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='pca_mimo_traces')
             _write_layer_rows(checkpoint_dir, pca_cross_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='pca_cross_traces')
 

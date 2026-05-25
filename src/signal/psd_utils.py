@@ -427,8 +427,20 @@ def time_domain_summary_from_maps(signal_maps: torch.Tensor) -> dict[str, Any]:
 def scalar_representative_maps(signal_maps: torch.Tensor, *, reducer: str) -> torch.Tensor:
     """Handle ``scalar representative maps`` for the ``psd_utils`` module."""
     reducer = str(reducer).strip().lower()
+    if isinstance(signal_maps, np.ndarray):
+        if signal_maps.ndim != 3:
+            raise ValueError(f'Expected shape (samples, rows, time), got {tuple(signal_maps.shape)}')
+        if signal_maps.shape[1] <= 0 or signal_maps.shape[2] <= 0:
+            raise ValueError('signal_maps rows/time dimensions must be positive.')
+        if reducer == 'mean':
+            return signal_maps.mean(axis=1, keepdims=True)
+        if reducer == 'median':
+            return np.median(signal_maps, axis=1, keepdims=True)
+        raise ValueError(f'Unsupported representative reducer: {reducer}')
     if signal_maps.ndim != 3:
         raise ValueError(f'Expected shape (samples, rows, time), got {tuple(signal_maps.shape)}')
+    if int(signal_maps.shape[1]) <= 0 or int(signal_maps.shape[2]) <= 0:
+        raise ValueError('signal_maps rows/time dimensions must be positive.')
     if reducer == 'mean':
         return signal_maps.mean(dim=1, keepdim=True)
     if reducer == 'median':
@@ -442,11 +454,18 @@ def pca_dim_from_cli_vector(
     row_count: int,
 ) -> int:
     """Resolve one layer PCA dimension from CLI vector semantics."""
-    rows = max(1, int(row_count))
-    layer_index = max(0, int(layer_index_zero_based))
+    rows = int(row_count)
+    if rows <= 0:
+        raise ValueError('row_count must be positive.')
+    layer_index = int(layer_index_zero_based)
+    if layer_index < 0:
+        raise ValueError('layer_index_zero_based must be non-negative.')
     if cli_dims is None or len(cli_dims) == 0:
         return max(1, min(rows, 4))
-    dims = [int(v) for v in cli_dims]
+    try:
+        dims = [int(v) for v in cli_dims]
+    except Exception as exc:
+        raise ValueError(f'cli_dims must be integer-convertible: {cli_dims!r}') from exc
     selected = dims[layer_index] if layer_index < len(dims) else dims[-1]
     return max(1, min(rows, int(selected)))
 
@@ -457,6 +476,10 @@ def compute_fixed_pca_basis(reference_maps: torch.Tensor, target_dim: int) -> tu
         raise ValueError(f'Expected shape (samples, rows, time), got {tuple(reference_maps.shape)}')
     maps = _as_float_tensor(reference_maps)
     samples, rows, time_steps = [int(v) for v in maps.shape]
+    if rows <= 0 or time_steps <= 0:
+        raise ValueError('reference_maps rows/time dimensions must be positive.')
+    if not torch.isfinite(maps).all():
+        raise ValueError('reference_maps must be finite.')
     observations = max(1, samples * time_steps)
     dim = max(1, min(int(target_dim), rows, observations))
     obs = maps.permute(0, 2, 1).reshape(observations, rows)
@@ -470,7 +493,7 @@ def compute_fixed_pca_basis(reference_maps: torch.Tensor, target_dim: int) -> tu
         evals, evecs = torch.linalg.eigh(cov)
         order = torch.argsort(evals, descending=True)
         basis = evecs[:, order[:dim]].contiguous()
-    return basis.detach(), centroid.detach()
+    return basis.detach().requires_grad_(False), centroid.detach().requires_grad_(False)
 
 
 def apply_fixed_pca_basis(signal_maps: torch.Tensor, basis: torch.Tensor, centroid: torch.Tensor) -> torch.Tensor:
@@ -478,9 +501,11 @@ def apply_fixed_pca_basis(signal_maps: torch.Tensor, basis: torch.Tensor, centro
     if signal_maps.ndim != 3:
         raise ValueError(f'Expected shape (samples, rows, time), got {tuple(signal_maps.shape)}')
     maps = _as_float_tensor(signal_maps)
+    if not torch.isfinite(maps).all():
+        raise ValueError('signal_maps must be finite.')
     rows = int(maps.shape[1])
-    basis_local = torch.as_tensor(basis, device=maps.device, dtype=maps.dtype)
-    centroid_local = torch.as_tensor(centroid, device=maps.device, dtype=maps.dtype).reshape(-1)
+    basis_local = basis.detach().to(device=maps.device, dtype=maps.dtype) if isinstance(basis, torch.Tensor) else torch.as_tensor(basis, device=maps.device, dtype=maps.dtype)
+    centroid_local = centroid.detach().to(device=maps.device, dtype=maps.dtype).reshape(-1) if isinstance(centroid, torch.Tensor) else torch.as_tensor(centroid, device=maps.device, dtype=maps.dtype).reshape(-1)
     if basis_local.ndim != 2:
         raise ValueError(f'basis must be rank-2 (rows, dim), got {tuple(basis_local.shape)}')
     if int(basis_local.shape[0]) != rows:
@@ -927,6 +952,12 @@ def auto_spectral_matrix_from_mode_maps(mode_maps: torch.Tensor) -> tuple[torch.
     """Handle ``auto spectral matrix from mode maps`` for the ``psd_utils`` module."""
     if mode_maps.ndim != 3:
         raise ValueError(f'Expected shape (samples, modes, time), got {tuple(mode_maps.shape)}')
+    if int(mode_maps.shape[1]) < 1:
+        raise ValueError('mode_maps must have at least one mode.')
+    if int(mode_maps.shape[2]) < 2:
+        raise ValueError('mode_maps must have time dimension >= 2.')
+    if not torch.isfinite(mode_maps).all():
+        raise ValueError('mode_maps must be finite.')
     freqs, spectrum, scale, window_power = exact_hann_rfft(mode_maps)
     length = int(mode_maps.shape[-1])
     matrix = torch.einsum('nmf,nkf->fmk', spectrum, spectrum.conj()) / max(1, int(mode_maps.shape[0]))
@@ -974,6 +1005,8 @@ __all__ = [
     'one_sided_scaling',
     'power_to_db',
     'pca_dim_from_cli_vector',
+    'compute_fixed_pca_basis',
+    'apply_fixed_pca_basis',
     'row_variance_mad_summary',
     'scalar_io_spectral_objects',
     'scalar_representative_maps',
@@ -983,5 +1016,3 @@ __all__ = [
     'tensor_to_channel_major_maps_explicit',
     'time_domain_summary_from_maps',
 ]
-    'compute_fixed_pca_basis',
-    'apply_fixed_pca_basis',

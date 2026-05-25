@@ -16,15 +16,6 @@ for _backbone in ('vgg11', 'resnet18'):
     _FIXED_CNN_BASES[f'{_backbone}_lif'] = (_backbone, 'lif', 'cnn_lif')
     _FIXED_CNN_BASES[f'{_backbone}_rf'] = (_backbone, 'rf', 'cnn_rf')
 
-_SIMPLE_ALIASES = {
-    'tc': 'tc_lif',
-    'tc_lif': 'tc_lif',
-    'tclif': 'tc_lif',
-    'ts': 'ts_lif',
-    'ts_lif': 'ts_lif',
-    'tslif': 'ts_lif',
-}
-
 _RESET_SUFFIX_TO_MODE = {
     'soft': 'soft_reset',
     'hard': 'hard_reset',
@@ -63,37 +54,6 @@ class ModelSpec:
         if self.reset_mode is None:
             return None
         return self.reset_mode != 'no_reset'
-
-
-_DH_PATTERN = re.compile(r'^(dh_snn|dh)(?:_.+)?$')
-_DRF_PATTERN = re.compile(r'^d_rf(?:_(\d+))?$')
-
-
-def _parse_dh_variant(token: str) -> tuple[bool, int | None] | None:
-    """Parse one DH-SNN token with optional recurrent and branch modifiers."""
-
-    match = _DH_PATTERN.fullmatch(token)
-    if match is None:
-        return None
-    prefix = match.group(1)
-    if token == prefix:
-        return False, None
-    suffix = token[len(prefix) + 1 :]
-    parts = [part for part in suffix.split('_') if part != '']
-    if not parts:
-        return False, None
-
-    recurrent = False
-    branch: int | None = None
-    for part in parts:
-        if part == 'r' and not recurrent:
-            recurrent = True
-            continue
-        if part.isdigit() and branch is None:
-            branch = int(part)
-            continue
-        return None
-    return recurrent, branch
 
 
 def _split_trailing_modifiers(token: str) -> tuple[str, bool, str | None, str | None]:
@@ -199,6 +159,56 @@ def _canonicalize_fixed_cnn_family(raw: str, normalized: str) -> ModelSpec | Non
     )
 
 
+def _canonicalize_tc_ts_family(raw: str, normalized: str) -> ModelSpec | None:
+    alias_to_family = {
+        'tc': 'tc_lif',
+        'tc_lif': 'tc_lif',
+        'tclif': 'tc_lif',
+        'ts': 'ts_lif',
+        'ts_lif': 'ts_lif',
+        'tslif': 'ts_lif',
+    }
+    patterns = [
+        ('_r', True),
+        ('', False),
+    ]
+    for suffix, recurrent in patterns:
+        for alias, family in alias_to_family.items():
+            if normalized == f'{alias}{suffix}':
+                canonical = family + ('_R' if recurrent else '')
+                return ModelSpec(raw_token=raw, canonical_token=canonical, family=family, recurrent=recurrent, branch=None)
+    return None
+
+
+def _canonicalize_dh_snn_family(raw: str, normalized: str) -> ModelSpec | None:
+    match = re.fullmatch(r'^(dh|dh_snn)(?:_(r))?(?:_(\d+))?$', normalized)
+    if match is None:
+        return None
+    base = match.group(1)
+    recurrent = match.group(2) is not None
+    branch_text = match.group(3)
+    branch = 4 if branch_text is None else int(branch_text)
+    if branch <= 0:
+        raise ValueError(f'Model token {raw!r} must use a positive branch integer for dh_snn.')
+    canonical = f"dh_snn{'_R' if recurrent else ''}_{branch}"
+    return ModelSpec(raw_token=raw, canonical_token=canonical, family='dh_snn', recurrent=recurrent, branch=branch)
+
+
+def _canonicalize_d_rf_family(raw: str, normalized: str) -> ModelSpec | None:
+    recurrent = re.fullmatch(r'^d_rf_r(?:_(\d+))?$', normalized)
+    if recurrent is not None:
+        raise ValueError('d_rf_R is not supported because DRFLayer does not expose true recurrent dynamics.')
+    match = re.fullmatch(r'^d_rf(?:_(\d+))?$', normalized)
+    if match is None:
+        return None
+    branch_text = match.group(1)
+    branch = 4 if branch_text is None else int(branch_text)
+    if branch <= 0:
+        raise ValueError(f'Model token {raw!r} must use a positive branch integer for d_rf.')
+    canonical = f'd_rf_{branch}'
+    return ModelSpec(raw_token=raw, canonical_token=canonical, family='d_rf', recurrent=False, branch=branch)
+
+
 def canonicalize_model_token(token: str) -> ModelSpec:
     """Parse one CLI model token into the official canonical representation."""
 
@@ -220,25 +230,30 @@ def canonicalize_model_token(token: str) -> ModelSpec:
     if resettable_spec is not None:
         return resettable_spec
 
+    tc_ts_spec = _canonicalize_tc_ts_family(raw, normalized)
+    if tc_ts_spec is not None:
+        return tc_ts_spec
+
+    dh_spec = _canonicalize_dh_snn_family(raw, normalized)
+    if dh_spec is not None:
+        return dh_spec
+
+    d_rf_spec = _canonicalize_d_rf_family(raw, normalized)
+    if d_rf_spec is not None:
+        return d_rf_spec
+
     if normalized in {'lif', 'lif_r', 'rf', 'rf_r'}:
         raise ValueError(
             f'Model token {raw!r} is an incomplete shorthand. Use the full official token format such as '
             'lif_soft_fixed, lif_R_soft_fixed, rf_soft_fixed, or rf_R_soft_fixed.'
         )
-    if _parse_dh_variant(normalized) is not None or _DRF_PATTERN.fullmatch(normalized) is not None:
-        raise ValueError(
-            f'Model token {raw!r} belongs to a reference-only family and is not an official psd_analysis model token.'
-        )
+
     base_token, recurrent, reset_suffix, threshold_suffix = _split_trailing_modifiers(normalized)
     if reset_suffix is not None or threshold_suffix is not None or recurrent:
         raise ValueError(f'Unsupported official model token: {raw!r}.')
-    if normalized in _SIMPLE_ALIASES:
-        raise ValueError(
-            f'Model token {raw!r} is not an official Spec/ psd_analysis token; '
-            'use a full lif/rf token, a fixed CNN token, or one official auxiliary token.'
-        )
 
     raise ValueError(f'Unsupported model token: {token}')
+
 
 def canonicalize_model_tokens(tokens: list[str] | tuple[str, ...]) -> list[ModelSpec]:
     """Canonicalize many model tokens."""

@@ -21,6 +21,7 @@ from src.model.arch_spec import (
     resolve_arch_spec,
     serialize_arch_spec,
 )
+from src.model.constraints import ConstraintConfig, LayerConstraint, layer_constraint_for_hidden_index, resolve_constraint_plan
 from src.model.model_registry import ModelSpec, canonicalize_model_token
 from src.neurons.DH_SNN_neuron import DHSNNLayer
 from src.neurons.D_RF_neuron import DRFLayer
@@ -84,7 +85,7 @@ def _squeeze_unit_spatial(record_tensor: torch.Tensor) -> torch.Tensor:
 def _output_layer_model_spec(spec: ModelSpec) -> ModelSpec:
     """Return the official output-layer spec with hidden recurrence disabled."""
 
-    if spec.family in {'lif', 'rf'} and bool(spec.recurrent):
+    if spec.family in {'lif', 'rf', 'tc_lif', 'ts_lif', 'dh_snn'} and bool(spec.recurrent):
         return replace(spec, recurrent=False)
     return spec
 
@@ -676,8 +677,10 @@ def _build_dense_family_layer(
     output_size: int,
     v_th: float,
     output_overrides: dict[str, Any],
+    layer_constraint: LayerConstraint | None = None,
 ) -> nn.Module:
     if spec.family == 'lif':
+        lc = layer_constraint if layer_constraint is not None else LayerConstraint()
         return LIFLayer(
             input_size,
             output_size,
@@ -685,20 +688,23 @@ def _build_dense_family_layer(
             v_threshold=v_th,
             trainable_threshold=bool(spec.trainable_threshold),
             reset_mode=_resolved_model_reset_mode(spec, family='lif'),
-            input_mask=None,
-            recurrent_mask=None,
+            alpha_bounds=lc.lif_alpha_bounds,
+            input_mask=lc.input_mask,
+            recurrent_mask=lc.recurrent_mask,
             emit_spike=output_overrides.get('emit_spike', True),
             reset_enabled=_resolved_reset_enabled(spec, output_overrides=output_overrides),
         )
     if spec.family == 'rf':
+        lc = layer_constraint if layer_constraint is not None else LayerConstraint()
         return RFLayer(
             input_size,
             output_size,
             recurrent=spec.recurrent,
             v_threshold=v_th,
             trainable_threshold=bool(spec.trainable_threshold),
-            input_mask=None,
-            recurrent_mask=None,
+            frequency_bounds=lc.rf_frequency_bounds,
+            input_mask=lc.input_mask,
+            recurrent_mask=lc.recurrent_mask,
             reset_mode=_resolved_model_reset_mode(spec, family='rf'),
             emit_spike=output_overrides.get('emit_spike', True),
             reset_enabled=_resolved_reset_enabled(spec, output_overrides=output_overrides),
@@ -730,6 +736,7 @@ def _build_conv2d_family_layer(
     layer_spec: ConvLayerSpec,
     v_th: float,
     output_overrides: dict[str, Any],
+    layer_constraint: LayerConstraint | None = None,
 ) -> nn.Module:
     """Build one 2-D convolutional spiking layer for canonical CNN backbones."""
 
@@ -775,6 +782,7 @@ def build_layer_from_spec(
     layer_spec: LayerSpec,
     v_th: float,
     output_overrides: dict[str, Any] | None = None,
+    layer_constraint: LayerConstraint | None = None,
 ) -> nn.Module:
     output_overrides = {} if output_overrides is None else dict(output_overrides)
     if isinstance(layer_spec, DenseLayerSpec):
@@ -784,6 +792,7 @@ def build_layer_from_spec(
             output_size=int(layer_spec.width),
             v_th=v_th,
             output_overrides=output_overrides,
+            layer_constraint=layer_constraint,
         )
     if isinstance(layer_spec, ResidualBlockSpec):
         if output_overrides:
@@ -798,6 +807,7 @@ def build_layer_from_spec(
             layer_spec=layer_spec,
             v_th=v_th,
             output_overrides=output_overrides,
+            layer_constraint=layer_constraint,
         )
     raise ValueError(f'Convolutional layers are unsupported for model family {spec.family!r}.')
 
@@ -860,6 +870,13 @@ def _build_fixed_cnn2d_classifier(
         sequence_length=int(sequence_length),
     )
     input_channels = int(resolved_input_shape[0] if len(resolved_input_shape) == 3 else resolved_input_shape[1])
+
+    dense_hidden_widths = [int(layer.width) for layer in resolved_layer_specs if isinstance(layer, DenseLayerSpec)]
+    if len(dense_hidden_widths) != len(resolved_layer_specs):
+        if constraint_config is not None and str(getattr(constraint_config, 'mode', 'none')).strip().lower() not in {'none', ''}:
+            raise ValueError('constraint_mode is supported only for dense hidden layers in v1 (no conv/residual arch).')
+    constraint_plan = resolve_constraint_plan(spec, dense_hidden_widths, constraint_config)
+
     hidden_layers: list[nn.Module] = []
     layer_meta: list[LayerMeta] = []
     pool_after: list[nn.Module | None] = []
@@ -875,6 +892,7 @@ def _build_fixed_cnn2d_classifier(
                 layer_spec=layer_spec,
                 v_th=v_th,
                 output_overrides={},
+            layer_constraint=layer_constraint,
             )
             hidden_layers.append(layer)
             layer_meta.append(LayerMeta(name=f'{spec.backbone}_conv_{conv_count:02d}', size=int(layer_spec.out_channels), is_output=False))
@@ -990,10 +1008,17 @@ def build_snn_classifier(
     layer_specs: Sequence[LayerSpec] | None = None,
     output_layer_overrides: dict[str, Any] | None = None,
     v_th: float = 1.0,
+    constraint_config: ConstraintConfig | None = None,
 ) -> SNNClassifier:
     """Build one complete hidden-layer stack plus output neuron layer."""
 
     spec = canonicalize_model_token(model_token) if isinstance(model_token, str) else model_token
+    if constraint_config is not None:
+        constraint_mode = str(getattr(constraint_config, 'mode', 'none')).strip().lower()
+        if constraint_mode not in {'', 'none'} and spec.family not in {'lif', 'rf'}:
+            raise ValueError(
+                f'constraint_mode={constraint_mode!r} is supported only for dense lif/rf families; got family={spec.family!r}.'
+            )
     if spec.family == 'spikegru':
         if input_shape is not None:
             raise ValueError('spikegru is specified as a non-image [B,T,C] model and does not accept input_shape metadata.')
@@ -1050,17 +1075,28 @@ def build_snn_classifier(
             v_th=float(v_th),
         )
 
+
+    dense_hidden_widths = [int(layer.width) for layer in resolved_layer_specs if isinstance(layer, DenseLayerSpec)]
+    if len(dense_hidden_widths) != len(resolved_layer_specs):
+        if constraint_config is not None and str(getattr(constraint_config, 'mode', 'none')).strip().lower() not in {'none', ''}:
+            raise ValueError('constraint_mode is supported only for dense hidden layers in v1 (no conv/residual arch).')
+    constraint_plan = resolve_constraint_plan(spec, dense_hidden_widths, constraint_config)
+
     hidden_layers: list[nn.Module] = []
     layer_meta: list[LayerMeta] = []
     prev_size = int(input_dim)
     current_sequence_length = int(sequence_length)
     for hidden_index, layer_spec in enumerate(resolved_layer_specs, start=1):
+        layer_constraint = None
+        if isinstance(layer_spec, DenseLayerSpec):
+            layer_constraint = layer_constraint_for_hidden_index(constraint_plan, hidden_index=hidden_index - 1, input_size=prev_size, output_size=int(layer_spec.width), recurrent=bool(spec.recurrent))
         layer = build_layer_from_spec(
             spec,
             input_size=prev_size,
             layer_spec=layer_spec,
             v_th=v_th,
             output_overrides={},
+            layer_constraint=layer_constraint,
         )
         hidden_layers.append(layer)
         hidden_size = int(layer_spec.width) if isinstance(layer_spec, DenseLayerSpec) else int(layer_spec.out_channels)
@@ -1100,6 +1136,7 @@ def build_snn_classifier(
         'arch_spec': serialize_arch_spec(resolved_layer_specs),
         'arch_layers': arch_spec_payload(resolved_layer_specs),
         'hidden_sizes': arch_hidden_sizes(resolved_layer_specs),
+        'constraint_metadata': constraint_plan.metadata,
     }
 
     return SNNClassifier(
