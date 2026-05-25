@@ -27,8 +27,12 @@ class PSDRegularizationBreakdown:
 
 
 def _to_maps(x: torch.Tensor)->torch.Tensor:
-    if x.ndim!=3: raise ValueError(f'Expected (B,T,C), got {tuple(x.shape)}')
-    return x.transpose(1,2).contiguous()
+    if x.ndim==3:
+        return x.transpose(1,2).contiguous()
+    if x.ndim in (2,4,5):
+        from src.signal.psd_utils import trace_tensor_to_channel_major_maps
+        return trace_tensor_to_channel_major_maps(x).contiguous()
+    raise ValueError(f'Expected a trace tensor convertible to (samples, rows, time), got {tuple(x.shape)}')
 
 def _select_y(record: LayerRecord, output_family: str)->torch.Tensor:
     tok=str(output_family).strip().lower()

@@ -134,12 +134,77 @@ def _reduce_train_metrics_ddp(metrics: Any, ctx: DDPContext) -> Any:
     vals=torch.tensor([
         metrics.loss*metrics.total, metrics.task_loss*metrics.total, metrics.regularization_loss*metrics.total,
         metrics.regularization_global_loss*metrics.total, metrics.regularization_adjacent_loss*metrics.total,
+        metrics.psd_regularization_total*metrics.total, metrics.psd_regularization_rep_1d*metrics.total,
+        metrics.psd_regularization_pca_1d*metrics.total, metrics.psd_regularization_pca_mimo*metrics.total,
         float(metrics.correct), float(metrics.total)
     ], device=ctx.device, dtype=torch.float64)
     torch.distributed.all_reduce(vals, op=torch.distributed.ReduceOp.SUM)
-    total=max(1.0,float(vals[6].item()))
+    total=max(1.0,float(vals[10].item()))
     from src.model.training import TrainEpochMetrics
-    return TrainEpochMetrics(loss=float(vals[0]/total), task_loss=float(vals[1]/total), regularization_loss=float(vals[2]/total), regularization_global_loss=float(vals[3]/total), regularization_adjacent_loss=float(vals[4]/total), correct=int(vals[5].item()), total=int(vals[6].item()), accuracy=float(vals[5]/total))
+    return TrainEpochMetrics(loss=float(vals[0]/total), task_loss=float(vals[1]/total), regularization_loss=float(vals[2]/total), regularization_global_loss=float(vals[3]/total), regularization_adjacent_loss=float(vals[4]/total), psd_regularization_total=float(vals[5]/total), psd_regularization_rep_1d=float(vals[6]/total), psd_regularization_pca_1d=float(vals[7]/total), psd_regularization_pca_mimo=float(vals[8]/total), correct=int(vals[9].item()), total=int(vals[10].item()), accuracy=float(vals[9]/total))
+
+def _pca_psd_regularization_requested(args: argparse.Namespace) -> bool:
+    return float(getattr(args,'lambda_psd_pca_1d',0.0))!=0.0 or float(getattr(args,'lambda_psd_pca_mimo',0.0))!=0.0
+
+def _parse_pca_dim_per_layer(values: Sequence[str] | None) -> list[int] | None:
+    if values is None or len(values)==0: return None
+    dims=[]
+    for raw in values:
+        text=str(raw).strip()
+        if text=='': continue
+        value=int(text)
+        if value<1: raise ValueError('pca_dim_per_layer values must be positive integers.')
+        dims.append(value)
+    return dims or None
+
+def _cpu_pca_reference_bank(bank: dict[str, Any]) -> dict[str, Any]:
+    from src.model.psd_minibatch_regularizer import FixedPCALayerReference
+    out={}
+    for name, ref in bank.items():
+        out[str(name)]=FixedPCALayerReference(
+            layer_name=str(ref.layer_name),
+            dim=int(ref.dim),
+            x_basis=ref.x_basis.detach().cpu(),
+            x_centroid=ref.x_centroid.detach().cpu(),
+            y_basis=ref.y_basis.detach().cpu(),
+            y_centroid=ref.y_centroid.detach().cpu(),
+        )
+    return out
+
+def _build_pca_reference_bank_if_needed(model: Any, train_loader: Any, args: argparse.Namespace, ctx: DDPContext) -> dict[str, Any] | None:
+    if not _pca_psd_regularization_requested(args): return None
+    obj=[None]
+    if _is_rank0(ctx):
+        from src.model.training import _move_inputs_to_device, _reset_stateful_model
+        from src.model.psd_minibatch_regularizer import compute_fixed_pca_reference_bank
+        iterator=iter(train_loader)
+        try:
+            inputs,_target=next(iterator)
+        except StopIteration as exc:
+            raise RuntimeError('Cannot build PCA PSD reference bank from an empty train_loader.') from exc
+        base_model=_unwrap_model(model)
+        was_training=bool(base_model.training)
+        base_model.eval()
+        try:
+            with torch.inference_mode():
+                device_inputs=_move_inputs_to_device(base_model, inputs, device=ctx.device)
+                _reset_stateful_model(base_model)
+                result=base_model(device_inputs, capture_hidden=True)
+                _reset_stateful_model(base_model)
+                bank=compute_fixed_pca_reference_bank(
+                    device_inputs,
+                    list(result.hidden_records),
+                    str(args.psd_reg_output_family),
+                    _parse_pca_dim_per_layer(args.pca_dim_per_layer),
+                )
+            obj[0]=_cpu_pca_reference_bank(bank)
+            if not obj[0]:
+                raise RuntimeError('PCA PSD regularization requires at least one hidden layer reference.')
+        finally:
+            if was_training: base_model.train()
+    if ctx.enabled:
+        torch.distributed.broadcast_object_list(obj, src=0)
+    return obj[0]
 
 def _checkpoint_payload(**kwargs):
     model=kwargs.pop('model')
@@ -161,8 +226,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         checkpoint_root=Path(args.checkpoint_root).expanduser().resolve(); metric_root=Path(args.metric_root).expanduser().resolve()
         resume_checkpoint=None if args.resume_checkpoint is None else Path(args.resume_checkpoint).expanduser().resolve()
         ctx=_build_ddp_context(args)
-        if ctx.enabled and (float(args.lambda_psd_pca_1d)!=0.0 or float(args.lambda_psd_pca_mimo)!=0.0):
-            raise ValueError('DDP + PCA PSD regularization is not implemented safely yet; refusing to run.')
         if _is_rank0(ctx):
             if resume_checkpoint is None: _strict_prepare_checkpoint_dir(checkpoint_root)
             else: checkpoint_root.mkdir(parents=True, exist_ok=True); _assert_clean_checkpoint_dir(checkpoint_root)
@@ -191,15 +254,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         if ctx.enabled:
             model=DDP(model, device_ids=[ctx.local_rank], output_device=ctx.local_rank)
         optimizer=build_optimizer(model, lr=float(args.lr))
+        pca_reference_bank=_build_pca_reference_bank_if_needed(model, train_loader, args, ctx)
         all_rows=[]
         for epoch in range(resume_epoch+1, int(args.epochs)+1):
             if train_sampler is not None: train_sampler.set_epoch(epoch)
-            train_metrics=train_one_epoch(model, train_loader, readout=readout, optimizer=optimizer, device=ctx.device, progress_desc=(f'train epoch {epoch}' if _is_rank0(ctx) else None), disable_progress=(ctx.enabled and (not _is_rank0(ctx))), regularization_lambda1=float(args.regularization_lambda1), regularization_lambda2=float(args.regularization_lambda2), regularization_signal=str(args.regularization_signal), regularization_curve_space=str(args.regularization_curve_space), regularization_curve_scale=str(args.regularization_curve_scale), regularization_centering=str(args.regularization_centering), regularization_reducer=str(args.regularization_reducer), regularization_distance_metric=str(args.regularization_distance_metric), lambda_psd_rep_1d=float(args.lambda_psd_rep_1d), lambda_psd_pca_1d=float(args.lambda_psd_pca_1d), lambda_psd_pca_mimo=float(args.lambda_psd_pca_mimo), psd_reg_variant=str(args.psd_reg_variant), psd_reg_output_family=str(args.psd_reg_output_family), pca_reference_bank=None)
+            train_metrics=train_one_epoch(model, train_loader, readout=readout, optimizer=optimizer, device=ctx.device, progress_desc=(f'train epoch {epoch}' if _is_rank0(ctx) else None), disable_progress=(ctx.enabled and (not _is_rank0(ctx))), regularization_lambda1=float(args.regularization_lambda1), regularization_lambda2=float(args.regularization_lambda2), regularization_signal=str(args.regularization_signal), regularization_curve_space=str(args.regularization_curve_space), regularization_curve_scale=str(args.regularization_curve_scale), regularization_centering=str(args.regularization_centering), regularization_reducer=str(args.regularization_reducer), regularization_distance_metric=str(args.regularization_distance_metric), lambda_psd_rep_1d=float(args.lambda_psd_rep_1d), lambda_psd_pca_1d=float(args.lambda_psd_pca_1d), lambda_psd_pca_mimo=float(args.lambda_psd_pca_mimo), psd_reg_variant=str(args.psd_reg_variant), psd_reg_output_family=str(args.psd_reg_output_family), pca_reference_bank=pca_reference_bank)
             train_metrics=_reduce_train_metrics_ddp(train_metrics, ctx)
             if epoch not in anal_epochs: continue
             if ctx.enabled: torch.distributed.barrier()
             if _is_rank0(ctx):
-                test_metrics=evaluate_one_epoch(model,test_loader,readout=readout,device=ctx.device,progress_desc=f'test epoch {epoch}',disable_progress=False)
+                eval_model=_unwrap_model(model)
+                test_metrics=evaluate_one_epoch(eval_model,test_loader,readout=readout,device=ctx.device,progress_desc=f'test epoch {epoch}',disable_progress=False)
                 tqdm.write(f'[model_training] epoch={epoch} train_loss={train_metrics.loss:.6f} test_loss={test_metrics.loss:.6f}')
                 payload=_checkpoint_payload(epoch=epoch, model=model, model_token=model_spec.canonical_token, readout_mode=str(args.readout_mode), dataset_token=dataset_token, prep_root=str(prep_root), prepared_dataset_path=str(prepared_dataset_path), seed=int(args.seed), training_args={'ddp':bool(args.ddp),'ddp_world_size':int(args.ddp_world_size),'batch_size_is_global':bool(args.batch_size_is_global),'batch_size':int(args.batch_size)}, metric_snapshot={'train_loss':float(train_metrics.loss),'test_loss':float(test_metrics.loss)})
                 _atomic_torch_save(payload, checkpoint_root / f'checkpoint_epoch_{epoch:06d}.pt')
