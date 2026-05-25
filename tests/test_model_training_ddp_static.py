@@ -13,6 +13,8 @@ def test_ddp_wrapper_script_static():
     text=Path('bash/model_training_ddp.sh').read_text(encoding='utf-8')
     assert 'torchrun' in text and '--standalone' in text and '--nproc_per_node=2' in text and '--ddp true' in text
     assert 'nohup' in text and 'LOG_PATH' in text and 'PID=' in text
+    assert 'CONFIG_PATHS=(' in text and 'config/model_training_ddp.json' in text
+    assert 'for CONFIG_PATH in "${CONFIG_PATHS[@]}"' in text
 
 def test_batch_split_helper():
     off=mt.DDPContext(False,0,0,1,None,True)

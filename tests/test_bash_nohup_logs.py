@@ -21,3 +21,7 @@ def test_bash_wrappers_nhup_and_logs():
         assert '--config "$CONFIG_PATH"' in text
         assert 'echo "PID=${PID}"' in text
         assert default_cfg in text
+        if stage == "model_training":
+            assert "CONFIG_PATHS=(" in text
+            assert 'CONFIG_PATHS=( "$@" )' in text
+            assert 'for CONFIG_PATH in "${CONFIG_PATHS[@]}"' in text

@@ -11,6 +11,7 @@
 - JSON에 알 수 없는 key가 있으면 오류가 난다.
 - 경로 placeholder `/ABS/PATH/TO/...`는 실제 절대경로로 바꿔야 한다.
 - `true`, `false`, `null`, 숫자, 문자열, 배열은 JSON 표준 형식으로 작성한다.
+- `bash/model_training.sh`, `bash/model_training_ddp.sh`는 여러 config path를 인자로 받으면 config별 백그라운드 프로세스를 동시에 띄운다. JSON 내부의 list를 sweep으로 해석하지 않는다.
 
 ## 공통 인수
 
@@ -68,8 +69,8 @@
 |---|---|---:|---:|---|---|
 | `dataset` | 학습 dataset token | string | 예 | prepared manifest와 일치 | `mnist` |
 | `prep_root` | prepared 루트 | string | 예 | manifest 포함 | `/data/prepared` |
-| `model` | 모델 token | string | 예 | `lif_soft_fixed`, `rf_soft_fixed`, `vgg11_lif_soft_fixed` 등 | `lif_soft_fixed` |
-| `hidden_spec` | hidden width 또는 CNN 고정값 | string | 예 | dense: `256,128`, CNN: `-` | `256,128` |
+| `model` | 모델 token | string | 예 | 아래 "SRNN/모델 선택법" 참조 | `lif_soft_fixed`, `lif_R_soft_fixed` |
+| `hidden_spec` | hidden width 또는 CNN 고정값 | string | 예 | dense/SRNN: `256,128`, CNN: `-` | `256,128` |
 | `readout_mode` | readout 방식 | string | 예 | `temporal_membrane`, `first_spike`, `max_rate`, `spikegru_max_over_time` | `temporal_membrane` |
 | `epochs` | 총 epoch 수 | integer | 예 | 1 이상 | `10` |
 | `batch_size` | 학습 batch 크기 | integer | 예 | 1 이상 | `128` |
@@ -90,6 +91,66 @@
 | `regularization_centering` | 정규화 centering | string | 아니오 | `raw`, `centered` | `raw` |
 | `regularization_reducer` | 정규화 대표화 | string | 아니오 | `mean`, `median` | `mean` |
 | `regularization_distance_metric` | 정규화 거리 | string | 아니오 | `centered_l2`, `diff_l2` | `centered_l2` |
+
+### model_training 병렬 시나리오 실행
+
+`bash/model_training.sh`와 `bash/model_training_ddp.sh`는 config 파일 하나만 실행하는 단일 wrapper가 아니라 config 목록을 순회해 각 시나리오를 별도 백그라운드 프로세스로 띄우는 launcher다. 각 프로세스는 같은 `RUN_STAMP`와 config stem을 사용해 `logs/<stage>/<stamp>__<config-stem>.log`에 기록한다.
+
+```bash
+# 단일 기본 config
+bash/model_training.sh
+bash/model_training_ddp.sh
+
+# 여러 비-DDP 시나리오 병렬 실행
+bash/model_training.sh \
+  config/train/mnist_lif.json \
+  config/train/mnist_rf.json \
+  config/train/mnist_lif_R.json
+
+# 여러 2-GPU DDP 시나리오 병렬 실행
+bash/model_training_ddp.sh \
+  config/ddp_train/mnist_lif.json \
+  config/ddp_train/mnist_rf.json
+```
+
+Wrapper 파일 안의 `CONFIG_PATHS=(...)` 배열에 config를 직접 추가해 고정 launcher로 써도 된다. CLI 인자를 넘기면 `CONFIG_PATHS` 기본 배열은 무시되고 인자 목록만 실행된다.
+
+병렬 실행 시 각 config의 `checkpoint_root`, `metric_root`, `output_root`는 서로 다른 디렉터리여야 한다. 같은 출력 루트를 공유하면 checkpoint 빈 디렉터리 검증 또는 metric 저장에서 충돌한다. DDP wrapper는 각 config마다 `torchrun --standalone --nproc_per_node=2`를 별도 실행하므로 config 하나가 GPU 2장을 점유한다.
+
+### SRNN/모델 선택법
+
+`model`은 `src/model/model_registry.py`의 canonical token parser를 통과해야 한다. 하이픈은 내부적으로 언더스코어로 정규화되지만, config에는 언더스코어 표기를 권장한다.
+
+| 목적 | token 형식 | 예시 | `hidden_spec` | 권장 `readout_mode` |
+|---|---|---|---|---|
+| 일반 dense LIF | `lif_<soft|hard>_<fixed|train>` | `lif_soft_fixed` | `256,128` | `temporal_membrane`, `first_spike`, `max_rate` |
+| 일반 dense RF | `rf_<soft|hard>_<fixed|train>` | `rf_soft_fixed` | `256,128` | `temporal_membrane`, `first_spike`, `max_rate` |
+| SRNN/dense recurrent LIF | `lif_R_<soft|hard>_<fixed|train>` | `lif_R_soft_fixed` | `256,128` | `temporal_membrane`, `max_rate` |
+| SRNN/dense recurrent RF | `rf_R_<soft|hard>_<fixed|train>` | `rf_R_soft_fixed` | `256,128` | `temporal_membrane`, `max_rate` |
+| fixed CNN LIF | `<vgg11|resnet18>_lif_<soft|hard>_<fixed|train>` | `vgg11_lif_soft_fixed` | `-` | `temporal_membrane`, `max_rate` |
+| fixed CNN RF | `<vgg11|resnet18>_rf_<soft|hard>_<fixed|train>` | `resnet18_rf_soft_fixed` | `-` | `temporal_membrane`, `max_rate` |
+| 보조 sequence 모델 | `spikegru`, `spikingssm`, `spikformer` | `spikegru` | 모델별 builder 계약 확인 | `spikegru_max_over_time`는 `spikegru` 전용 |
+
+선택 순서:
+
+1. **비교하려는 neuron family**를 먼저 고른다. LIF/RF 비교는 같은 reset/threshold suffix를 맞춘다.
+2. **recurrent 효과**가 필요하면 dense token에 `_R`을 붙인다. CNN token에는 `_R`을 붙이지 않는다.
+3. **reset suffix**는 `soft` 또는 `hard`를 명시한다. `none`은 공식 LIF/RF token에서 허용하지 않는다.
+4. **threshold suffix**는 `fixed` 또는 `train`을 명시한다. `train`은 threshold parameter 학습 비교가 목적일 때만 쓴다.
+5. **입력 view**는 model family에 따라 registry에서 선택된다. CNN family는 frame/image view를 사용하므로 `hidden_spec`을 `-`로 둔다.
+
+`dh_snn`, `d_rf`, `tc_lif`, `ts_lif` 계열은 reference-only family로 남아 있으며 공식 root pipeline의 `model` token으로 쓰지 않는다.
+
+### 대표화 방법 선택법
+
+대표화는 많은 row/channel/neuron 신호를 비교 가능한 1-D 곡선 또는 저차원 mode 신호로 압축하는 규칙이다. 현재 `model_training`의 in-loop PSD regularization은 `regularization_reducer`로 scalar 대표화만 선택한다.
+
+| 방법 | 의미 | 장점 | 권장 상황 |
+|---|---|---|---|
+| `mean` | row별 PSD를 산술평균해 대표 곡선을 만든다. | 가장 안정적이고 smooth하다. | 기본값, 전체 에너지 경향 비교 |
+| `median` | row별 PSD의 중앙값으로 대표 곡선을 만든다. | 일부 neuron/channel의 outlier에 덜 민감하다. | sparse spike, 일부 row만 과활성인 경우 |
+
+`mean`과 `median`은 row 순서 또는 row 간 공분산을 보존하지 않는다. row 집단의 주성분 방향, mode별 주파수, mode 간 cross-spectrum을 보려면 PCA 대표화를 사용한다. PCA 대표화는 `regularization_reducer` 값이 아니라 별도 PCA basis와 PCA penalty/analysis 설정으로 관리한다.
 
 ## 모델 분석 설정
 
@@ -115,6 +176,43 @@
 | `enable_pairwise_dependency_appendix` | pairwise appendix 저장 여부 | boolean | 아니오 | true/false | `false` |
 
 모델 분석 stage는 hidden/output 계층만 분석한다.
+
+### PCA 신호분석 설정법
+
+PCA 분석은 row/channel/neuron 축을 고정 basis로 투영해 mode 신호를 만든 뒤 PSD를 계산하는 확장 분석이다. 현재 root pipeline에서 PCA entrypoint가 없으면 `Spec/theory/03_pca_fixed_reference.md`의 원칙에 맞춰 `psd_analysis`에 다음 config 계약을 추가한다.
+
+| 인수 | 역할 | 자료형 | 필수 | 허용값/범위 | 예시 |
+|---|---|---:|---:|---|---|
+| `enable_pca_1d` | PCA mode별 1-D PSD 분석 사용 | boolean/string | 아니오 | bool 또는 bool 문자열 | `true` |
+| `enable_pca_mimo` | PCA mode 간 cross-spectrum/MIMO 분석 사용 | boolean/string | 아니오 | bool 또는 bool 문자열 | `true` |
+| `pca_ref_epoch` | PCA basis를 fit할 기준 checkpoint epoch | integer | PCA 사용 시 예 | `anal_epoch_list`에 포함된 양의 정수 | `1` |
+| `pca_min_train_accuracy` | 기준 epoch train accuracy gate | number | 아니오 | `0.0`~`1.0` | `0.0` |
+| `pca_dim_per_layer` | layer별 PCA 차원 | integer array | 아니오 | 양의 정수 배열, tail broadcast | `[4]`, `[8, 4, 4]` |
+
+운영 규칙:
+
+1. `pca_ref_epoch`의 checkpoint에서 layer/family별 basis를 한 번 fit한다.
+2. 같은 run의 다른 checkpoint에는 동일 basis id를 적용한다.
+3. 서로 다른 dataset, split, scope, layer, family, basis id에서 나온 PCA projection끼리는 직접 distance를 계산하지 않는다.
+4. `pca_dim_per_layer`는 0-based layer index에 대응한다. 지정값이 layer 수보다 짧으면 마지막 값을 남은 layer에 반복 적용한다.
+5. PCA basis metadata에는 dataset, checkpoint, layer, signal family, row semantics, component 수, basis shape를 남긴다.
+
+대표 산출물은 `pca_reference/`, `pca_mode_traces/`, `pca_mimo_traces/`, `pca_cross_traces/`처럼 scalar representative 산출물과 분리한다.
+
+### PCA 대표신호 기반 규제 설정법
+
+현재 `regularization_lambda1`, `regularization_lambda2`는 input-hidden 및 adjacent hidden 사이의 scalar representative PSD 곡선 거리만 계산한다. PCA 대표신호를 이용한 규제는 fixed PCA reference bank가 필요하므로 별도 구현 또는 별도 experiment entrypoint에서 다음 계약으로 둔다.
+
+| 인수 | 역할 | 자료형 | 허용값/범위 | 예시 |
+|---|---|---:|---|---|
+| `lambda_psd_rep_1d` | mean/median 대표 PSD penalty 계수 | number | 임의 실수, `0.0`이면 비활성 | `0.1` |
+| `lambda_psd_pca_1d` | PCA mode별 1-D PSD penalty 계수 | number | 임의 실수, `0.0`이면 비활성 | `0.05` |
+| `lambda_psd_pca_mimo` | PCA mode cross-spectrum/MIMO penalty 계수 | number | 임의 실수, `0.0`이면 비활성 | `0.01` |
+| `psd_reg_variant` | penalty에 사용할 신호 변형 | string | `raw`, `centered` | `centered` |
+| `psd_reg_output_family` | hidden 출력 family | string | `spike`, `membrane` | `spike` |
+| `pca_dim_per_layer` | fixed PCA reference bank 차원 | integer array | 양의 정수 배열 | `[4]` |
+
+PCA 규제를 켜면 학습 시작 전에 no-grad reference batch로 layer별 `x_basis/y_basis`와 centroid를 고정하고, 학습 minibatch에서는 그 basis만 적용한다. basis 자체는 penalty gradient 대상이 아니다.
 
 ## `plotting.json`
 
