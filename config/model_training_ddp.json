@@ -17,7 +17,7 @@
     "checkpoint_root": "/ABS/PATH/TO/output/checkpoints",
     "metric_root": "/ABS/PATH/TO/output/metrics",
     "output_root": "/ABS/PATH/TO/output/train",
-    "ddp": false,
+    "ddp": true,
     "ddp_world_size": 2,
     "batch_size_is_global": true
   }

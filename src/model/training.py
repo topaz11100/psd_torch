@@ -57,11 +57,17 @@ def build_optimizer(
     return torch.optim.Adam(model.parameters(), lr=float(lr))
 
 
+def _unwrap_model(model: nn.Module) -> nn.Module:
+    wrapped = getattr(model, 'module', None)
+    return wrapped if wrapped is not None else model
+
+
 def _move_inputs_to_device(model: SNNClassifier, inputs: Any, *, device: torch.device) -> torch.Tensor:
-    if getattr(getattr(model, 'spec', None), 'family', None) in {'cnn_lif', 'cnn_rf'}:
+    base_model = _unwrap_model(model)
+    if getattr(getattr(base_model, 'spec', None), 'family', None) in {'cnn_lif', 'cnn_rf'}:
         tensor = torch.as_tensor(inputs)
     else:
-        tensor = canonicalize_model_input_batch(inputs, input_dim=model.input_dim, sequence_length=model.sequence_length)
+        tensor = canonicalize_model_input_batch(inputs, input_dim=base_model.input_dim, sequence_length=base_model.sequence_length)
     return tensor.to(device=device, dtype=torch.float32, non_blocking=True)
 
 
@@ -72,12 +78,14 @@ def _move_target_to_device(target: Any, *, device: torch.device) -> torch.Tensor
 def _project_parameters_after_optimizer_step(model: nn.Module) -> None:
     """Apply model-specific post-step projections required by the Spec."""
 
-    projector = getattr(model, 'clamp_projected_parameters', None)
+    base_model = _unwrap_model(model)
+    projector = getattr(base_model, 'clamp_projected_parameters', None)
     if callable(projector):
         projector()
 
 def _reset_stateful_model(model: nn.Module) -> None:
-    resetter = getattr(model, "reset_state", None)
+    base_model = _unwrap_model(model)
+    resetter = getattr(base_model, "reset_state", None)
     if callable(resetter):
         resetter()
 
@@ -283,11 +291,12 @@ def evaluate_one_epoch(
     readout: ReadoutBase,
     device: torch.device,
     progress_desc: str | None = None,
+    disable_progress: bool = False,
 ) -> EpochMetrics:
     total_loss_weighted = 0.0
     total_correct = 0
     total_examples = 0
-    for inputs, target in tqdm(loader, desc=progress_desc, leave=False):
+    for inputs, target in tqdm(loader, desc=progress_desc, leave=False, disable=bool(disable_progress)):
         batch = eval_one_batch(model, inputs, target, readout=readout, device=device)
         total_loss_weighted += float(batch.loss) * int(batch.total)
         total_correct += int(batch.correct)
@@ -305,6 +314,7 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     progress_desc: str | None = None,
+    disable_progress: bool = False,
     regularization_lambda1: float = 0.0,
     regularization_lambda2: float = 0.0,
     regularization_signal: str = 'y_mem',
@@ -322,7 +332,7 @@ def train_one_epoch(
     total_correct = 0
     total_examples = 0
 
-    for inputs, target in tqdm(loader, desc=progress_desc, leave=False):
+    for inputs, target in tqdm(loader, desc=progress_desc, leave=False, disable=bool(disable_progress)):
         batch = train_one_batch(
             model,
             inputs,
