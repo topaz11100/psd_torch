@@ -436,6 +436,61 @@ def scalar_representative_maps(signal_maps: torch.Tensor, *, reducer: str) -> to
     raise ValueError(f'Unsupported representative reducer: {reducer}')
 
 
+def pca_dim_from_cli_vector(
+    cli_dims: Sequence[int] | Sequence[str] | None,
+    layer_index_zero_based: int,
+    row_count: int,
+) -> int:
+    """Resolve one layer PCA dimension from CLI vector semantics."""
+    rows = max(1, int(row_count))
+    layer_index = max(0, int(layer_index_zero_based))
+    if cli_dims is None or len(cli_dims) == 0:
+        return max(1, min(rows, 4))
+    dims = [int(v) for v in cli_dims]
+    selected = dims[layer_index] if layer_index < len(dims) else dims[-1]
+    return max(1, min(rows, int(selected)))
+
+
+def compute_fixed_pca_basis(reference_maps: torch.Tensor, target_dim: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute fixed PCA basis and centroid from ``(samples, rows, time)`` maps."""
+    if reference_maps.ndim != 3:
+        raise ValueError(f'Expected shape (samples, rows, time), got {tuple(reference_maps.shape)}')
+    maps = _as_float_tensor(reference_maps)
+    samples, rows, time_steps = [int(v) for v in maps.shape]
+    observations = max(1, samples * time_steps)
+    dim = max(1, min(int(target_dim), rows, observations))
+    obs = maps.permute(0, 2, 1).reshape(observations, rows)
+    centroid = obs.mean(dim=0)
+    centered = obs - centroid
+    try:
+        _u, _s, vh = torch.linalg.svd(centered, full_matrices=False)
+        basis = vh[:dim, :].transpose(0, 1).contiguous()
+    except Exception:
+        cov = centered.transpose(0, 1) @ centered / float(max(1, observations - 1))
+        evals, evecs = torch.linalg.eigh(cov)
+        order = torch.argsort(evals, descending=True)
+        basis = evecs[:, order[:dim]].contiguous()
+    return basis.detach(), centroid.detach()
+
+
+def apply_fixed_pca_basis(signal_maps: torch.Tensor, basis: torch.Tensor, centroid: torch.Tensor) -> torch.Tensor:
+    """Apply a fixed PCA basis to ``(samples, rows, time)`` maps -> ``(samples, dim, time)``."""
+    if signal_maps.ndim != 3:
+        raise ValueError(f'Expected shape (samples, rows, time), got {tuple(signal_maps.shape)}')
+    maps = _as_float_tensor(signal_maps)
+    rows = int(maps.shape[1])
+    basis_local = torch.as_tensor(basis, device=maps.device, dtype=maps.dtype)
+    centroid_local = torch.as_tensor(centroid, device=maps.device, dtype=maps.dtype).reshape(-1)
+    if basis_local.ndim != 2:
+        raise ValueError(f'basis must be rank-2 (rows, dim), got {tuple(basis_local.shape)}')
+    if int(basis_local.shape[0]) != rows:
+        raise ValueError(f'basis row mismatch: expected {rows}, got {int(basis_local.shape[0])}')
+    if int(centroid_local.numel()) != rows:
+        raise ValueError(f'centroid row mismatch: expected {rows}, got {int(centroid_local.numel())}')
+    centered = maps - centroid_local.view(1, rows, 1)
+    return torch.einsum('srt,rd->sdt', centered, basis_local).contiguous()
+
+
 def row_variance_mad_summary(signal_maps: torch.Tensor) -> dict[str, float]:
     """Handle ``row variance mad summary`` for the ``psd_utils`` module."""
     if signal_maps.ndim != 3:
@@ -918,6 +973,7 @@ __all__ = [
     'mean_spatial_psd_2d_from_original_inputs',
     'one_sided_scaling',
     'power_to_db',
+    'pca_dim_from_cli_vector',
     'row_variance_mad_summary',
     'scalar_io_spectral_objects',
     'scalar_representative_maps',
@@ -927,3 +983,5 @@ __all__ = [
     'tensor_to_channel_major_maps_explicit',
     'time_domain_summary_from_maps',
 ]
+    'compute_fixed_pca_basis',
+    'apply_fixed_pca_basis',

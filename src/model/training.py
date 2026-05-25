@@ -18,6 +18,10 @@ from src.signal.family_spectral_analysis import (
     representative_psd_minibatch_curve_from_maps_torch,
 )
 from src.signal.psd_utils import trace_tensor_to_channel_major_maps
+from src.model.psd_minibatch_regularizer import (
+    compute_fixed_pca_reference_bank,
+    compute_minibatch_psd_regularizer,
+)
 
 
 @dataclass
@@ -38,6 +42,10 @@ class TrainEpochMetrics:
     regularization_loss: float
     regularization_global_loss: float
     regularization_adjacent_loss: float
+    psd_regularization_total: float = 0.0
+    psd_regularization_rep_1d: float = 0.0
+    psd_regularization_pca_1d: float = 0.0
+    psd_regularization_pca_mimo: float = 0.0
 
 
 @dataclass
@@ -239,11 +247,19 @@ def train_one_batch(
     regularization_centering: str = 'raw',
     regularization_reducer: str = 'mean',
     regularization_distance_metric: str = 'centered_l2',
+    lambda_psd_rep_1d: float = 0.0,
+    lambda_psd_pca_1d: float = 0.0,
+    lambda_psd_pca_mimo: float = 0.0,
+    psd_reg_variant: str = 'raw',
+    psd_reg_output_family: str = 'spike',
+    pca_reference_bank: dict[str, Any] | None = None,
 ) -> TrainEpochMetrics:
     model.train()
     device_inputs = _move_inputs_to_device(model, inputs, device=device)
     device_target = _move_target_to_device(target, device=device)
-    capture_hidden = _regularization_enabled(regularization_lambda1, regularization_lambda2)
+    capture_hidden = _regularization_enabled(regularization_lambda1, regularization_lambda2) or any(
+        float(v) != 0.0 for v in (lambda_psd_rep_1d, lambda_psd_pca_1d, lambda_psd_pca_mimo)
+    )
 
     optimizer.zero_grad(set_to_none=True)
     _reset_stateful_model(model)
@@ -261,7 +277,17 @@ def train_one_batch(
         reducer=regularization_reducer,
         distance_metric=regularization_distance_metric,
     )
-    total_loss = task_loss + regularization.total
+    psd_reg = compute_minibatch_psd_regularizer(
+        device_inputs,
+        list(result.hidden_records),
+        variant=str(psd_reg_variant),
+        output_family=str(psd_reg_output_family),
+        lambda_rep_1d=float(lambda_psd_rep_1d),
+        lambda_pca_1d=float(lambda_psd_pca_1d),
+        lambda_pca_mimo=float(lambda_psd_pca_mimo),
+        pca_reference_bank=pca_reference_bank,
+    )
+    total_loss = task_loss + regularization.total + psd_reg.total
     total_loss.backward()
     optimizer.step()
     _reset_stateful_model(model)
@@ -280,6 +306,10 @@ def train_one_batch(
         regularization_loss=float(regularization.total.detach().item()),
         regularization_global_loss=float(regularization.global_loss.detach().item()),
         regularization_adjacent_loss=float(regularization.adjacent_loss.detach().item()),
+        psd_regularization_total=float(psd_reg.total.detach().item()),
+        psd_regularization_rep_1d=float(psd_reg.rep_1d.detach().item()),
+        psd_regularization_pca_1d=float(psd_reg.pca_1d.detach().item()),
+        psd_regularization_pca_mimo=float(psd_reg.pca_mimo.detach().item()),
     )
 
 
@@ -323,12 +353,22 @@ def train_one_epoch(
     regularization_centering: str = 'raw',
     regularization_reducer: str = 'mean',
     regularization_distance_metric: str = 'centered_l2',
+    lambda_psd_rep_1d: float = 0.0,
+    lambda_psd_pca_1d: float = 0.0,
+    lambda_psd_pca_mimo: float = 0.0,
+    psd_reg_variant: str = 'raw',
+    psd_reg_output_family: str = 'spike',
+    pca_reference_bank: dict[str, Any] | None = None,
 ) -> TrainEpochMetrics:
     total_loss_weighted = 0.0
     task_loss_weighted = 0.0
     regularization_loss_weighted = 0.0
     regularization_global_loss_weighted = 0.0
     regularization_adjacent_loss_weighted = 0.0
+    psd_total_w = 0.0
+    psd_rep_w = 0.0
+    psd_pca1_w = 0.0
+    psd_pcam_w = 0.0
     total_correct = 0
     total_examples = 0
 
@@ -348,12 +388,22 @@ def train_one_epoch(
             regularization_centering=regularization_centering,
             regularization_reducer=regularization_reducer,
             regularization_distance_metric=regularization_distance_metric,
+            lambda_psd_rep_1d=lambda_psd_rep_1d,
+            lambda_psd_pca_1d=lambda_psd_pca_1d,
+            lambda_psd_pca_mimo=lambda_psd_pca_mimo,
+            psd_reg_variant=psd_reg_variant,
+            psd_reg_output_family=psd_reg_output_family,
+            pca_reference_bank=pca_reference_bank,
         )
         total_loss_weighted += float(batch.loss) * int(batch.total)
         task_loss_weighted += float(batch.task_loss) * int(batch.total)
         regularization_loss_weighted += float(batch.regularization_loss) * int(batch.total)
         regularization_global_loss_weighted += float(batch.regularization_global_loss) * int(batch.total)
         regularization_adjacent_loss_weighted += float(batch.regularization_adjacent_loss) * int(batch.total)
+        psd_total_w += float(batch.psd_regularization_total) * int(batch.total)
+        psd_rep_w += float(batch.psd_regularization_rep_1d) * int(batch.total)
+        psd_pca1_w += float(batch.psd_regularization_pca_1d) * int(batch.total)
+        psd_pcam_w += float(batch.psd_regularization_pca_mimo) * int(batch.total)
         total_correct += int(batch.correct)
         total_examples += int(batch.total)
 
@@ -362,6 +412,10 @@ def train_one_epoch(
     regularization_loss = 0.0 if total_examples == 0 else regularization_loss_weighted / float(total_examples)
     regularization_global_loss = 0.0 if total_examples == 0 else regularization_global_loss_weighted / float(total_examples)
     regularization_adjacent_loss = 0.0 if total_examples == 0 else regularization_adjacent_loss_weighted / float(total_examples)
+    psd_total = 0.0 if total_examples == 0 else psd_total_w / float(total_examples)
+    psd_rep = 0.0 if total_examples == 0 else psd_rep_w / float(total_examples)
+    psd_pca1 = 0.0 if total_examples == 0 else psd_pca1_w / float(total_examples)
+    psd_pcam = 0.0 if total_examples == 0 else psd_pcam_w / float(total_examples)
     accuracy = 0.0 if total_examples == 0 else float(total_correct) / float(total_examples)
     return TrainEpochMetrics(
         loss=loss,
@@ -372,6 +426,10 @@ def train_one_epoch(
         regularization_loss=regularization_loss,
         regularization_global_loss=regularization_global_loss,
         regularization_adjacent_loss=regularization_adjacent_loss,
+        psd_regularization_total=psd_total,
+        psd_regularization_rep_1d=psd_rep,
+        psd_regularization_pca_1d=psd_pca1,
+        psd_regularization_pca_mimo=psd_pcam,
     )
 
 

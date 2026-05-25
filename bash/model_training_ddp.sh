@@ -33,3 +33,4 @@ for CONFIG_PATH in "${CONFIG_PATHS[@]}"; do
     echo "CONFIG=${CONFIG_PATH}"
     echo "LOG=${LOG_PATH}"
     echo "PID=${PID}"
+done

@@ -68,6 +68,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument('--regularization_signal', default='y_mem', choices=('y_mem','y_spike')); p.add_argument('--regularization_curve_space', default='exact', choices=('exact',))
     p.add_argument('--regularization_curve_scale', default='raw', choices=('raw','db')); p.add_argument('--regularization_centering', default='raw', choices=('raw','centered'))
     p.add_argument('--regularization_reducer', default='mean', choices=('mean','median')); p.add_argument('--regularization_distance_metric', default='centered_l2', choices=('centered_l2','diff_l2'))
+    p.add_argument('--lambda_psd_rep_1d', default=0.0, type=float); p.add_argument('--lambda_psd_pca_1d', default=0.0, type=float); p.add_argument('--lambda_psd_pca_mimo', default=0.0, type=float)
+    p.add_argument('--psd_reg_variant', default='raw', choices=('raw','centered')); p.add_argument('--psd_reg_output_family', default='spike', choices=('spike','membrane'))
+    p.add_argument('--pca_dim_per_layer', nargs='*', default=None)
     p.add_argument('--anal_epoch_list', nargs='*', default=None); p.add_argument('--checkpoint_root', required=True); p.add_argument('--metric_root', required=True)
     p.add_argument('--output_root', default=None); p.add_argument('--v_th', type=float, default=1.0); p.add_argument('--resume_checkpoint', default=None); p.add_argument('--config', default=None)
     return p
@@ -158,6 +161,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         checkpoint_root=Path(args.checkpoint_root).expanduser().resolve(); metric_root=Path(args.metric_root).expanduser().resolve()
         resume_checkpoint=None if args.resume_checkpoint is None else Path(args.resume_checkpoint).expanduser().resolve()
         ctx=_build_ddp_context(args)
+        if ctx.enabled and (float(args.lambda_psd_pca_1d)!=0.0 or float(args.lambda_psd_pca_mimo)!=0.0):
+            raise ValueError('DDP + PCA PSD regularization is not implemented safely yet; refusing to run.')
         if _is_rank0(ctx):
             if resume_checkpoint is None: _strict_prepare_checkpoint_dir(checkpoint_root)
             else: checkpoint_root.mkdir(parents=True, exist_ok=True); _assert_clean_checkpoint_dir(checkpoint_root)
@@ -189,7 +194,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         all_rows=[]
         for epoch in range(resume_epoch+1, int(args.epochs)+1):
             if train_sampler is not None: train_sampler.set_epoch(epoch)
-            train_metrics=train_one_epoch(model, train_loader, readout=readout, optimizer=optimizer, device=ctx.device, progress_desc=(f'train epoch {epoch}' if _is_rank0(ctx) else None), disable_progress=(ctx.enabled and (not _is_rank0(ctx))), regularization_lambda1=float(args.regularization_lambda1), regularization_lambda2=float(args.regularization_lambda2), regularization_signal=str(args.regularization_signal), regularization_curve_space=str(args.regularization_curve_space), regularization_curve_scale=str(args.regularization_curve_scale), regularization_centering=str(args.regularization_centering), regularization_reducer=str(args.regularization_reducer), regularization_distance_metric=str(args.regularization_distance_metric))
+            train_metrics=train_one_epoch(model, train_loader, readout=readout, optimizer=optimizer, device=ctx.device, progress_desc=(f'train epoch {epoch}' if _is_rank0(ctx) else None), disable_progress=(ctx.enabled and (not _is_rank0(ctx))), regularization_lambda1=float(args.regularization_lambda1), regularization_lambda2=float(args.regularization_lambda2), regularization_signal=str(args.regularization_signal), regularization_curve_space=str(args.regularization_curve_space), regularization_curve_scale=str(args.regularization_curve_scale), regularization_centering=str(args.regularization_centering), regularization_reducer=str(args.regularization_reducer), regularization_distance_metric=str(args.regularization_distance_metric), lambda_psd_rep_1d=float(args.lambda_psd_rep_1d), lambda_psd_pca_1d=float(args.lambda_psd_pca_1d), lambda_psd_pca_mimo=float(args.lambda_psd_pca_mimo), psd_reg_variant=str(args.psd_reg_variant), psd_reg_output_family=str(args.psd_reg_output_family), pca_reference_bank=None)
             train_metrics=_reduce_train_metrics_ddp(train_metrics, ctx)
             if epoch not in anal_epochs: continue
             if ctx.enabled: torch.distributed.barrier()
@@ -199,6 +204,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 payload=_checkpoint_payload(epoch=epoch, model=model, model_token=model_spec.canonical_token, readout_mode=str(args.readout_mode), dataset_token=dataset_token, prep_root=str(prep_root), prepared_dataset_path=str(prepared_dataset_path), seed=int(args.seed), training_args={'ddp':bool(args.ddp),'ddp_world_size':int(args.ddp_world_size),'batch_size_is_global':bool(args.batch_size_is_global),'batch_size':int(args.batch_size)}, metric_snapshot={'train_loss':float(train_metrics.loss),'test_loss':float(test_metrics.loss)})
                 _atomic_torch_save(payload, checkpoint_root / f'checkpoint_epoch_{epoch:06d}.pt')
                 all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='train', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=str(args.readout_mode), epoch=epoch, metric='loss', value=train_metrics.loss))
+                all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='train', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=str(args.readout_mode), epoch=epoch, metric='psd_regularization_total', value=train_metrics.psd_regularization_total))
+                all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='train', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=str(args.readout_mode), epoch=epoch, metric='psd_regularization_rep_1d', value=train_metrics.psd_regularization_rep_1d))
+                all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='train', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=str(args.readout_mode), epoch=epoch, metric='psd_regularization_pca_1d', value=train_metrics.psd_regularization_pca_1d))
+                all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='train', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=str(args.readout_mode), epoch=epoch, metric='psd_regularization_pca_mimo', value=train_metrics.psd_regularization_pca_mimo))
             if ctx.enabled: torch.distributed.barrier()
         if _is_rank0(ctx):
             metrics_path=metric_root/'training_metrics.csv'; write_common_csv(metrics_path, all_rows); _assert_clean_checkpoint_dir(checkpoint_root)

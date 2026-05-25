@@ -9,6 +9,13 @@
     "seed": 0,
     "num_workers": 0,
     "low_vram": 0,
-    "analysis_distance_metric": "centered_l2"
+    "analysis_distance_metric": "centered_l2",
+    "enable_pca_1d": true,
+    "enable_pca_mimo": true,
+    "pca_ref_epoch": 1,
+    "pca_min_train_accuracy": 0.0,
+    "pca_dim_per_layer": [
+      4
+    ]
   }
 }

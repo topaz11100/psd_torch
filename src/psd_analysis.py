@@ -25,9 +25,14 @@ from typing import Any, Mapping, Sequence
 
 from src.util.csv_schema import common_row, write_common_csv
 from src.util.config_cli import parse_args_with_config
+from src.util.cli_common import parse_bool_token
 
 
 SOURCE_PROGRAM = 'psd_analysis'
+
+
+def _parse_bool_config_value(value: Any, *, default: bool) -> bool:
+    return parse_bool_token(value, default=default)
 
 
 def _load_json_light(path: Path) -> dict[str, Any]:
@@ -46,7 +51,8 @@ def _load_runtime_dependencies() -> None:
     global ModelSpec, canonicalize_model_token, build_snn_classifier, build_readout
     global compute_family_spectral_summary, curve_axis_from_summary, curve_pointwise_distance
     global pair_distance_from_summaries, representative_curve_from_summary
-    global trace_tensor_to_channel_major_maps
+    global trace_tensor_to_channel_major_maps, pca_dim_from_cli_vector, compute_fixed_pca_basis, apply_fixed_pca_basis
+    global auto_spectral_matrix_from_mode_maps, cross_spectral_matrix_from_mode_maps
     global build_probe_index_bundle, dataset_targets, subset_from_indices
     import numpy as _np
     import torch as _torch
@@ -58,7 +64,14 @@ def _load_runtime_dependencies() -> None:
     from src.model.snn_builder import build_snn_classifier as _build_snn_classifier
     from src.readout.readout import build_readout as _build_readout
     from src.signal.family_spectral_analysis import compute_family_spectral_summary as _compute_family_spectral_summary, curve_axis_from_summary as _curve_axis_from_summary, curve_pointwise_distance as _curve_pointwise_distance, pair_distance_from_summaries as _pair_distance_from_summaries, representative_curve_from_summary as _representative_curve_from_summary
-    from src.signal.psd_utils import trace_tensor_to_channel_major_maps as _trace_tensor_to_channel_major_maps
+    from src.signal.psd_utils import (
+        trace_tensor_to_channel_major_maps as _trace_tensor_to_channel_major_maps,
+        pca_dim_from_cli_vector as _pca_dim_from_cli_vector,
+        compute_fixed_pca_basis as _compute_fixed_pca_basis,
+        apply_fixed_pca_basis as _apply_fixed_pca_basis,
+        auto_spectral_matrix_from_mode_maps as _auto_spectral_matrix_from_mode_maps,
+        cross_spectral_matrix_from_mode_maps as _cross_spectral_matrix_from_mode_maps,
+    )
     from src.stat.probe_selection import build_probe_index_bundle as _build_probe_index_bundle, dataset_targets as _dataset_targets, subset_from_indices as _subset_from_indices
     np = _np
     torch = _torch
@@ -79,6 +92,11 @@ def _load_runtime_dependencies() -> None:
     pair_distance_from_summaries = _pair_distance_from_summaries
     representative_curve_from_summary = _representative_curve_from_summary
     trace_tensor_to_channel_major_maps = _trace_tensor_to_channel_major_maps
+    pca_dim_from_cli_vector = _pca_dim_from_cli_vector
+    compute_fixed_pca_basis = _compute_fixed_pca_basis
+    apply_fixed_pca_basis = _apply_fixed_pca_basis
+    auto_spectral_matrix_from_mode_maps = _auto_spectral_matrix_from_mode_maps
+    cross_spectral_matrix_from_mode_maps = _cross_spectral_matrix_from_mode_maps
     build_probe_index_bundle = _build_probe_index_bundle
     dataset_targets = _dataset_targets
     subset_from_indices = _subset_from_indices
@@ -97,6 +115,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--num_workers', type=int, default=0)
     parser.add_argument('--config', default=None, help='JSON 설정 파일 경로(.json)')
     parser.add_argument('--low_vram', type=int, default=0)
+    parser.add_argument('--enable_pca_1d', default='true')
+    parser.add_argument('--enable_pca_mimo', default='true')
+    parser.add_argument('--pca_ref_epoch', type=int, default=1)
+    parser.add_argument('--pca_min_train_accuracy', type=float, default=0.0)
+    parser.add_argument('--pca_dim_per_layer', nargs='*', default=None)
     return parser
 
 
@@ -1047,6 +1070,22 @@ def _checkpoint_common_base(*, payload: Mapping[str, Any], checkpoint_path: Path
     }
 
 
+def _validate_pca_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> list[int]:
+    if int(args.pca_ref_epoch) < 1:
+        parser.error('--pca_ref_epoch must be a positive integer.')
+    gate = float(args.pca_min_train_accuracy)
+    if gate < 0.0 or gate > 1.0:
+        parser.error('--pca_min_train_accuracy must be in [0.0, 1.0].')
+    values = [] if args.pca_dim_per_layer is None else list(args.pca_dim_per_layer)
+    dims: list[int] = []
+    for value in values:
+        parsed = int(value)
+        if parsed < 1:
+            raise ValueError('pca_dim_per_layer must contain positive integers only.')
+        dims.append(parsed)
+    return dims
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     global LOW_VRAM
     parser = build_arg_parser()
@@ -1056,6 +1095,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error('--anal_batch must be >= 1.')
     if int(args.num_workers) < 0:
         parser.error('--num_workers must be >= 0.')
+    pca_dims_cli = _validate_pca_args(args, parser)
+    enable_pca_1d = _parse_bool_config_value(args.enable_pca_1d, default=True)
+    enable_pca_mimo = _parse_bool_config_value(args.enable_pca_mimo, default=True)
     # Exact-only analysis: userbin aggregation is intentionally disabled.
 
     _load_runtime_dependencies()
@@ -1066,6 +1108,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     input_is_single_file = checkpoint_input.is_file()
     selected_extractors = ALL_CURVE_EXTRACTORS
     checkpoint_files, ordering_warnings = _resolve_checkpoint_files(checkpoint_input)
+    ref_candidates = [p for p in checkpoint_files if int(_load_checkpoint(p, map_location='cpu').get('epoch', -1)) == int(args.pca_ref_epoch)]
+    if not ref_candidates:
+        raise ValueError(f'pca_ref_epoch={int(args.pca_ref_epoch)} is not present in checkpoint list.')
+    pca_ref_checkpoint = ref_candidates[0]
     device = _require_cuda_device(int(args.gpu_index))
 
     manifest_rows: list[dict[str, str]] = []
@@ -1074,6 +1120,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     filter_trend_rows: list[dict[str, str]] = []
     filter_trend_history: dict[tuple[str, int, str, str], list[tuple[int, float, dict[str, Any]]]] = defaultdict(list)
     first_manifest_base: dict[str, Any] | None = None
+    pca_basis_cache: dict[tuple[str, int, str, str, str, int | None], tuple[torch.Tensor, torch.Tensor, dict[str, Any]]] = {}
 
     for checkpoint_path in tqdm(checkpoint_files, desc='psd_analysis:checkpoints', leave=False):
         payload = _load_checkpoint(checkpoint_path, map_location='cpu')
@@ -1108,6 +1155,35 @@ def main(argv: Sequence[str] | None = None) -> int:
                     device=device,
                 )
             )
+        if checkpoint_path == pca_ref_checkpoint:
+            train_accuracy = float(payload.get('metric_snapshot', {}).get('train_accuracy', payload.get('train_accuracy', 1.0)))
+            if train_accuracy < float(args.pca_min_train_accuracy):
+                raise ValueError(f'pca_ref_epoch train accuracy {train_accuracy:.6f} is below pca_min_train_accuracy={float(args.pca_min_train_accuracy):.6f}')
+            for key, maps in maps_by_key.items():
+                layer_name, layer_index, signal_kind, _series, scope, family, label = key
+                row_count = int(maps.shape[1])
+                dim = pca_dim_from_cli_vector(pca_dims_cli, int(layer_index) - 1, row_count)
+                basis, centroid = compute_fixed_pca_basis(maps, dim)
+                meta = {
+                    'dataset': str(args.dataset),
+                    'checkpoint_path': str(checkpoint_path),
+                    'checkpoint_epoch': int(payload.get('epoch', -1)),
+                    'split': str(scope),
+                    'scope': str(scope),
+                    'layer': str(layer_name),
+                    'layer_index': int(layer_index),
+                    'family': str(family),
+                    'label': '' if label is None else int(label),
+                    'signal_kind': str(signal_kind),
+                    'row_count': row_count,
+                    'dim': int(dim),
+                    'basis_shape': list(basis.shape),
+                    'centroid_shape': list(centroid.shape),
+                    'basis_id': f'epoch_{int(payload.get("epoch",-1))}__{layer_name}__{layer_index}__{scope}__{family}__{signal_kind}',
+                }
+                pca_basis_cache[key] = (basis.cpu(), centroid.cpu(), meta)
+                if LOW_VRAM:
+                    del basis, centroid
 
         if input_is_single_file:
             checkpoint_dir = output_root / checkpoint_path.stem
@@ -1118,6 +1194,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         common_by_key: dict[tuple[str, int, str, str, str, str, int | None], dict[str, Any]] = {}
         family_rows: list[dict[str, str]] = []
         dispersion_rows: list[dict[str, str]] = []
+        pca_reference_rows: list[dict[str, str]] = []
+        pca_mode_rows: list[dict[str, str]] = []
+        pca_mimo_rows: list[dict[str, str]] = []
+        pca_cross_rows: list[dict[str, str]] = []
 
         for key, maps in tqdm(sorted(maps_by_key.items(), key=lambda item: (item[0][1], item[0][0], item[0][2], item[0][3], item[0][4])), desc='psd_analysis:summaries', leave=False):
             layer_name, layer_index, signal_kind, series, scope, family, label = key
@@ -1129,6 +1209,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             curve_rows, disp_rows = _summary_curve_rows(common=base, summary=summary, extractors=selected_extractors)
             family_rows.extend(curve_rows)
             dispersion_rows.extend(disp_rows)
+            cache = pca_basis_cache.get(key)
+            if cache is not None:
+                basis, centroid, meta = cache
+                pca_maps = apply_fixed_pca_basis(maps, basis, centroid)
+                for mode in range(int(pca_maps.shape[1])):
+                    mode_summary = compute_family_spectral_summary(
+                        pca_maps[:, mode : mode + 1, :], window=None, overlap=0, userbin_edges=None, include_spectrogram=False, include_userbin=False
+                    )
+                    if enable_pca_1d:
+                        mode_curve = representative_curve_from_summary(dict(mode_summary), reducer='mean', extractor='psd_exact', centering='raw', scale='raw').reshape(-1)
+                        mode_freq = curve_axis_from_summary(dict(mode_summary), extractor='psd_exact', centering='raw')
+                        for freq_value, curve_value in zip(mode_freq, mode_curve):
+                            kwargs = dict(base)
+                            kwargs.update(category='analysis_curve', extractor='psd_exact', reducer='mean', variant='raw', scale='raw', frequency=float(freq_value), value=float(curve_value), value_unit='power', series=f'pca_mode_{mode:03d}')
+                            pca_mode_rows.append(common_row(**kwargs))
+                if enable_pca_mimo:
+                    freqs, mimo = auto_spectral_matrix_from_mode_maps(pca_maps)
+                    for fi, freq_value in enumerate(freqs.detach().cpu().numpy().reshape(-1)):
+                        for mi in range(int(mimo.shape[1])):
+                            for mj in range(int(mimo.shape[2])):
+                                kwargs = dict(base)
+                                kwargs.update(category='analysis_curve', extractor='psd_exact', reducer='mean', variant='raw', scale='raw', frequency=float(freq_value), value=float(mimo[fi, mi, mj].abs().detach().cpu().item()), value_unit='power', series=f'pca_mimo_{mi:03d}_{mj:03d}')
+                                pca_mimo_rows.append(common_row(**kwargs))
+                ref_kwargs = dict(base)
+                ref_kwargs.update(category='analysis_manifest', status='ok', message=json.dumps(meta, ensure_ascii=False), artifact_name='pca_reference', output_csv_path=str(checkpoint_dir / 'pca_reference'))
+                pca_reference_rows.append(common_row(**ref_kwargs))
 
         layer_distance_profile_rows, layer_distance_checkpoint_trend_rows = _layer_distance_rows_for_checkpoint(summaries=summaries, common_by_key=common_by_key, extractors=selected_extractors, distance_metric=str(args.analysis_distance_metric))
         layer_dispersion_profile_rows, layer_dispersion_checkpoint_trend_rows = _layer_dispersion_rows_for_checkpoint(summaries=summaries, common_by_key=common_by_key, extractors=selected_extractors)
@@ -1142,6 +1248,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             for parameter, stats in param_map.items():
                 for stat_name, stat_value in stats.items():
                     filter_trend_history[(layer_name, layer_index, parameter, stat_name)].append((int(payload.get('epoch', 0)), float(stat_value), dict(checkpoint_base)))
+        if enable_pca_mimo:
+            sorted_keys = sorted(maps_by_key.keys(), key=lambda item: (item[4], item[1], item[0], item[5], str(item[6])))
+            for key in sorted_keys:
+                layer_name, layer_index, _signal_kind, _series, scope, family, label = key
+                li_key = (layer_name, layer_index, 'hidden', 'layer_input', scope, family, label)
+                mem_key = (layer_name, layer_index, 'hidden', 'membrane', scope, family, label)
+                spk_key = (layer_name, layer_index, 'hidden', 'spike', scope, family, label)
+                for src_key, dst_key, trace_name in ((li_key, mem_key, 'x_layer_to_y_mem'), (li_key, spk_key, 'x_layer_to_y_spike')):
+                    if src_key in maps_by_key and dst_key in maps_by_key and src_key in pca_basis_cache:
+                        basis, centroid, _meta = pca_basis_cache[src_key]
+                        src_modes = apply_fixed_pca_basis(maps_by_key[src_key], basis, centroid)
+                        dst_modes = apply_fixed_pca_basis(maps_by_key[dst_key], basis, centroid)
+                        freqs, cross = cross_spectral_matrix_from_mode_maps(src_modes, dst_modes)
+                        base = dict(common_by_key[src_key])
+                        for fi, freq_value in enumerate(freqs.detach().cpu().numpy().reshape(-1)):
+                            for mi in range(int(cross.shape[1])):
+                                for mj in range(int(cross.shape[2])):
+                                    kwargs = dict(base)
+                                    kwargs.update(category='analysis_curve', extractor='psd_exact', reducer='mean', variant='raw', scale='raw', frequency=float(freq_value), value=float(cross[fi, mi, mj].abs().detach().cpu().item()), value_unit='power', series=f'pca_cross_{trace_name}_{mi:03d}_{mj:03d}')
+                                    pca_cross_rows.append(common_row(**kwargs))
 
         _write_layer_rows(checkpoint_dir, family_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='analysis_curve')
         _write_layer_rows(checkpoint_dir, dispersion_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='analysis_dispersion')
@@ -1155,6 +1281,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             _write_rows_to_dir(checkpoint_dir / 'layer_dispersion_profile' / statistic, statistic_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='layer_dispersion_profile')
         if bool(args.enable_pairwise_dependency_appendix):
             _write_artifact(checkpoint_dir / 'pairwise_dependency_appendix.csv', appendix_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='pairwise_dependency_appendix')
+        _write_layer_rows(checkpoint_dir, pca_reference_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='pca_reference')
+        if enable_pca_1d:
+            _write_layer_rows(checkpoint_dir, pca_mode_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='pca_mode_traces')
+        if enable_pca_mimo:
+            _write_layer_rows(checkpoint_dir, pca_mimo_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='pca_mimo_traces')
+            _write_layer_rows(checkpoint_dir, pca_cross_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='pca_cross_traces')
 
     traces_dir = output_root / 'traces'
     traces_dir.mkdir(parents=True, exist_ok=True)
