@@ -127,3 +127,26 @@
 | `overwrite` | 기존 figure 덮어쓰기 | boolean | 아니오 | true/false | `true` |
 | `manifest_name` | plotting manifest 파일명 | string | 아니오 | 경로 구분자 없는 `.csv` 파일명 | `recursive_plot_manifest.csv` |
 | `include_filter_count` | filter plot에 count 포함 | boolean | 아니오 | true/false | `false` |
+
+### data_prep dataset 다중 실행 정책
+
+- data_prep에서만 `dataset`에 문자열 또는 문자열 리스트를 허용한다.
+- 문자열이면 단일 dataset 전처리를 수행한다.
+- 리스트이면 dataset별 직렬 전처리를 수행한다.
+- 리스트 실행은 병렬 실행이 아니며 하나의 프로세스에서 순서대로 처리한다.
+- 다른 stage에서는 dataset list를 허용하지 않는다.
+- 다른 stage에서 list를 넣어도 sweep으로 해석하지 않는다.
+- data_prep list 실행에서는 `raw_data_root`, `prep_root`, `seed`, `prep_profile`, `max_samples` 등 동일 옵션이 각 dataset에 동일하게 적용된다.
+
+
+### model_training DDP 옵션
+- `ddp`: 2-GPU DDP 사용 여부(`true/false`).
+- `ddp_world_size`: 현재 `2`만 허용한다.
+- `batch_size_is_global`: `batch_size`를 global batch로 해석한다. DDP에서는 `true`만 허용한다.
+- DDP 모드에서는 `batch_size`를 global batch로 받아 rank별로 `batch_size // 2`를 사용한다.
+- DDP 실행은 `bash/model_training_ddp.sh` 또는 `torchrun --standalone --nproc_per_node=2 ...`를 사용한다.
+
+- DDP 스모크 테스트는 CUDA 2-GPU 환경에서만 수행 가능하다.
+- DDP에서는 batch_size를 global batch로 해석하며 GPU별 per-rank batch는 batch_size/2이다.
+- DDP에서는 batch_size가 반드시 짝수여야 한다.
+- DDP 실행 시 checkpoint와 metric CSV 저장은 rank0만 수행한다.

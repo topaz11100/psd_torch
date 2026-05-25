@@ -1,6 +1,9 @@
 {
   "data_prep": {
-    "dataset": "mnist",
+    "dataset": [
+      "mnist",
+      "shd"
+    ],
     "raw_data_root": "/ABS/PATH/TO/raw_data",
     "prep_root": "/ABS/PATH/TO/prepared",
     "seed": 0,

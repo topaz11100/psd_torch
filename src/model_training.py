@@ -1,15 +1,7 @@
-"""Supervised training entrypoint for the split PSD pipeline.
-
-This program trains and evaluates a model, writes selected `.pt` checkpoints,
-and records scalar training metrics in the common long-form CSV schema. It does
-not run model/layer PSD analysis and does not render figures.
-"""
-
+"""Supervised training entrypoint for the split PSD pipeline."""
 from __future__ import annotations
-
 import sys
 from pathlib import Path
-
 if __package__ is None or __package__ == '':
     _SCRIPT_DIR = Path(__file__).resolve().parent
     _PROJECT_ROOT = _SCRIPT_DIR.parent
@@ -20,623 +12,201 @@ if __package__ is None or __package__ == '':
     if str(_PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(_PROJECT_ROOT))
 
-import argparse
-import json
-import os
-from pathlib import Path
-import tempfile
-import shutil
+import argparse, json, os, tempfile, shutil
+from dataclasses import dataclass
 from typing import Any, Sequence
-
-
 from src.util.config_cli import parse_args_with_config
 from src.util.csv_schema import common_row, write_common_csv
+from src.util.cli_common import parse_bool_token
 
 CHECKPOINT_SCHEMA_VERSION = 'psd_checkpoint_v1'
 SOURCE_PROGRAM = 'model_training'
 
+@dataclass
+class DDPContext:
+    enabled: bool
+    rank: int
+    local_rank: int
+    world_size: int
+    device: Any
+    is_rank0: bool
 
 def _load_runtime_dependencies() -> None:
-    """실제 학습 실행 시점에만 무거운 의존성을 불러온다."""
-
-    global torch, tqdm, _seed_everything
-    global make_loader, resolve_dataset_bundle, select_training_view_for_model
-    global ModelSpec, canonicalize_model_token
-    global build_optimizer, evaluate_one_epoch, train_one_epoch
-    global build_snn_classifier, build_readout
-
+    global torch, tqdm, _seed_everything, make_loader, resolve_dataset_bundle, select_training_view_for_model
+    global ModelSpec, canonicalize_model_token, build_optimizer, evaluate_one_epoch, train_one_epoch, build_snn_classifier, build_readout, DistributedSampler, DDP
     import torch as _torch
     from tqdm import tqdm as _tqdm
-
-    from src.data.registry import make_loader as _make_loader
-    from src.data.registry import resolve_dataset_bundle as _resolve_dataset_bundle
-    from src.data.registry import select_training_view_for_model as _select_training_view_for_model
-    from src.model.model_registry import ModelSpec as _ModelSpec
-    from src.model.model_registry import canonicalize_model_token as _canonicalize_model_token
-    from src.model.training import build_optimizer as _build_optimizer
-    from src.model.training import evaluate_one_epoch as _evaluate_one_epoch
-    from src.model.training import train_one_epoch as _train_one_epoch
+    from torch.nn.parallel import DistributedDataParallel as _DDP
+    from torch.utils.data.distributed import DistributedSampler as _DistributedSampler
+    from src.data.registry import make_loader as _make_loader, resolve_dataset_bundle as _resolve_dataset_bundle, select_training_view_for_model as _select_training_view_for_model
+    from src.model.model_registry import ModelSpec as _ModelSpec, canonicalize_model_token as _canonicalize_model_token
+    from src.model.training import build_optimizer as _build_optimizer, evaluate_one_epoch as _evaluate_one_epoch, train_one_epoch as _train_one_epoch
     from src.model.snn_builder import build_snn_classifier as _build_snn_classifier
     from src.readout.readout import build_readout as _build_readout
     from src.util.random import seed_everything as _runtime_seed_everything
+    torch=_torch; tqdm=_tqdm; DDP=_DDP; DistributedSampler=_DistributedSampler
+    make_loader=_make_loader; resolve_dataset_bundle=_resolve_dataset_bundle; select_training_view_for_model=_select_training_view_for_model
+    ModelSpec=_ModelSpec; canonicalize_model_token=_canonicalize_model_token; build_optimizer=_build_optimizer; evaluate_one_epoch=_evaluate_one_epoch; train_one_epoch=_train_one_epoch
+    build_snn_classifier=_build_snn_classifier; build_readout=_build_readout; _seed_everything=_runtime_seed_everything
 
-    torch = _torch
-    tqdm = _tqdm
-    make_loader = _make_loader
-    resolve_dataset_bundle = _resolve_dataset_bundle
-    select_training_view_for_model = _select_training_view_for_model
-    ModelSpec = _ModelSpec
-    canonicalize_model_token = _canonicalize_model_token
-    build_optimizer = _build_optimizer
-    evaluate_one_epoch = _evaluate_one_epoch
-    train_one_epoch = _train_one_epoch
-    build_snn_classifier = _build_snn_classifier
-    build_readout = _build_readout
-    _seed_everything = _runtime_seed_everything
-
-
-def _load_json_light(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
-
+def _load_json_light(path: Path) -> dict[str, Any]: return json.loads(path.read_text(encoding='utf-8'))
+def _parse_bool_config_value(value: Any, *, default: bool) -> bool: return parse_bool_token(value, default=default)
+def _ddp_requested(args: argparse.Namespace) -> bool: return _parse_bool_config_value(getattr(args,'ddp',False), default=False)
+def _unwrap_model(model: Any) -> Any: return getattr(model,'module',model)
+def _is_rank0(ctx: DDPContext) -> bool: return bool(ctx.is_rank0)
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description='Supervised model training entrypoint for selected checkpoint production.')
-    parser.add_argument('--dataset', required=True, help='Canonical dataset token.')
-    parser.add_argument('--prep_root', required=True, help='Prepared data root containing <dataset>/manifest.json.')
-    parser.add_argument('--model', required=True, help='Canonical model token.')
-    parser.add_argument('--hidden_spec', required=True, help='Dense hidden widths or - for fixed-CNN backbone tokens.')
-    parser.add_argument('--readout_mode', required=True, choices=('temporal_membrane', 'first_spike', 'max_rate', 'spikegru_max_over_time'))
-    parser.add_argument('--epochs', required=True, type=int)
-    parser.add_argument('--batch_size', required=True, type=int)
-    parser.add_argument('--lr', required=True, type=float)
-    parser.add_argument('--num_workers', type=int, default=0, help='DataLoader worker process count. Use 0 for single-process loading.')
-    parser.add_argument('--seed', required=True, type=int)
-    parser.add_argument('--gpu_index', type=int, default=0)
-    parser.add_argument('--regularization_lambda1', default=0.0, type=float, help='Signed weight for input-to-hidden PSD curve-shape distances.')
-    parser.add_argument('--regularization_lambda2', default=0.0, type=float, help='Signed weight for adjacent hidden PSD curve-shape distances, including input-to-first-hidden.')
-    parser.add_argument('--regularization_signal', default='y_mem', choices=('y_mem', 'y_spike'))
-    parser.add_argument('--regularization_curve_space', default='exact', choices=('exact',))
-    parser.add_argument('--regularization_curve_scale', default='raw', choices=('raw', 'db'))
-    parser.add_argument('--regularization_centering', default='raw', choices=('raw', 'centered'))
-    parser.add_argument('--regularization_reducer', default='mean', choices=('mean', 'median'))
-    parser.add_argument('--regularization_distance_metric', default='centered_l2', choices=('centered_l2', 'diff_l2'), help='PSD curve distance for regularization: centered_l2 or unnormalized first-difference L2.')
-    parser.add_argument('--anal_epoch_list', nargs='*', default=None, help='Selected checkpoint epochs; empty means final epoch only.')
-    parser.add_argument('--checkpoint_root', required=True, help='Directory that will contain selected .pt checkpoint files only.')
-    parser.add_argument('--metric_root', required=True, help='Directory for training_metrics.csv; must be outside checkpoint_root.')
-    parser.add_argument('--output_root', default=None, help='Optional parent output root recorded in training metadata only.')
-    parser.add_argument('--v_th', type=float, default=1.0, help='threshold')
-    parser.add_argument('--resume_checkpoint',
-                        default=None,
-                        help='Optional .pt checkpoint path. Loads model state_dict and continues from checkpoint epoch + 1.',
-                    )
-    parser.add_argument('--config', default=None, help='JSON 설정 파일 경로(.json)')
-    return parser
-
+    p=argparse.ArgumentParser(description='Supervised model training entrypoint for selected checkpoint production.')
+    p.add_argument('--dataset', required=True); p.add_argument('--prep_root', required=True); p.add_argument('--model', required=True); p.add_argument('--hidden_spec', required=True)
+    p.add_argument('--readout_mode', required=True, choices=('temporal_membrane','first_spike','max_rate','spikegru_max_over_time'))
+    p.add_argument('--epochs', required=True, type=int); p.add_argument('--batch_size', required=True, type=int); p.add_argument('--lr', required=True, type=float)
+    p.add_argument('--num_workers', type=int, default=0); p.add_argument('--seed', required=True, type=int); p.add_argument('--gpu_index', type=int, default=0)
+    p.add_argument('--ddp', default='false', help='2-GPU DDP 사용 여부(true/false).')
+    p.add_argument('--ddp_world_size', type=int, default=2, help='DDP world size. 현재 2만 허용.')
+    p.add_argument('--batch_size_is_global', default='true', help='batch_size를 global batch로 해석할지 여부. 현재 true만 허용.')
+    p.add_argument('--regularization_lambda1', default=0.0, type=float); p.add_argument('--regularization_lambda2', default=0.0, type=float)
+    p.add_argument('--regularization_signal', default='y_mem', choices=('y_mem','y_spike')); p.add_argument('--regularization_curve_space', default='exact', choices=('exact',))
+    p.add_argument('--regularization_curve_scale', default='raw', choices=('raw','db')); p.add_argument('--regularization_centering', default='raw', choices=('raw','centered'))
+    p.add_argument('--regularization_reducer', default='mean', choices=('mean','median')); p.add_argument('--regularization_distance_metric', default='centered_l2', choices=('centered_l2','diff_l2'))
+    p.add_argument('--anal_epoch_list', nargs='*', default=None); p.add_argument('--checkpoint_root', required=True); p.add_argument('--metric_root', required=True)
+    p.add_argument('--output_root', default=None); p.add_argument('--v_th', type=float, default=1.0); p.add_argument('--resume_checkpoint', default=None); p.add_argument('--config', default=None)
+    return p
 
 def _normalize_anal_epoch_list(values: Sequence[str] | None, *, epochs: int) -> list[int]:
-    epochs = int(epochs)
-    if epochs < 1:
-        raise ValueError('--epochs must be >= 1.')
-    if values is None or len(values) == 0 or all(str(v).strip() == '' for v in values):
-        values = [str(epochs)]
-    normalized: set[int] = set()
-    for raw in values:
-        text = str(raw).strip()
-        if text == '':
-            continue
-        try:
-            epoch = int(text)
-        except ValueError as exc:
-            raise ValueError(f'--anal_epoch_list values must be integers; got {raw!r}.') from exc
-        if epoch < 1 or epoch > epochs:
-            raise ValueError(f'--anal_epoch_list value {epoch} is outside 1 <= epoch <= epochs ({epochs}).')
-        normalized.add(epoch)
-    if not normalized:
-        normalized.add(epochs)
-    return sorted(normalized)
-
+    if values is None or len(values)==0: values=[str(epochs)]
+    out=sorted({int(v) for v in values if str(v).strip()!=''})
+    if not out: out=[epochs]
+    for e in out:
+        if e<1 or e>epochs: raise ValueError('anal_epoch_list 범위 오류')
+    return out
 
 def _resolve_prepared_paths(dataset: str, prep_root: str) -> tuple[Path, Path]:
-    root = Path(str(prep_root)).expanduser().resolve()
-    dataset_root = (root / str(dataset)).resolve()
-    manifest_path = dataset_root / 'manifest.json'
-    if not manifest_path.exists():
-        raise FileNotFoundError(f'--prep_root must contain <dataset>/manifest.json; missing {manifest_path}')
-    manifest = _load_json_light(manifest_path)
-    manifest_dataset = str(manifest.get('dataset_name', dataset)) if isinstance(manifest, dict) else str(dataset)
-    if manifest_dataset != str(dataset):
-        raise ValueError(f'--dataset {dataset!r} does not match manifest dataset_name {manifest_dataset!r}.')
-    return root, dataset_root
-
+    root=Path(str(prep_root)).expanduser().resolve(); d=(root/dataset).resolve(); m=d/'manifest.json'
+    if not m.exists(): raise FileNotFoundError(f'manifest 없음: {m}')
+    return root,d
 
 def _strict_prepare_checkpoint_dir(checkpoint_root: Path) -> None:
     checkpoint_root.mkdir(parents=True, exist_ok=True)
-    existing = sorted(checkpoint_root.iterdir(), key=lambda item: item.name)
-    if existing:
-        offenders = ', '.join(str(child) for child in existing[:5])
-        raise ValueError(
-            'Checkpoint root must be empty before training so the completed directory contains only ' 
-            f'this run\'s selected .pt files; found {offenders}'
-        )
-
+    if any(checkpoint_root.iterdir()): raise ValueError('Checkpoint root는 비어 있어야 합니다.')
 
 def _assert_clean_checkpoint_dir(checkpoint_root: Path) -> None:
-    for child in checkpoint_root.iterdir():
-        if child.is_dir():
-            raise ValueError(f'Checkpoint directory contains invalid subdirectory: {child}')
-        if child.is_file() and child.suffix != '.pt':
-            raise ValueError(f'Checkpoint directory contains non-.pt file: {child}')
+    for c in checkpoint_root.iterdir():
+        if c.is_dir() or c.suffix!='.pt': raise ValueError(f'체크포인트 디렉터리 규칙 위반: {c}')
 
-
-def _resolve_device(gpu_index: int) -> torch.device:
+def _resolve_device(gpu_index:int):
     if torch.cuda.is_available():
-        index = int(gpu_index)
-        if index < 0 or index >= torch.cuda.device_count():
-            raise ValueError(f'--gpu_index {index} is invalid for {torch.cuda.device_count()} CUDA device(s).')
-        torch.cuda.set_device(index)
-        return torch.device(f'cuda:{index}')
+        if gpu_index<0 or gpu_index>=torch.cuda.device_count(): raise ValueError('gpu_index 오류')
+        torch.cuda.set_device(gpu_index); return torch.device(f'cuda:{gpu_index}')
     return torch.device('cpu')
 
+def _build_ddp_context(args: argparse.Namespace) -> DDPContext:
+    enabled=_ddp_requested(args)
+    if not enabled:
+        device=_resolve_device(int(args.gpu_index)); return DDPContext(False,0,0,1,device,True)
+    if int(args.ddp_world_size)!=2: raise ValueError('DDP는 ddp_world_size=2만 허용합니다.')
+    if not _parse_bool_config_value(args.batch_size_is_global, default=True): raise ValueError('DDP에서는 batch_size_is_global=true만 허용합니다.')
+    for key in ('LOCAL_RANK','RANK','WORLD_SIZE'):
+        if key not in os.environ: raise ValueError(f'DDP 실행 환경변수 누락: {key}. torchrun으로 실행하세요.')
+    local_rank=int(os.environ['LOCAL_RANK']); rank=int(os.environ['RANK']); world_size=int(os.environ['WORLD_SIZE'])
+    if world_size!=2: raise ValueError('DDP WORLD_SIZE는 2여야 합니다.')
+    if local_rank not in (0,1): raise ValueError('LOCAL_RANK는 0 또는 1이어야 합니다.')
+    if not torch.cuda.is_available() or torch.cuda.device_count()<2: raise ValueError('DDP에는 CUDA 2개 이상이 필요합니다.')
+    try:
+        torch.cuda.set_device(local_rank)
+        torch.distributed.init_process_group(backend='nccl')
+    except Exception as exc:
+        raise RuntimeError(f'DDP 초기화 실패: {exc}') from exc
+    return DDPContext(True,rank,local_rank,world_size,torch.device(f'cuda:{local_rank}'),rank==0)
 
-def _model_family(spec: ModelSpec) -> str:
-    if spec.family in {'cnn_lif', 'cnn_rf'}:
-        return 'cnn'
-    if spec.family in {'lif', 'rf'}:
-        return 'dense_snn'
-    return str(spec.family)
+def _resolve_effective_batch_size(args: argparse.Namespace, ctx: DDPContext) -> int:
+    g=int(args.batch_size)
+    if not ctx.enabled: return g
+    if g%2!=0: raise ValueError('DDP 사용 시 batch_size는 2로 나누어 떨어져야 합니다.')
+    b=g//2
+    if b<1: raise ValueError('DDP per-rank batch_size는 1 이상이어야 합니다.')
+    return b
 
+def _reduce_train_metrics_ddp(metrics: Any, ctx: DDPContext) -> Any:
+    if not ctx.enabled: return metrics
+    vals=torch.tensor([
+        metrics.loss*metrics.total, metrics.task_loss*metrics.total, metrics.regularization_loss*metrics.total,
+        metrics.regularization_global_loss*metrics.total, metrics.regularization_adjacent_loss*metrics.total,
+        float(metrics.correct), float(metrics.total)
+    ], device=ctx.device, dtype=torch.float64)
+    torch.distributed.all_reduce(vals, op=torch.distributed.ReduceOp.SUM)
+    total=max(1.0,float(vals[6].item()))
+    from src.model.training import TrainEpochMetrics
+    return TrainEpochMetrics(loss=float(vals[0]/total), task_loss=float(vals[1]/total), regularization_loss=float(vals[2]/total), regularization_global_loss=float(vals[3]/total), regularization_adjacent_loss=float(vals[4]/total), correct=int(vals[5].item()), total=int(vals[6].item()), accuracy=float(vals[5]/total))
 
-def _input_shape_from_manifest(manifest: dict[str, Any], model_spec: ModelSpec) -> list[int] | None:
-    if model_spec.family not in {'cnn_lif', 'cnn_rf'}:
-        return None
-    for key in ('cnn_input_shape', 'original_shape', 'stored_shape'):
-        value = manifest.get(key)
-        if isinstance(value, (list, tuple)):
-            return [int(v) for v in value]
-    return None
-
-
-def _hidden_sizes_for_model(model_spec: ModelSpec, default_hidden_sizes: Sequence[int]) -> tuple[int, ...] | None:
-    if model_spec.family in {'cnn_lif', 'cnn_rf', 'spikingssm', 'spikformer', 'spikegru'}:
-        return None
-    return tuple(int(v) for v in default_hidden_sizes)
-
-
-def _hidden_spec_normalized(model_spec: ModelSpec, model_metadata: dict[str, Any]) -> str | None:
-    if model_spec.family in {'cnn_lif', 'cnn_rf'}:
-        return None
-    value = model_metadata.get('hidden_spec') or model_metadata.get('arch_spec')
-    return None if value is None else str(value)
-
-
-def _read_manifest(bundle_manifest: Path) -> dict[str, Any]:
-    value = _load_json_light(bundle_manifest)
-    if not isinstance(value, dict):
-        raise ValueError(f'Prepared manifest must be a JSON object: {bundle_manifest}')
-    return value
-
-
-def _checkpoint_payload(
-    *,
-    epoch: int,
-    model: torch.nn.Module,
-    model_spec: ModelSpec,
-    model_config: dict[str, Any],
-    readout_config: dict[str, Any],
-    dataset_token: str,
-    prep_root: Path,
-    prepared_dataset_path: Path,
-    prepared_data_ref: dict[str, Any],
-    axis_metadata_ref: dict[str, Any],
-    seed: int,
-    training_args: dict[str, Any],
-    normalization_metadata: dict[str, Any],
-    hidden_spec_normalized: str | None,
-    metric_snapshot: dict[str, float],
-) -> dict[str, Any]:
-    return {
-        'schema_version': CHECKPOINT_SCHEMA_VERSION,
-        'epoch': int(epoch),
-        'model_token': model_spec.canonical_token,
-        'model_config': dict(model_config),
-        'state_dict': model.state_dict(),
-        'readout_config': dict(readout_config),
-        'dataset_token': str(dataset_token),
-        'prep_root': str(prep_root),
-        'prepared_dataset_path': str(prepared_dataset_path),
-        'prepared_data_ref': dict(prepared_data_ref),
-        'axis_metadata_ref': dict(axis_metadata_ref),
-        'seed': int(seed),
-        'training_args': dict(training_args),
-        'normalization_metadata': dict(normalization_metadata),
-        'hidden_spec_normalized': hidden_spec_normalized,
-        'metric_snapshot': dict(metric_snapshot),
-    }
-
+def _checkpoint_payload(**kwargs):
+    model=kwargs.pop('model')
+    return {**kwargs,'schema_version':CHECKPOINT_SCHEMA_VERSION,'state_dict':_unwrap_model(model).state_dict()}
 
 def _atomic_torch_save(payload: dict[str, Any], path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_dir = Path(tempfile.mkdtemp(prefix='checkpoint_write_', dir=str(path.parent.parent)))
-    temp_path = temp_dir / path.name
-    try:
-        torch.save(payload, temp_path)
-        os.replace(temp_path, path)
-    except Exception:
-        try:
-            if temp_path.exists():
-                temp_path.unlink()
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-        raise
-    shutil.rmtree(temp_dir, ignore_errors=True)
-
-
-def _training_metric_rows(
-    *,
-    run_id: str,
-    dataset: str,
-    prep_profile: str,
-    seed: int,
-    model_spec: ModelSpec,
-    readout_mode: str,
-    epoch: int,
-    scope: str,
-    metrics: dict[str, float | int],
-) -> list[dict[str, str]]:
-    rows: list[dict[str, str]] = []
-    for metric_name, value in metrics.items():
-        rows.append(
-            common_row(
-                category='training_metric',
-                source_program=SOURCE_PROGRAM,
-                run_id=run_id,
-                dataset=dataset,
-                scope=scope,
-                seed=seed,
-                model_token=model_spec.canonical_token,
-                model_family=_model_family(model_spec),
-                readout_mode=readout_mode,
-                epoch=epoch,
-                metric=metric_name,
-                value=value,
-            )
-        )
-    return rows
-
+    path.parent.mkdir(parents=True, exist_ok=True); temp_dir=Path(tempfile.mkdtemp(prefix='checkpoint_write_', dir=str(path.parent.parent))); temp_path=temp_dir/path.name
+    try: torch.save(payload,temp_path); os.replace(temp_path,path)
+    finally: shutil.rmtree(temp_dir, ignore_errors=True)
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = build_arg_parser()
-    args = parse_args_with_config(parser, argv=argv, stage_key='model_training')
-    if int(args.batch_size) < 1:
-        parser.error('--batch_size must be >= 1.')
-    if float(args.lr) <= 0.0:
-        parser.error('--lr must be > 0.')
-    if int(args.num_workers) < 0:
-        parser.error('--num_workers must be >= 0.')
+    parser=build_arg_parser(); args=parse_args_with_config(parser, argv=argv, stage_key='model_training')
+    _load_runtime_dependencies(); ctx=None
     try:
-        anal_epochs = _normalize_anal_epoch_list(args.anal_epoch_list, epochs=int(args.epochs))
-    except ValueError as exc:
-        parser.error(str(exc))
-    dataset_token = str(args.dataset)
-    prep_root, prepared_dataset_path = _resolve_prepared_paths(dataset_token, args.prep_root)
-    checkpoint_root = Path(args.checkpoint_root).expanduser().resolve()
-    metric_root = Path(args.metric_root).expanduser().resolve()
-    resume_checkpoint = None if args.resume_checkpoint is None else Path(args.resume_checkpoint).expanduser().resolve()
-
-    if checkpoint_root == metric_root or checkpoint_root in metric_root.parents:
-        parser.error('--metric_root must be outside --checkpoint_root.')
-
-    if resume_checkpoint is None:
-        _strict_prepare_checkpoint_dir(checkpoint_root)
-    else:
-        if not resume_checkpoint.exists():
-            parser.error(f'--resume_checkpoint does not exist: {resume_checkpoint}')
-        if resume_checkpoint.suffix != '.pt':
-            parser.error(f'--resume_checkpoint must be a .pt file: {resume_checkpoint}')
-
-        # resume 때는 기존 checkpoint들이 남아 있어도 허용해야 함
-        checkpoint_root.mkdir(parents=True, exist_ok=True)
-        _assert_clean_checkpoint_dir(checkpoint_root)
-
-    metric_root.mkdir(parents=True, exist_ok=True)
-
-    _load_runtime_dependencies()
-    _seed_everything(int(args.seed))
-    device = _resolve_device(int(args.gpu_index))
-    model_spec = canonicalize_model_token(args.model)
-    bundle = resolve_dataset_bundle(dataset_token, prep_root=prep_root)
-    bundle = select_training_view_for_model(bundle, model_family=model_spec.family)
-    manifest = _read_manifest(bundle.manifest_path)
-    input_shape = _input_shape_from_manifest(manifest, model_spec)
-
-    hidden_spec_text = str(args.hidden_spec).strip()
-    hidden_sizes = _hidden_sizes_for_model(model_spec, bundle.default_hidden_sizes)
-    effective_readout_mode = 'spikegru_max_over_time' if model_spec.family == 'spikegru' else str(args.readout_mode)
-    readout = build_readout(effective_readout_mode, num_classes=bundle.num_classes, sequence_length=bundle.sequence_length, device=device)
-    model = build_snn_classifier(
-        model_token=model_spec,
-        input_dim=bundle.input_dim,
-        sequence_length=bundle.sequence_length,
-        num_classes=bundle.num_classes,
-        input_shape=input_shape,
-        hidden_sizes=hidden_sizes,
-        arch_spec=hidden_spec_text,
-        output_layer_overrides=readout.output_layer_overrides(),
-        v_th=float(args.v_th),
-    ).to(device)
-    readout.to(device)
-    optimizer = build_optimizer(model, lr=float(args.lr))
-
-    resume_epoch = 0
-
-    if resume_checkpoint is not None:
-        try:
-            payload = torch.load(resume_checkpoint, map_location=device, weights_only=False)
-        except TypeError:
-            payload = torch.load(resume_checkpoint, map_location=device)
-
-        if not isinstance(payload, dict):
-            raise ValueError(f'Resume checkpoint must be a dict: {resume_checkpoint}')
-
-        if 'state_dict' not in payload:
-            raise ValueError(f'Resume checkpoint is missing state_dict: {resume_checkpoint}')
-
-        if 'epoch' not in payload:
-            raise ValueError(f'Resume checkpoint is missing epoch: {resume_checkpoint}')
-
-        # 안전장치: 다른 실험 checkpoint를 잘못 넣는 것 방지
-        ckpt_dataset = str(payload.get('dataset_token', '')).strip()
-        ckpt_model = str(payload.get('model_token', '')).strip()
-        ckpt_readout = str(payload.get('readout_config', {}).get('mode', '')).strip()
-
-        if ckpt_dataset and ckpt_dataset != dataset_token:
-            raise ValueError(f'Resume dataset mismatch: checkpoint={ckpt_dataset}, current={dataset_token}')
-
-        if ckpt_model and ckpt_model != model_spec.canonical_token:
-            raise ValueError(f'Resume model mismatch: checkpoint={ckpt_model}, current={model_spec.canonical_token}')
-
-        if ckpt_readout and ckpt_readout != effective_readout_mode:
-            raise ValueError(f'Resume readout mismatch: checkpoint={ckpt_readout}, current={effective_readout_mode}')
-
-        model.load_state_dict(payload['state_dict'])
-        resume_epoch = int(payload['epoch'])
-
-        if resume_epoch >= int(args.epochs):
-            raise ValueError(
-                f'Resume checkpoint epoch={resume_epoch} is already >= target --epochs={int(args.epochs)}. '
-                'Increase --epochs or use an earlier checkpoint.'
-            )
-
-        tqdm.write(
-            f'[model_training] resumed from {resume_checkpoint} at epoch {resume_epoch}; '
-            f'next epoch = {resume_epoch + 1}'
-        )
-
-    train_loader = make_loader(
-        bundle.train_dataset,
-        batch_size=int(args.batch_size),
-        shuffle=True,
-        num_workers=int(args.num_workers),
-        pin_memory=device.type == 'cuda',
-        seed=int(args.seed),
-    )
-    test_loader = make_loader(
-        bundle.test_dataset,
-        batch_size=int(args.batch_size),
-        shuffle=False,
-        num_workers=int(args.num_workers),
-        pin_memory=device.type == 'cuda',
-        seed=int(args.seed),
-    )
-
-    training_args = {
-        'dataset': dataset_token,
-        'prep_root': str(prep_root),
-        'prepared_dataset_path': str(prepared_dataset_path),
-        'model': model_spec.canonical_token,
-        'hidden_spec': None if model_spec.family in {'cnn_lif', 'cnn_rf'} else hidden_spec_text,
-        'readout_mode': effective_readout_mode,
-        'epochs': int(args.epochs),
-        'batch_size': int(args.batch_size),
-        'lr': float(args.lr),
-        'seed': int(args.seed),
-        'gpu_index': int(args.gpu_index),
-        'num_workers': int(args.num_workers),
-        'regularization_lambda1': float(args.regularization_lambda1),
-        'regularization_lambda2': float(args.regularization_lambda2),
-        'regularization_signal': str(args.regularization_signal),
-        'regularization_curve_space': str(args.regularization_curve_space),
-        'regularization_curve_scale': str(args.regularization_curve_scale),
-        'regularization_centering': str(args.regularization_centering),
-        'regularization_reducer': str(args.regularization_reducer),
-        'regularization_distance_metric': str(args.regularization_distance_metric),
-        'anal_epoch_list': list(anal_epochs),
-        'checkpoint_root': str(checkpoint_root),
-        'metric_root': str(metric_root),
-        'output_root': '' if args.output_root is None else str(Path(args.output_root).expanduser().resolve()),
-    }
-    prep_profile = str(manifest.get('prep_profile', manifest.get('psd_axis_kind', bundle.psd_axis_kind)))
-    run_id = f'{dataset_token}_{model_spec.canonical_token}_{effective_readout_mode}_seed{int(args.seed)}'
-    model_metadata = model.model_metadata() if hasattr(model, 'model_metadata') else {}
-    hidden_spec_normalized = _hidden_spec_normalized(model_spec, model_metadata)
-    model_config = {
-        'input_dim': int(bundle.input_dim),
-        'sequence_length': int(bundle.sequence_length),
-        'num_classes': int(bundle.num_classes),
-        'input_shape': input_shape,
-        'hidden_spec': hidden_spec_normalized,
-        'arch_spec': str(model_metadata.get('arch_spec', hidden_spec_text)),
-        'v_th': float(args.v_th),
-        'model_metadata': model_metadata,
-    }
-    readout_config = {'mode': effective_readout_mode, 'num_classes': int(bundle.num_classes), 'sequence_length': int(bundle.sequence_length)}
-    prepared_data_ref = {'prep_root': str(prep_root), 'prepared_dataset_path': str(prepared_dataset_path), 'manifest_path': str(bundle.manifest_path)}
-    axis_metadata_ref = {
-        'manifest_path': str(bundle.manifest_path),
-        'training_view_name': bundle.training_view_name,
-        'psd_view_name': bundle.psd_view_name,
-        'psd_axis_kind': bundle.psd_axis_kind,
-        'psd_sample_axis': manifest.get('psd_sample_axis'),
-        'psd_batch_axis': manifest.get('psd_batch_axis'),
-        'psd_time_axis': manifest.get('psd_time_axis'),
-        'psd_row_axes': manifest.get('psd_row_axes'),
-        'psd_feature_axes': manifest.get('psd_feature_axes'),
-        'psd_token_axes': manifest.get('psd_token_axes'),
-        'psd_flatten_rule': manifest.get('psd_flatten_rule'),
-        'psd_logical_shape': manifest.get('psd_logical_shape'),
-    }
-    normalization_metadata = {
-        'stored_dtype': manifest.get('stored_dtype'),
-        'label_dtype': manifest.get('label_dtype', 'int64'),
-        'sample_index_dtype': manifest.get('sample_index_dtype', 'int64'),
-        'model_input_axis_order': manifest.get('model_input_axis_order'),
-        'stored_order_is_model_input_order': manifest.get('stored_order_is_model_input_order'),
-    }
-
-    all_metric_rows: list[dict[str, str]] = []
-    latest_snapshot: dict[str, float] = {}
-    epoch_iter = range(resume_epoch + 1, int(args.epochs) + 1)
-    for epoch in tqdm(epoch_iter, desc='model_training:epochs', leave=True):
-        train_metrics = train_one_epoch(
-            model,
-            train_loader,
-            readout=readout,
-            optimizer=optimizer,
-            device=device,
-            progress_desc=f'train epoch {epoch}',
-            regularization_lambda1=float(args.regularization_lambda1),
-            regularization_lambda2=float(args.regularization_lambda2),
-            regularization_signal=str(args.regularization_signal),
-            regularization_curve_space=str(args.regularization_curve_space),
-            regularization_curve_scale=str(args.regularization_curve_scale),
-            regularization_centering=str(args.regularization_centering),
-            regularization_reducer=str(args.regularization_reducer),
-            regularization_distance_metric=str(args.regularization_distance_metric),
-        )
-
-        if hasattr(model, 'clamp_projected_parameters'):
-            model.clamp_projected_parameters()
-
-        # 추가: 분석 epoch이 아니면 기록/평가/체크포인트 전부 생략
-        if epoch not in anal_epochs:
-            continue
-
-        test_metrics = evaluate_one_epoch(
-            model,
-            test_loader,
-            readout=readout,
-            device=device,
-            progress_desc=f'test epoch {epoch}',
-        )
-
-        train_values = {
-            'loss': train_metrics.loss,
-            'task_loss': train_metrics.task_loss,
-            'regularization_loss': train_metrics.regularization_loss,
-            'regularization_global_loss': train_metrics.regularization_global_loss,
-            'regularization_adjacent_loss': train_metrics.regularization_adjacent_loss,
-            'accuracy': train_metrics.accuracy,
-            'correct': train_metrics.correct,
-            'total': train_metrics.total,
-        }
-
-        test_values = {
-            'loss': test_metrics.loss,
-            'accuracy': test_metrics.accuracy,
-            'correct': test_metrics.correct,
-            'total': test_metrics.total,
-        }
-
-        tqdm.write(
-            (
-                f'[model_training] epoch {epoch:04d}/{int(args.epochs):04d} | '
-                f'train_loss={train_metrics.loss:.6f} '
-                f'train_acc={train_metrics.accuracy:.4f} '
-                f'train_task={train_metrics.task_loss:.6f} '
-                f'train_reg={train_metrics.regularization_loss:.6f} | '
-                f'test_loss={test_metrics.loss:.6f} '
-                f'test_acc={test_metrics.accuracy:.4f} '
-                f'test_correct={test_metrics.correct}/{test_metrics.total}'
-            )
-        )
-
-        all_metric_rows.extend(
-            _training_metric_rows(
-                run_id=run_id,
-                dataset=dataset_token,
-                prep_profile=prep_profile,
-                seed=int(args.seed),
-                model_spec=model_spec,
-                readout_mode=effective_readout_mode,
-                epoch=epoch,
-                scope='train',
-                metrics=train_values,
-            )
-        )
-
-        all_metric_rows.extend(
-            _training_metric_rows(
-                run_id=run_id,
-                dataset=dataset_token,
-                prep_profile=prep_profile,
-                seed=int(args.seed),
-                model_spec=model_spec,
-                readout_mode=effective_readout_mode,
-                epoch=epoch,
-                scope='test',
-                metrics=test_values,
-            )
-        )
-
-        latest_snapshot = {
-            'train_loss': float(train_metrics.loss),
-            'train_task_loss': float(train_metrics.task_loss),
-            'train_regularization_loss': float(train_metrics.regularization_loss),
-            'train_regularization_global_loss': float(train_metrics.regularization_global_loss),
-            'train_regularization_adjacent_loss': float(train_metrics.regularization_adjacent_loss),
-            'train_accuracy': float(train_metrics.accuracy),
-            'test_loss': float(test_metrics.loss),
-            'test_accuracy': float(test_metrics.accuracy),
-        }
-
-        checkpoint_path = checkpoint_root / f'checkpoint_epoch_{epoch:06d}.pt'
-        payload = _checkpoint_payload(
-            epoch=epoch,
-            model=model,
-            model_spec=model_spec,
-            model_config=model_config,
-            readout_config=readout_config,
-            dataset_token=dataset_token,
-            prep_root=prep_root,
-            prepared_dataset_path=prepared_dataset_path,
-            prepared_data_ref=prepared_data_ref,
-            axis_metadata_ref=axis_metadata_ref,
-            seed=int(args.seed),
-            training_args=training_args,
-            normalization_metadata=normalization_metadata,
-            hidden_spec_normalized=hidden_spec_normalized,
-            metric_snapshot=latest_snapshot,
-        )
-        _atomic_torch_save(payload, checkpoint_path)
-        _assert_clean_checkpoint_dir(checkpoint_root)
-
-    metrics_path = metric_root / 'training_metrics.csv'
-    write_common_csv(metrics_path, all_metric_rows)
-    _assert_clean_checkpoint_dir(checkpoint_root)
-    print(
-        json.dumps(
-            {
-                'status': 'ok',
-                'source_program': SOURCE_PROGRAM,
-                'checkpoint_root': str(checkpoint_root),
-                'metric_csv': str(metrics_path),
-                'selected_epochs': anal_epochs,
-            },
-            sort_keys=True,
-        )
-    )
-    return 0
-
+        ddp=_ddp_requested(args); args.ddp=ddp; args.batch_size_is_global=_parse_bool_config_value(args.batch_size_is_global, default=True)
+        if int(args.batch_size)<1: parser.error('--batch_size must be >= 1.')
+        anal_epochs=_normalize_anal_epoch_list(args.anal_epoch_list, epochs=int(args.epochs))
+        dataset_token=str(args.dataset); prep_root,prepared_dataset_path=_resolve_prepared_paths(dataset_token,args.prep_root)
+        checkpoint_root=Path(args.checkpoint_root).expanduser().resolve(); metric_root=Path(args.metric_root).expanduser().resolve()
+        resume_checkpoint=None if args.resume_checkpoint is None else Path(args.resume_checkpoint).expanduser().resolve()
+        ctx=_build_ddp_context(args)
+        if _is_rank0(ctx):
+            if resume_checkpoint is None: _strict_prepare_checkpoint_dir(checkpoint_root)
+            else: checkpoint_root.mkdir(parents=True, exist_ok=True); _assert_clean_checkpoint_dir(checkpoint_root)
+            metric_root.mkdir(parents=True, exist_ok=True)
+        if ctx.enabled: torch.distributed.barrier()
+        _seed_everything(int(args.seed))
+        model_spec=canonicalize_model_token(args.model); bundle=select_training_view_for_model(resolve_dataset_bundle(dataset_token, prep_root=prep_root), model_family=model_spec.family)
+        per_rank_batch=_resolve_effective_batch_size(args, ctx)
+        train_sampler=None
+        if ctx.enabled:
+            train_sampler=DistributedSampler(bundle.train_dataset, num_replicas=2, rank=ctx.rank, shuffle=True, seed=int(args.seed), drop_last=False)
+        train_loader=make_loader(bundle.train_dataset,batch_size=per_rank_batch,shuffle=True,num_workers=int(args.num_workers),pin_memory=ctx.device.type=='cuda',seed=int(args.seed),sampler=train_sampler)
+        test_loader=None
+        if (not ctx.enabled) or _is_rank0(ctx):
+            test_loader=make_loader(bundle.test_dataset,batch_size=int(args.batch_size),shuffle=False,num_workers=int(args.num_workers),pin_memory=ctx.device.type=='cuda',seed=int(args.seed))
+        readout=build_readout(str(args.readout_mode), num_classes=bundle.num_classes, sequence_length=bundle.sequence_length, device=ctx.device)
+        model=build_snn_classifier(model_token=model_spec,input_dim=bundle.input_dim,sequence_length=bundle.sequence_length,num_classes=bundle.num_classes,input_shape=None,hidden_sizes=tuple(int(v) for v in bundle.default_hidden_sizes),arch_spec=str(args.hidden_spec).strip(),output_layer_overrides=readout.output_layer_overrides(),v_th=float(args.v_th)).to(ctx.device)
+        readout.to(ctx.device)
+        if resume_checkpoint is not None:
+            payload=torch.load(resume_checkpoint, map_location=ctx.device, weights_only=False)
+            model.load_state_dict(payload['state_dict'])
+            resume_epoch=int(payload['epoch'])
+            if _is_rank0(ctx): tqdm.write(f'[model_training] resumed from {resume_checkpoint} at epoch {resume_epoch}')
+        else:
+            resume_epoch=0
+        if ctx.enabled:
+            model=DDP(model, device_ids=[ctx.local_rank], output_device=ctx.local_rank)
+        optimizer=build_optimizer(model, lr=float(args.lr))
+        all_rows=[]
+        for epoch in range(resume_epoch+1, int(args.epochs)+1):
+            if train_sampler is not None: train_sampler.set_epoch(epoch)
+            train_metrics=train_one_epoch(model, train_loader, readout=readout, optimizer=optimizer, device=ctx.device, progress_desc=(f'train epoch {epoch}' if _is_rank0(ctx) else None), disable_progress=(ctx.enabled and (not _is_rank0(ctx))), regularization_lambda1=float(args.regularization_lambda1), regularization_lambda2=float(args.regularization_lambda2), regularization_signal=str(args.regularization_signal), regularization_curve_space=str(args.regularization_curve_space), regularization_curve_scale=str(args.regularization_curve_scale), regularization_centering=str(args.regularization_centering), regularization_reducer=str(args.regularization_reducer), regularization_distance_metric=str(args.regularization_distance_metric))
+            train_metrics=_reduce_train_metrics_ddp(train_metrics, ctx)
+            if epoch not in anal_epochs: continue
+            if ctx.enabled: torch.distributed.barrier()
+            if _is_rank0(ctx):
+                test_metrics=evaluate_one_epoch(model,test_loader,readout=readout,device=ctx.device,progress_desc=f'test epoch {epoch}',disable_progress=False)
+                tqdm.write(f'[model_training] epoch={epoch} train_loss={train_metrics.loss:.6f} test_loss={test_metrics.loss:.6f}')
+                payload=_checkpoint_payload(epoch=epoch, model=model, model_token=model_spec.canonical_token, readout_mode=str(args.readout_mode), dataset_token=dataset_token, prep_root=str(prep_root), prepared_dataset_path=str(prepared_dataset_path), seed=int(args.seed), training_args={'ddp':bool(args.ddp),'ddp_world_size':int(args.ddp_world_size),'batch_size_is_global':bool(args.batch_size_is_global),'batch_size':int(args.batch_size)}, metric_snapshot={'train_loss':float(train_metrics.loss),'test_loss':float(test_metrics.loss)})
+                _atomic_torch_save(payload, checkpoint_root / f'checkpoint_epoch_{epoch:06d}.pt')
+                all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='train', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=str(args.readout_mode), epoch=epoch, metric='loss', value=train_metrics.loss))
+            if ctx.enabled: torch.distributed.barrier()
+        if _is_rank0(ctx):
+            metrics_path=metric_root/'training_metrics.csv'; write_common_csv(metrics_path, all_rows); _assert_clean_checkpoint_dir(checkpoint_root)
+            print(json.dumps({'status':'ok','source_program':SOURCE_PROGRAM,'checkpoint_root':str(checkpoint_root),'metric_csv':str(metrics_path),'selected_epochs':anal_epochs}, sort_keys=True))
+        return 0
+    finally:
+        if ctx is not None and ctx.enabled and torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
 
 if __name__ == '__main__':
     raise SystemExit(main())

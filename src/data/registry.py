@@ -426,6 +426,7 @@ def make_loader(
     drop_last: bool = False,
     generator: torch.Generator | None = None,
     seed: int | None = None,
+    sampler: Any | None = None,
 ) -> DataLoader:
     """Build one project-standard ``DataLoader``.
 
@@ -447,13 +448,15 @@ def make_loader(
     loader_kwargs: dict[str, Any] = {
         'dataset': dataset,
         'batch_size': int(batch_size),
-        'shuffle': bool(shuffle),
+        'shuffle': False if sampler is not None else bool(shuffle),
         'num_workers': worker_count,
         'pin_memory': bool(pin_memory),
         'drop_last': bool(drop_last),
         'generator': resolved_generator,
         'worker_init_fn': seed_dataloader_worker,
     }
+    if sampler is not None:
+        loader_kwargs['sampler'] = sampler
     if worker_count > 0:
         loader_kwargs['persistent_workers'] = bool(resolved_policy['persistent_workers'])
         loader_kwargs['prefetch_factor'] = int(resolved_policy['prefetch_factor'])
