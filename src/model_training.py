@@ -59,7 +59,7 @@ def _is_rank0(ctx: DDPContext) -> bool: return bool(ctx.is_rank0)
 def build_arg_parser() -> argparse.ArgumentParser:
     p=argparse.ArgumentParser(description='Supervised model training entrypoint for selected checkpoint production.')
     p.add_argument('--dataset', required=True); p.add_argument('--prep_root', required=True); p.add_argument('--model', required=True); p.add_argument('--hidden_spec', required=True)
-    p.add_argument('--readout_mode', required=True, choices=('temporal_membrane','first_spike','max_rate','spikegru_max_over_time'))
+    p.add_argument('--readout_mode', required=True, choices=('temporal_membrane','final_membrane','first_spike','max_rate','spikegru_max_over_time'))
     p.add_argument('--epochs', required=True, type=int); p.add_argument('--batch_size', required=True, type=int); p.add_argument('--lr', required=True, type=float)
     p.add_argument('--num_workers', type=int, default=0); p.add_argument('--seed', required=True, type=int); p.add_argument('--gpu_index', type=int, default=0)
     p.add_argument('--ddp', default='false', help='2-GPU DDP 사용 여부(true/false).')

@@ -92,6 +92,42 @@ class TemporalMembraneReadout(ReadoutBase):
         return self.loss_fn(analysis.scores, target)
 
 
+class FinalMembraneReadout(ReadoutBase):
+    """Use the final output membrane vector as class logits.
+
+    scores[b, c] = output_membrane[b, -1, c]
+    """
+
+    mode_name = 'final_membrane'
+
+    def __init__(self) -> None:
+        """Initialize the instance with the provided configuration."""
+        super().__init__()
+        self.loss_fn = nn.CrossEntropyLoss()
+
+    def output_layer_overrides(self) -> dict[str, Any]:
+        """Use a non-spiking, non-resetting output membrane path."""
+        return {'emit_spike': False, 'reset_enabled': False}
+
+    def analyze_output_record(self, output_membrane: torch.Tensor, output_spike: torch.Tensor) -> ReadoutAnalysis:
+        """Decode class scores from only the final output membrane timestep."""
+        del output_spike
+        if output_membrane.ndim != 3:
+            raise ValueError('final_membrane requires output membrane shape (B,T,C).')
+        if int(output_membrane.shape[1]) < 1:
+            raise ValueError('final_membrane requires at least one timestep.')
+        return ReadoutAnalysis(scores=output_membrane[:, -1, :])
+
+    def predictions_from_analysis(self, analysis: ReadoutAnalysis) -> torch.Tensor:
+        """Return argmax class from final-timestep membrane logits."""
+        return analysis.scores.argmax(dim=1)
+
+    def loss_from_analysis(self, analysis: ReadoutAnalysis, target: torch.Tensor, *, training: bool) -> torch.Tensor:
+        """Use cross-entropy over final-timestep membrane logits."""
+        del training
+        return self.loss_fn(analysis.scores, target)
+
+
 class MaxRateReadout(ReadoutBase):
     """Use mean output firing rate as the class-score vector."""
 
@@ -172,7 +208,7 @@ class SpikeGRUMaxOverTimeReadout(ReadoutBase):
         return self.loss_fn(analysis.scores, target)
 
 
-_ALLOWED_READOUTS = {'temporal_membrane', 'first_spike', 'max_rate', 'spikegru_max_over_time'}
+_ALLOWED_READOUTS = {'temporal_membrane', 'final_membrane', 'first_spike', 'max_rate', 'spikegru_max_over_time'}
 
 
 def build_readout(mode: str, *, num_classes: int, sequence_length: int, device: torch.device | str) -> ReadoutBase:
@@ -183,6 +219,8 @@ def build_readout(mode: str, *, num_classes: int, sequence_length: int, device: 
         raise ValueError(f'Unsupported readout mode: {mode}')
     if token == 'temporal_membrane':
         return TemporalMembraneReadout(skip_initial_steps=0)
+    if token == 'final_membrane':
+        return FinalMembraneReadout()
     if token == 'max_rate':
         return MaxRateReadout()
     if token == 'spikegru_max_over_time':
@@ -191,6 +229,7 @@ def build_readout(mode: str, *, num_classes: int, sequence_length: int, device: 
 
 
 __all__ = [
+    'FinalMembraneReadout',
     'FirstSpikeReadout',
     'TemporalMembraneReadout',
     'MaxRateReadout',

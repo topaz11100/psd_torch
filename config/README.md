@@ -71,7 +71,7 @@
 | `prep_root` | prepared 루트 | string | 예 | manifest 포함 | `/data/prepared` |
 | `model` | 모델 token | string | 예 | 아래 "SRNN/모델 선택법" 참조 | `lif_soft_fixed`, `lif_R_soft_fixed` |
 | `hidden_spec` | hidden width 또는 CNN 고정값 | string | 예 | dense/SRNN: `256,128`, CNN: `-` | `256,128` |
-| `readout_mode` | readout 방식 | string | 예 | `temporal_membrane`, `first_spike`, `max_rate`, `spikegru_max_over_time` | `temporal_membrane` |
+| `readout_mode` | readout 방식 | string | 예 | `temporal_membrane`, `final_membrane`, `first_spike`, `max_rate`, `spikegru_max_over_time` | `temporal_membrane` |
 | `epochs` | 총 epoch 수 | integer | 예 | 1 이상 | `10` |
 | `batch_size` | 학습 batch 크기 | integer | 예 | 1 이상 | `128` |
 | `lr` | learning rate | number | 예 | 양수 | `0.001` |
@@ -123,13 +123,18 @@ Wrapper 파일 안의 `CONFIG_PATHS=(...)` 배열에 config를 직접 추가해 
 
 | 목적 | token 형식 | 예시 | `hidden_spec` | 권장 `readout_mode` |
 |---|---|---|---|---|
-| 일반 dense LIF | `lif_<soft|hard>_<fixed|train>` | `lif_soft_fixed` | `256,128` | `temporal_membrane`, `first_spike`, `max_rate` |
-| 일반 dense RF | `rf_<soft|hard>_<fixed|train>` | `rf_soft_fixed` | `256,128` | `temporal_membrane`, `first_spike`, `max_rate` |
-| SRNN/dense recurrent LIF | `lif_R_<soft|hard>_<fixed|train>` | `lif_R_soft_fixed` | `256,128` | `temporal_membrane`, `max_rate` |
-| SRNN/dense recurrent RF | `rf_R_<soft|hard>_<fixed|train>` | `rf_R_soft_fixed` | `256,128` | `temporal_membrane`, `max_rate` |
-| fixed CNN LIF | `<vgg11|resnet18>_lif_<soft|hard>_<fixed|train>` | `vgg11_lif_soft_fixed` | `-` | `temporal_membrane`, `max_rate` |
-| fixed CNN RF | `<vgg11|resnet18>_rf_<soft|hard>_<fixed|train>` | `resnet18_rf_soft_fixed` | `-` | `temporal_membrane`, `max_rate` |
+| 일반 dense LIF | `lif_<soft|hard>_<fixed|train>` | `lif_soft_fixed` | `256,128` | `temporal_membrane`, `final_membrane`, `first_spike`, `max_rate` |
+| 일반 dense RF | `rf_<soft|hard>_<fixed|train>` | `rf_soft_fixed` | `256,128` | `temporal_membrane`, `final_membrane`, `first_spike`, `max_rate` |
+| SRNN/dense recurrent LIF | `lif_R_<soft|hard>_<fixed|train>` | `lif_R_soft_fixed` | `256,128` | `temporal_membrane`, `final_membrane`, `max_rate` |
+| SRNN/dense recurrent RF | `rf_R_<soft|hard>_<fixed|train>` | `rf_R_soft_fixed` | `256,128` | `temporal_membrane`, `final_membrane`, `max_rate` |
+| fixed CNN LIF | `<vgg11|resnet18>_lif_<soft|hard>_<fixed|train>` | `vgg11_lif_soft_fixed` | `-` | `temporal_membrane`, `final_membrane`, `max_rate` |
+| fixed CNN RF | `<vgg11|resnet18>_rf_<soft|hard>_<fixed|train>` | `resnet18_rf_soft_fixed` | `-` | `temporal_membrane`, `final_membrane`, `max_rate` |
 | 보조 sequence 모델 | `spikegru`, `spikingssm`, `spikformer` | `spikegru` | 모델별 builder 계약 확인 | `spikegru_max_over_time`는 `spikegru` 전용 |
+
+Readout 의미:
+
+- `temporal_membrane`: output layer를 non-spiking/no-reset으로 두고 전체 시간의 `softmax(output_membrane)`를 누적한다.
+- `final_membrane`: output layer를 non-spiking/no-reset으로 두고 마지막 timestep의 `output_membrane[:, -1, :]`를 class logits로 사용한다.
 
 선택 순서:
 
