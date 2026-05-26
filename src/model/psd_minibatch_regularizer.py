@@ -88,11 +88,11 @@ def compute_fixed_pca_reference_bank(input_batch: torch.Tensor, hidden_records: 
             current_input = _to_maps(record.spike)
         return bank
 
-def compute_minibatch_psd_regularizer(input_batch: torch.Tensor, hidden_records: list[LayerRecord], variant: str, output_family: str, lambda_rep_1d: float, lambda_pca_1d: float, lambda_pca_mimo: float, pca_reference_bank: dict[str, FixedPCALayerReference] | None, *, curve_scale: str = 'raw', relation: str = 'adjacent') -> PSDRegularizationBreakdown:
+def compute_minibatch_psd_regularizer(input_batch: torch.Tensor, hidden_records: list[LayerRecord], variant: str, output_family: str, lambda_rep_1d: float, lambda_pca: float, pca_reference_bank: dict[str, FixedPCALayerReference] | None, *, curve_scale: str = 'raw', relation: str = 'adjacent') -> PSDRegularizationBreakdown:
     ref = input_batch.new_zeros(())
-    if float(lambda_rep_1d)==0.0 and float(lambda_pca_1d)==0.0 and float(lambda_pca_mimo)==0.0:
+    if float(lambda_rep_1d)==0.0 and float(lambda_pca)==0.0:
         return PSDRegularizationBreakdown(ref,ref,ref,ref,{},{},{},{'variant': str(variant), 'output_family': str(output_family), 'curve_scale': str(curve_scale), 'relation': str(relation)})
-    if (float(lambda_pca_1d)!=0.0 or float(lambda_pca_mimo)!=0.0) and not pca_reference_bank:
+    if float(lambda_pca)!=0.0 and not pca_reference_bank:
         raise ValueError('PCA lambda is nonzero but pca_reference_bank is missing.')
     rel = str(relation).strip().lower()
     if rel not in {'adjacent', 'input'}:
@@ -110,25 +110,23 @@ def compute_minibatch_psd_regularizer(input_batch: torch.Tensor, hidden_records:
             xc=representative_psd_minibatch_curve_from_maps_torch(x_rep,reducer='mean',centering=variant,scale=curve_scale,curve_space='exact')
             yc=representative_psd_minibatch_curve_from_maps_torch(y_rep,reducer='mean',centering=variant,scale=curve_scale,curve_space='exact')
             v=curve_pointwise_distance_torch(xc,yc,metric='centered_l2'); rep=rep+v; rep_parts[record.layer_name]=v
-        if float(lambda_pca_1d)!=0.0 or float(lambda_pca_mimo)!=0.0:
+        if float(lambda_pca)!=0.0:
             if record.layer_name not in pca_reference_bank: raise ValueError(f'Missing PCA layer key: {record.layer_name}')
             r=pca_reference_bank[record.layer_name]
             x_modes=apply_fixed_pca_basis(source_input, r.x_basis, r.x_centroid)
             y_modes=apply_fixed_pca_basis(y_maps, r.y_basis, r.y_centroid)
             d=min(int(x_modes.shape[1]), int(y_modes.shape[1]))
             x_modes=x_modes[:,:d,:]; y_modes=y_modes[:,:d,:]
-            if float(lambda_pca_1d)!=0.0:
-                v=curve_pointwise_distance_torch(
-                    representative_psd_minibatch_curve_from_maps_torch(x_modes,reducer='mean',centering=variant,scale=curve_scale,curve_space='exact'),
-                    representative_psd_minibatch_curve_from_maps_torch(y_modes,reducer='mean',centering=variant,scale=curve_scale,curve_space='exact'),
-                    metric='centered_l2')
-                pca1=pca1+v; pca1_parts[record.layer_name]=v
-            if float(lambda_pca_mimo)!=0.0:
-                _fx,mx=auto_spectral_matrix_from_mode_maps(x_modes); _fy,my=auto_spectral_matrix_from_mode_maps(y_modes)
-                v=torch.linalg.vector_norm((mx.real-my.real).reshape(-1),ord=2)
-                pcam=pcam+v; pcam_parts[record.layer_name]=v
+            v1=curve_pointwise_distance_torch(
+                representative_psd_minibatch_curve_from_maps_torch(x_modes,reducer='mean',centering=variant,scale=curve_scale,curve_space='exact'),
+                representative_psd_minibatch_curve_from_maps_torch(y_modes,reducer='mean',centering=variant,scale=curve_scale,curve_space='exact'),
+                metric='centered_l2')
+            pca1=pca1+v1; pca1_parts[record.layer_name]=v1
+            _fx,mx=auto_spectral_matrix_from_mode_maps(x_modes); _fy,my=auto_spectral_matrix_from_mode_maps(y_modes)
+            v2=torch.linalg.vector_norm((mx.real-my.real).reshape(-1),ord=2)
+            pcam=pcam+v2; pcam_parts[record.layer_name]=v2
         current_input=_to_maps(record.spike)
     rep = float(lambda_rep_1d)*rep
-    pca1 = float(lambda_pca_1d)*pca1
-    pcam = float(lambda_pca_mimo)*pcam
+    pca1 = float(lambda_pca)*pca1
+    pcam = float(lambda_pca)*pcam
     return PSDRegularizationBreakdown(rep+pca1+pcam, rep,pca1,pcam, rep_parts,pca1_parts,pcam_parts, {'variant': str(variant), 'output_family': str(output_family), 'curve_scale': str(curve_scale), 'relation': rel})

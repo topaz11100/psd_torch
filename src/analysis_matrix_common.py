@@ -15,6 +15,7 @@ from src.data.registry import make_loader
 from src.signal.psd_utils import trace_tensor_to_channel_major_maps
 from src.stat.probe_selection import (
     build_probe_index_bundle,
+    build_probe_scopes,
     dataset_sample_indices,
     dataset_targets,
     subset_from_indices,
@@ -172,14 +173,8 @@ def iter_matrix_probe_scopes(dataset: Any, *, split_name: str, seed: int) -> lis
     )
     sample_indices = dataset_sample_indices(dataset)
     scopes: list[ProbeScope] = [
-        ProbeScope(
-            scope=f'{split_name}_balanced_global',
-            probe_family='balanced_global',
-            label=None,
-            sample_role='balanced_mean',
-            sample_index=None,
-            subset=subset_from_indices(dataset, bundle.balanced_global),
-        )
+        ProbeScope(scope=s.scope, probe_family=s.probe_family, label=s.label, sample_role=s.sample_role, sample_index=s.sample_index, subset=s.subset)
+        for s in build_probe_scopes(dataset, split_name=split_name, bundle=bundle)
     ]
     try:
         label_single_indices = _label_single_indices_outside_balanced(

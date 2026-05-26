@@ -44,6 +44,16 @@ class ProbeIndexBundle:
     distribution_global_rounding_rule: str = _DISTRIBUTION_ROUNDING_RULE
 
 
+@dataclass(frozen=True)
+class ProbeScope:
+    scope: str
+    probe_family: str
+    label: int | None
+    subset: Subset
+    sample_role: str | None = None
+    sample_index: int | None = None
+
+
 def _stable_rank_key(*parts: object) -> int:
     """Internal helper for ``stable rank key`` in the ``probe_selection`` module."""
     digest = hashlib.sha1('|'.join(str(part) for part in parts).encode('utf-8')).hexdigest()
@@ -258,9 +268,21 @@ def iter_probe_subsets(dataset: Dataset, bundle: ProbeIndexBundle) -> Iterable[t
         yield 'same_label', int(label), subset_from_indices(dataset, indices)
 
 
+def build_probe_scopes(dataset: Dataset, *, split_name: str, bundle: ProbeIndexBundle) -> list[ProbeScope]:
+    scopes: list[ProbeScope] = [
+        ProbeScope(scope=f'{split_name}_balanced_global', probe_family='balanced_global', label=None, subset=subset_from_indices(dataset, bundle.balanced_global), sample_role='balanced_mean'),
+        ProbeScope(scope=f'{split_name}_distribution_global', probe_family='distribution_global', label=None, subset=subset_from_indices(dataset, bundle.distribution_global), sample_role='distribution_mean'),
+    ]
+    for label, indices in sorted(bundle.same_label.items(), key=lambda item: item[0]):
+        scopes.append(ProbeScope(scope=f'{split_name}_same_label_label_{int(label)}', probe_family='same_label', label=int(label), subset=subset_from_indices(dataset, indices), sample_role='same_label_mean'))
+    return scopes
+
+
 __all__ = [
     'ProbeIndexBundle',
+    'ProbeScope',
     'build_probe_index_bundle',
+    'build_probe_scopes',
     'dataset_sample_indices',
     'dataset_targets',
     'iter_probe_subsets',

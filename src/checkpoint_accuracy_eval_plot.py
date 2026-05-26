@@ -49,7 +49,7 @@ from src.data.registry import make_loader, resolve_dataset_bundle  # noqa: E402
 from src.model.model_registry import ModelSpec, canonicalize_model_token  # noqa: E402
 from src.model.snn_builder import build_snn_classifier  # noqa: E402
 from src.model.training import EpochMetrics, evaluate_one_epoch  # noqa: E402
-from src.readout.readout import build_readout  # noqa: E402
+from src.readout.readout import build_readout, canonicalize_readout_mode  # noqa: E402
 from src.util.config import load_json  # noqa: E402
 from src.util.csv_schema import common_row, write_common_csv  # noqa: E402
 
@@ -272,7 +272,7 @@ def _payload_readout_mode(payload: Mapping[str, Any]) -> str:
     mode = str(readout_config.get("mode") or readout_config.get("readout_mode") or "").strip()
     if not mode:
         raise ValueError("Checkpoint readout_config is missing mode.")
-    return mode
+    return canonicalize_readout_mode(mode)
 
 
 def _build_model_from_checkpoint(payload: Mapping[str, Any], *, device: torch.device):

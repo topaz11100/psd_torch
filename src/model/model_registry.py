@@ -7,6 +7,7 @@ import re
 
 
 _RESETTABLE_FAMILIES = {
+    'if': 'if',
     'lif': 'lif',
     'rf': 'rf',
 }
@@ -28,7 +29,8 @@ _THRESHOLD_SUFFIX_TO_TRAINABLE = {
 }
 
 _ALLOWED_LIF_RESET_SUFFIXES = {'soft', 'hard'}
-_ALLOWED_RF_RESET_SUFFIXES = {'soft', 'hard'}
+_ALLOWED_RF_RESET_SUFFIXES = {'soft', 'hard', 'none'}
+_ALLOWED_IF_RESET_SUFFIXES = {'soft', 'hard'}
 _ALLOWED_CNN_RF_RESET_SUFFIXES = {'soft', 'hard'}
 _ALLOWED_THRESHOLD_SUFFIXES = frozenset(_THRESHOLD_SUFFIX_TO_TRAINABLE)
 
@@ -81,6 +83,8 @@ def _require_reset_suffix(*, family: str, reset_suffix: str | None, token: str) 
 
     if family in {'lif', 'cnn_lif'}:
         allowed = _ALLOWED_LIF_RESET_SUFFIXES
+    elif family == 'if':
+        allowed = _ALLOWED_IF_RESET_SUFFIXES
     elif family == 'rf':
         allowed = _ALLOWED_RF_RESET_SUFFIXES
     elif family == 'cnn_rf':

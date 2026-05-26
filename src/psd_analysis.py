@@ -50,12 +50,12 @@ def _load_runtime_dependencies() -> None:
     global np, torch, tqdm, seed_everything
     global canonicalize_model_input_batch
     global dataset_for_view, make_loader, resolve_dataset_bundle, select_training_view_for_model
-    global ModelSpec, canonicalize_model_token, build_snn_classifier, build_readout
+    global ModelSpec, canonicalize_model_token, build_snn_classifier, build_readout, canonicalize_readout_mode
     global compute_family_spectral_summary, curve_axis_from_summary, curve_pointwise_distance
     global pair_distance_from_summaries, representative_curve_from_summary
     global trace_tensor_to_channel_major_maps, pca_dim_from_cli_vector, compute_fixed_pca_basis, apply_fixed_pca_basis
     global auto_spectral_matrix_from_mode_maps, cross_spectral_matrix_from_mode_maps
-    global build_probe_index_bundle, dataset_targets, subset_from_indices
+    global build_probe_index_bundle, build_probe_scopes, dataset_targets, subset_from_indices
     import numpy as _np
     import torch as _torch
     from tqdm import tqdm as _tqdm
@@ -64,7 +64,7 @@ def _load_runtime_dependencies() -> None:
     from src.data.registry import dataset_for_view as _dataset_for_view, make_loader as _make_loader, resolve_dataset_bundle as _resolve_dataset_bundle, select_training_view_for_model as _select_training_view_for_model
     from src.model.model_registry import ModelSpec as _ModelSpec, canonicalize_model_token as _canonicalize_model_token
     from src.model.snn_builder import build_snn_classifier as _build_snn_classifier
-    from src.readout.readout import build_readout as _build_readout
+    from src.readout.readout import build_readout as _build_readout, canonicalize_readout_mode as _canonicalize_readout_mode
     from src.signal.family_spectral_analysis import compute_family_spectral_summary as _compute_family_spectral_summary, curve_axis_from_summary as _curve_axis_from_summary, curve_pointwise_distance as _curve_pointwise_distance, pair_distance_from_summaries as _pair_distance_from_summaries, representative_curve_from_summary as _representative_curve_from_summary
     from src.signal.psd_utils import (
         trace_tensor_to_channel_major_maps as _trace_tensor_to_channel_major_maps,
@@ -74,7 +74,7 @@ def _load_runtime_dependencies() -> None:
         auto_spectral_matrix_from_mode_maps as _auto_spectral_matrix_from_mode_maps,
         cross_spectral_matrix_from_mode_maps as _cross_spectral_matrix_from_mode_maps,
     )
-    from src.stat.probe_selection import build_probe_index_bundle as _build_probe_index_bundle, dataset_targets as _dataset_targets, subset_from_indices as _subset_from_indices
+    from src.stat.probe_selection import build_probe_index_bundle as _build_probe_index_bundle, build_probe_scopes as _build_probe_scopes, dataset_targets as _dataset_targets, subset_from_indices as _subset_from_indices
     np = _np
     torch = _torch
     tqdm = _tqdm
@@ -88,6 +88,7 @@ def _load_runtime_dependencies() -> None:
     canonicalize_model_token = _canonicalize_model_token
     build_snn_classifier = _build_snn_classifier
     build_readout = _build_readout
+    canonicalize_readout_mode = _canonicalize_readout_mode
     compute_family_spectral_summary = _compute_family_spectral_summary
     curve_axis_from_summary = _curve_axis_from_summary
     curve_pointwise_distance = _curve_pointwise_distance
@@ -99,7 +100,7 @@ def _load_runtime_dependencies() -> None:
     apply_fixed_pca_basis = _apply_fixed_pca_basis
     auto_spectral_matrix_from_mode_maps = _auto_spectral_matrix_from_mode_maps
     cross_spectral_matrix_from_mode_maps = _cross_spectral_matrix_from_mode_maps
-    build_probe_index_bundle = _build_probe_index_bundle
+    build_probe_index_bundle = _build_probe_index_bundle; build_probe_scopes = _build_probe_scopes
     dataset_targets = _dataset_targets
     subset_from_indices = _subset_from_indices
 
@@ -122,6 +123,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--pca_ref_epoch', type=int, default=None)
     parser.add_argument('--pca_min_train_accuracy', type=float, default=0.0)
     parser.add_argument('--pca_dim_per_layer', nargs='*', default=None)
+    parser.add_argument('--psd_curve_tokens', nargs='*', default=None)
+    parser.add_argument('--analysis_userbin_count', type=int, default=None)
+    parser.add_argument('--analysis_userbin_edges', nargs='*', default=None)
+    parser.add_argument('--analysis_userbin_reducer', default=None)
+    parser.add_argument('--analysis_userbin_width', type=float, default=None)
     return parser
 
 
@@ -278,6 +284,7 @@ def _build_model_from_checkpoint(payload: Mapping[str, Any], *, device: torch.de
     mode = str(readout_config.get('mode') or readout_config.get('readout_mode') or '')
     if not mode:
         raise ValueError('Checkpoint readout_config is missing mode.')
+    mode = canonicalize_readout_mode(mode)
     input_dim = int(model_config['input_dim'])
     sequence_length = int(model_config['sequence_length'])
     num_classes = int(model_config['num_classes'])
@@ -346,12 +353,8 @@ def _probe_subsets(dataset: Any, *, split_name: str, seed: int):
         distribution_global_min_class_n=quota,
     )
 
-    yield (
-        'balanced_global',
-        'balanced_global',
-        None,
-        subset_from_indices(dataset, bundle.balanced_global),
-    )
+    for scope in build_probe_scopes(dataset, split_name=split_name, bundle=bundle):
+        yield (scope.scope, scope.probe_family, scope.label, scope.subset)
 
 def _trace_to_cpu_maps(tensor: torch.Tensor) -> torch.Tensor:
     if not isinstance(tensor, torch.Tensor):

@@ -2,7 +2,7 @@
   "element_psd": {
     "checkpoint": "/ABS/PATH/TO/output/checkpoints",
     "dataset": "mnist",
-    "prep_root": "/ABS/PATH/TO/prepared",
+    "prep_root": "/home/yongokhan/바탕화면/prep_data",
     "output_root": "/ABS/PATH/TO/output/element_psd",
     "anal_batch": 128,
     "gpu_index": 0,
