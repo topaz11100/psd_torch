@@ -248,8 +248,7 @@ def train_one_batch(
     regularization_reducer: str = 'mean',
     regularization_distance_metric: str = 'centered_l2',
     lambda_psd_rep_1d: float = 0.0,
-    lambda_psd_pca_1d: float = 0.0,
-    lambda_psd_pca_mimo: float = 0.0,
+    lambda_psd_pca: float = 0.0,
     psd_reg_variant: str = 'raw',
     psd_reg_output_family: str = 'spike',
     psd_reg_curve_scale: str = 'raw',
@@ -260,7 +259,7 @@ def train_one_batch(
     device_inputs = _move_inputs_to_device(model, inputs, device=device)
     device_target = _move_target_to_device(target, device=device)
     capture_hidden = _regularization_enabled(regularization_lambda1, regularization_lambda2) or any(
-        float(v) != 0.0 for v in (lambda_psd_rep_1d, lambda_psd_pca_1d, lambda_psd_pca_mimo)
+        float(v) != 0.0 for v in (lambda_psd_rep_1d, lambda_psd_pca)
     )
 
     optimizer.zero_grad(set_to_none=True)
@@ -285,8 +284,7 @@ def train_one_batch(
         variant=str(psd_reg_variant),
         output_family=str(psd_reg_output_family),
         lambda_rep_1d=float(lambda_psd_rep_1d),
-        lambda_pca_1d=float(lambda_psd_pca_1d),
-        lambda_pca_mimo=float(lambda_psd_pca_mimo),
+        lambda_pca=float(lambda_psd_pca),
         pca_reference_bank=pca_reference_bank,
         curve_scale=str(psd_reg_curve_scale),
         relation=str(psd_reg_relation),
@@ -358,8 +356,7 @@ def train_one_epoch(
     regularization_reducer: str = 'mean',
     regularization_distance_metric: str = 'centered_l2',
     lambda_psd_rep_1d: float = 0.0,
-    lambda_psd_pca_1d: float = 0.0,
-    lambda_psd_pca_mimo: float = 0.0,
+    lambda_psd_pca: float = 0.0,
     psd_reg_variant: str = 'raw',
     psd_reg_output_family: str = 'spike',
     psd_reg_curve_scale: str = 'raw',
@@ -395,8 +392,7 @@ def train_one_epoch(
             regularization_reducer=regularization_reducer,
             regularization_distance_metric=regularization_distance_metric,
             lambda_psd_rep_1d=lambda_psd_rep_1d,
-            lambda_psd_pca_1d=lambda_psd_pca_1d,
-            lambda_psd_pca_mimo=lambda_psd_pca_mimo,
+            lambda_psd_pca=lambda_psd_pca,
             psd_reg_variant=psd_reg_variant,
             psd_reg_output_family=psd_reg_output_family,
             psd_reg_curve_scale=psd_reg_curve_scale,

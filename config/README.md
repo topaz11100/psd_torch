@@ -71,7 +71,7 @@
 | `prep_root` | prepared 루트 | string | 예 | manifest 포함 | `/data/prepared` |
 | `model` | 모델 token | string | 예 | 아래 "SRNN/모델 선택법" 참조 | `lif_soft_fixed`, `lif_R_soft_fixed` |
 | `hidden_spec` | hidden width 또는 CNN 고정값 | string | 예 | dense/SRNN: `256,128`, CNN: `-` | `256,128` |
-| `readout_mode` | readout 방식 | string | 예 | `temporal_membrane`, `final_membrane`, `first_spike`, `max_rate`, `spikegru_max_over_time` | `temporal_membrane` |
+| `readout_mode` | readout 방식 | string | 예 | `temporal_membrane`, `final_membrane`, `first_spike`, `max_fire`, `spikegru_max_over_time` | `temporal_membrane` |
 | `epochs` | 총 epoch 수 | integer | 예 | 1 이상 | `10` |
 | `batch_size` | 학습 batch 크기 | integer | 예 | 1 이상 | `128` |
 | `lr` | learning rate | number | 예 | 양수 | `0.001` |
@@ -123,18 +123,20 @@ Wrapper 파일 안의 `CONFIG_PATHS=(...)` 배열에 config를 직접 추가해 
 
 | 목적 | token 형식 | 예시 | `hidden_spec` | 권장 `readout_mode` |
 |---|---|---|---|---|
-| 일반 dense LIF | `lif_<soft|hard>_<fixed|train>` | `lif_soft_fixed` | `256,128` | `temporal_membrane`, `final_membrane`, `first_spike`, `max_rate` |
-| 일반 dense RF | `rf_<soft|hard>_<fixed|train>` | `rf_soft_fixed` | `256,128` | `temporal_membrane`, `final_membrane`, `first_spike`, `max_rate` |
-| SRNN/dense recurrent LIF | `lif_R_<soft|hard>_<fixed|train>` | `lif_R_soft_fixed` | `256,128` | `temporal_membrane`, `final_membrane`, `max_rate` |
-| SRNN/dense recurrent RF | `rf_R_<soft|hard>_<fixed|train>` | `rf_R_soft_fixed` | `256,128` | `temporal_membrane`, `final_membrane`, `max_rate` |
-| fixed CNN LIF | `<vgg11|resnet18>_lif_<soft|hard>_<fixed|train>` | `vgg11_lif_soft_fixed` | `-` | `temporal_membrane`, `final_membrane`, `max_rate` |
-| fixed CNN RF | `<vgg11|resnet18>_rf_<soft|hard>_<fixed|train>` | `resnet18_rf_soft_fixed` | `-` | `temporal_membrane`, `final_membrane`, `max_rate` |
+| 일반 dense LIF | `lif_<soft|hard>_<fixed|train>` | `lif_soft_fixed` | `256,128` | `temporal_membrane`, `final_membrane`, `first_spike`, `max_fire` |
+| 일반 dense RF | `rf_<soft|hard>_<fixed|train>` | `rf_soft_fixed` | `256,128` | `temporal_membrane`, `final_membrane`, `first_spike`, `max_fire` |
+| SRNN/dense recurrent LIF | `lif_R_<soft|hard>_<fixed|train>` | `lif_R_soft_fixed` | `256,128` | `temporal_membrane`, `final_membrane`, `max_fire` |
+| SRNN/dense recurrent RF | `rf_R_<soft|hard>_<fixed|train>` | `rf_R_soft_fixed` | `256,128` | `temporal_membrane`, `final_membrane`, `max_fire` |
+| fixed CNN LIF | `<vgg11|resnet18>_lif_<soft|hard>_<fixed|train>` | `vgg11_lif_soft_fixed` | `-` | `temporal_membrane`, `final_membrane`, `max_fire` |
+| fixed CNN RF | `<vgg11|resnet18>_rf_<soft|hard>_<fixed|train>` | `resnet18_rf_soft_fixed` | `-` | `temporal_membrane`, `final_membrane`, `max_fire` |
 | 보조 sequence 모델 | `spikegru`, `spikingssm`, `spikformer` | `spikegru` | 모델별 builder 계약 확인 | `spikegru_max_over_time`는 `spikegru` 전용 |
 
 Readout 의미:
 
-- `temporal_membrane`: output layer를 non-spiking/no-reset으로 두고 전체 시간의 `softmax(output_membrane)`를 누적한다.
+- `temporal_membrane`: output layer를 non-spiking/no-reset으로 두고 전체 시간의 `output_membrane` logits를 시간축 평균해 class logits로 사용한다.
 - `final_membrane`: output layer를 non-spiking/no-reset으로 두고 마지막 timestep의 `output_membrane[:, -1, :]`를 class logits로 사용한다.
+- `max_fire`: output spike를 시간축 합산한 class별 발화횟수(`sum_t spike`)를 logits로 사용한다.
+- `max_rate`는 구형 checkpoint/CLI 호환을 위한 deprecated alias이며 새 config 예시에서는 사용하지 않는다.
 
 선택 순서:
 
@@ -229,14 +231,14 @@ PCA 분석은 row/channel/neuron 축을 고정 basis로 투영해 mode 신호를
 | 인수 | 역할 | 자료형 | 허용값/범위 | 예시 |
 |---|---|---:|---|---|
 | `lambda_psd_rep_1d` | mean/median 대표 PSD penalty 계수 | number | 임의 실수, `0.0`이면 비활성 | `0.1` |
-| `lambda_psd_pca_1d` | PCA mode별 1-D PSD penalty 계수 | number | 임의 실수, `0.0`이면 비활성 | `0.05` |
-| `lambda_psd_pca_mimo` | PCA mode cross-spectrum/MIMO penalty 계수 | number | 임의 실수, `0.0`이면 비활성 | `0.01` |
+| `lambda_psd_pca` | PCA mode별 1-D PSD penalty 계수 | number | 임의 실수, `0.0`이면 비활성 | `0.05` |
+| `lambda_psd_pca` | PCA mode cross-spectrum/MIMO penalty 계수 | number | 임의 실수, `0.0`이면 비활성 | `0.01` |
 | `psd_reg_variant` | penalty에 사용할 신호 변형 | string | `raw`, `centered` | `centered` |
 | `psd_reg_output_family` | hidden 출력 family | string | `spike`, `membrane` | `spike` |
 | `pca_dim_per_layer` | fixed PCA reference bank 차원 | integer array | 양의 정수 배열 | `[4]` |
 
 PCA 규제를 켜면 학습 시작 전에 no-grad reference batch로 layer별 `x_basis/y_basis`와 centroid를 고정하고, 학습 minibatch에서는 그 basis만 적용한다. basis 자체는 penalty gradient 대상이 아니다.
-현재 DDP(`ddp=true`)에서 PCA PSD 규제(`lambda_psd_pca_1d` 또는 `lambda_psd_pca_mimo`)는 broadcast 동기화 미구현으로 fail-fast(`ValueError`)로 차단한다.
+현재 DDP(`ddp=true`)에서 PCA PSD 규제(`lambda_psd_pca` 또는 `lambda_psd_pca`)는 broadcast 동기화 미구현으로 fail-fast(`ValueError`)로 차단한다.
 
 ## `plotting.json`
 
@@ -281,15 +283,18 @@ PCA 규제를 켜면 학습 시작 전에 no-grad reference batch로 layer별 `x
 
 `model_training`에서 hidden dense layer 전용 constraint를 지원한다.
 
-- `constraint_mode`: `none`, `clip`, `structure`, `clipstructure` (`clip_structure` alias)
-- `alpha_clip_edges` (`lif_alpha_clip_edges` alias): LIF clip 경계, `[0,1]` strictly increasing
-- `w_clip_edges` (`rf_frequency_clip_edges` alias): RF frequency clip 경계, `[0,0.5]` strictly increasing
+- `scenario_mode`: `none`, `clip`, `structure`, `clipstructure` (`clip_structure` alias)
+- `alpha_clip_edges` (`lif_alpha_clip_edges` alias): **layer/group/bounds 3D** LIF clip 경계 (`[[[lo, hi], ...], ...]`, 각 bounds는 `[0,1]`)
+- `w_clip_edges` (`rf_frequency_clip_edges` alias): **layer/group/bounds 3D** RF clip 경계 (`[[[lo, hi], ...], ...]`, 각 bounds는 `[0,0.5]`)
   - unit: `normalized_frequency_cyc_per_sample_nyquist_0p5`
-- `band_neuron_ends`: hidden layer별 endpoint CSV (예: `"4,8"`)
+- `band_edge`: hidden layer별 cumulative boundary list (`null` 또는 `[b1, b2, ...]`)
 - `tear` (`constraint_tear` alias): 1-based hidden index, 해당 layer부터 constraint 적용
 
 동작 규칙:
 - output layer에는 constraint를 적용하지 않는다.
+- `band_edge=null`이면 해당 layer에서 group 수에 맞춰 뉴런을 균등 분할한다.
+- `band_edge=[5,10]`이면 그룹은 `[0,5)`, `[5,10)`, `[10,width)`로 나뉜다.
+- `clipstructure`에서는 clip bounds는 모든 hidden layer에 적용되고, structure mask만 `tear` 이후 hidden layer부터 적용된다.
 - structure mode에서 첫 hidden layer raw input projection에는 feedforward mask를 적용하지 않는다.
 - recurrent 모델은 첫 hidden layer에도 recurrent mask를 적용할 수 있다.
 - RF damping magnitude는 v1에서 CLI clip 대상이 아니다.
@@ -299,7 +304,7 @@ v1 지원 family:
 
 v1 미지원 family:
 - `tc_lif`, `ts_lif`, `dh_snn`, `d_rf`, `spikegru`, `spikformer`, `spikingssm`, `cnn_lif/cnn_rf/vgg/resnet`, conv/residual arch
-- 미지원 family에서 `constraint_mode != none`이면 `ValueError`를 발생시킨다.
+- 미지원 family에서 `scenario_mode != none`이면 `ValueError`를 발생시킨다.
 
 resume 정책:
 - checkpoint의 `constraint_metadata`와 현재 실행 constraint mode가 다르면 fail-fast(`ValueError`).

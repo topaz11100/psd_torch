@@ -36,7 +36,7 @@ def _load_runtime_dependencies() -> None:
     global dataset_for_view, make_loader, resolve_dataset_bundle
     global curve_axis_from_summary
     global apply_centering, exact_periodogram_from_maps, power_to_db, tensor_to_channel_major_maps_explicit
-    global build_probe_index_bundle, dataset_targets, subset_from_indices
+    global build_probe_index_bundle, build_probe_scopes, dataset_targets, subset_from_indices
 
     import numpy as _np
     import torch as _torch
@@ -50,7 +50,7 @@ def _load_runtime_dependencies() -> None:
     from src.signal.psd_utils import exact_periodogram_from_maps as _exact_periodogram_from_maps
     from src.signal.psd_utils import power_to_db as _power_to_db
     from src.signal.psd_utils import tensor_to_channel_major_maps_explicit as _tensor_to_channel_major_maps_explicit
-    from src.stat.probe_selection import build_probe_index_bundle as _build_probe_index_bundle
+    from src.stat.probe_selection import build_probe_index_bundle as _build_probe_index_bundle, build_probe_scopes as _build_probe_scopes
     from src.stat.probe_selection import dataset_targets as _dataset_targets
     from src.stat.probe_selection import subset_from_indices as _subset_from_indices
     from src.util.random import seed_everything as _seed_everything
@@ -66,7 +66,7 @@ def _load_runtime_dependencies() -> None:
     exact_periodogram_from_maps = _exact_periodogram_from_maps
     power_to_db = _power_to_db
     tensor_to_channel_major_maps_explicit = _tensor_to_channel_major_maps_explicit
-    build_probe_index_bundle = _build_probe_index_bundle
+    build_probe_index_bundle = _build_probe_index_bundle; build_probe_scopes = _build_probe_scopes
     dataset_targets = _dataset_targets
     subset_from_indices = _subset_from_indices
     seed_everything = _seed_everything
@@ -88,6 +88,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--seed', required=True, type=int)
     parser.add_argument('--config', default=None, help='JSON 설정 파일 경로(.json)')
     parser.add_argument('--num_workers', type=int, default=0)
+    parser.add_argument('--userbin_edges', nargs='*', default=None)
+    parser.add_argument('--userbin_width', type=float, default=None)
+    parser.add_argument('--userbin_count', type=int, default=None)
+    parser.add_argument('--userbin_reducer', default=None)
     return parser
 
 
@@ -158,12 +162,8 @@ def _probe_subsets(dataset: Any, *, split_name: str, seed: int):
         distribution_global_min_class_n=quota,
     )
 
-    yield (
-        'balanced_global',
-        'balanced_global',
-        None,
-        subset_from_indices(dataset, bundle.balanced_global),
-    )
+    for scope in build_probe_scopes(dataset, split_name=split_name, bundle=bundle):
+        yield (scope.scope, scope.probe_family, scope.label, scope.subset)
 
 
 def _value_unit_for_power_scale(scale: str) -> str:

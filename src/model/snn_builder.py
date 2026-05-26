@@ -25,6 +25,7 @@ from src.model.constraints import ConstraintConfig, LayerConstraint, layer_const
 from src.model.model_registry import ModelSpec, canonicalize_model_token
 from src.neurons.DH_SNN_neuron import DHSNNLayer
 from src.neurons.D_RF_neuron import DRFLayer
+from src.neurons.IF_neuron import IFLayer
 from src.neurons.LIF_neuron import LIFLayer
 from src.neurons.RF_neuron import RFLayer
 from src.neurons.TC_LIF_neuron import TCLIFLayer
@@ -658,7 +659,7 @@ def _resolved_model_reset_mode(spec: ModelSpec, *, family: str) -> str:
     mode = spec.reset_mode
     if mode is None:
         raise ValueError(f'Model family {family!r} requires an explicit reset mode.')
-    if family in {'lif', 'cnn_lif'} and mode == 'no_reset':
+    if family in {'lif', 'if', 'cnn_lif'} and mode == 'no_reset':
         raise ValueError('LIF-family models do not support no_reset suffix.')
     return str(mode)
 
@@ -679,6 +680,20 @@ def _build_dense_family_layer(
     output_overrides: dict[str, Any],
     layer_constraint: LayerConstraint | None = None,
 ) -> nn.Module:
+    if spec.family == 'if':
+        lc = layer_constraint if layer_constraint is not None else LayerConstraint()
+        return IFLayer(
+            input_size,
+            output_size,
+            recurrent=spec.recurrent,
+            v_threshold=v_th,
+            trainable_threshold=bool(spec.trainable_threshold),
+            input_mask=lc.input_mask,
+            recurrent_mask=lc.recurrent_mask,
+            reset_mode=_resolved_model_reset_mode(spec, family='if'),
+            emit_spike=output_overrides.get('emit_spike', True),
+            reset_enabled=_resolved_reset_enabled(spec, output_overrides=output_overrides),
+        )
     if spec.family == 'lif':
         lc = layer_constraint if layer_constraint is not None else LayerConstraint()
         return LIFLayer(

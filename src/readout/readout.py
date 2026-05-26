@@ -46,9 +46,9 @@ class ReadoutBase(nn.Module):
 
 
 class TemporalMembraneReadout(ReadoutBase):
-    """Use DH-SNN SHD-style temporal membrane decoding.
+    """Use time-averaged output-membrane logits.
 
-    scores[b, c] = sum_t softmax(output_membrane[b, t, :])[c]
+    scores[b, c] = mean_t output_membrane[b, t, c]
     """
 
     mode_name = 'temporal_membrane'
@@ -79,8 +79,7 @@ class TemporalMembraneReadout(ReadoutBase):
             )
 
         membrane_window = output_membrane[:, start:, :]
-        temporal_probs = torch.softmax(membrane_window, dim=2)
-        return ReadoutAnalysis(scores=temporal_probs.sum(dim=1))
+        return ReadoutAnalysis(scores=membrane_window.mean(dim=1))
 
     def predictions_from_analysis(self, analysis: ReadoutAnalysis) -> torch.Tensor:
         """Return argmax class after temporal probability accumulation."""
@@ -128,10 +127,10 @@ class FinalMembraneReadout(ReadoutBase):
         return self.loss_fn(analysis.scores, target)
 
 
-class MaxRateReadout(ReadoutBase):
-    """Use mean output firing rate as the class-score vector."""
+class MaxFireReadout(ReadoutBase):
+    """Use output firing count as the class-score vector."""
 
-    mode_name = 'max_rate'
+    mode_name = 'max_fire'
 
     def __init__(self) -> None:
         """Initialize the instance with the provided configuration."""
@@ -141,7 +140,7 @@ class MaxRateReadout(ReadoutBase):
     def analyze_output_record(self, output_membrane: torch.Tensor, output_spike: torch.Tensor) -> ReadoutAnalysis:
         """Handle ``analyze output record`` for the ``readout`` module."""
         del output_membrane
-        return ReadoutAnalysis(scores=output_spike.mean(dim=1))
+        return ReadoutAnalysis(scores=output_spike.sum(dim=1))
 
     def predictions_from_analysis(self, analysis: ReadoutAnalysis) -> torch.Tensor:
         """Handle ``predictions from analysis`` for the ``readout`` module."""
@@ -208,21 +207,29 @@ class SpikeGRUMaxOverTimeReadout(ReadoutBase):
         return self.loss_fn(analysis.scores, target)
 
 
-_ALLOWED_READOUTS = {'temporal_membrane', 'final_membrane', 'first_spike', 'max_rate', 'spikegru_max_over_time'}
+_ALLOWED_READOUTS = {'temporal_membrane', 'final_membrane', 'first_spike', 'max_fire', 'max_rate', 'spikegru_max_over_time'}
+
+
+def canonicalize_readout_mode(mode: str) -> str:
+    """Normalize readout mode token to canonical form."""
+    token = str(mode).strip().lower()
+    if token == 'max_rate':
+        return 'max_fire'
+    if token in _ALLOWED_READOUTS:
+        return token
+    raise ValueError(f'Unsupported readout mode: {mode}')
 
 
 def build_readout(mode: str, *, num_classes: int, sequence_length: int, device: torch.device | str) -> ReadoutBase:
     """Instantiate one official readout mode."""
 
-    token = str(mode).strip().lower()
-    if token not in _ALLOWED_READOUTS:
-        raise ValueError(f'Unsupported readout mode: {mode}')
+    token = canonicalize_readout_mode(mode)
     if token == 'temporal_membrane':
         return TemporalMembraneReadout(skip_initial_steps=0)
     if token == 'final_membrane':
         return FinalMembraneReadout()
-    if token == 'max_rate':
-        return MaxRateReadout()
+    if token == 'max_fire':
+        return MaxFireReadout()
     if token == 'spikegru_max_over_time':
         return SpikeGRUMaxOverTimeReadout()
     return FirstSpikeReadout(num_classes=num_classes, sequence_length=sequence_length, device=device)
@@ -232,9 +239,10 @@ __all__ = [
     'FinalMembraneReadout',
     'FirstSpikeReadout',
     'TemporalMembraneReadout',
-    'MaxRateReadout',
+    'MaxFireReadout',
     'ReadoutAnalysis',
     'SpikeGRUMaxOverTimeReadout',
     'ReadoutBase',
+    'canonicalize_readout_mode',
     'build_readout',
 ]

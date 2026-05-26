@@ -34,7 +34,7 @@ class DDPContext:
 
 def _load_runtime_dependencies() -> None:
     global torch, tqdm, _seed_everything, make_loader, resolve_dataset_bundle, select_training_view_for_model
-    global ModelSpec, canonicalize_model_token, build_optimizer, evaluate_one_epoch, train_one_epoch, build_snn_classifier, build_readout, DistributedSampler, DDP
+    global ModelSpec, canonicalize_model_token, build_optimizer, evaluate_one_epoch, train_one_epoch, build_snn_classifier, build_readout, canonicalize_readout_mode, DistributedSampler, DDP
     import torch as _torch
     from tqdm import tqdm as _tqdm
     from torch.nn.parallel import DistributedDataParallel as _DDP
@@ -43,12 +43,12 @@ def _load_runtime_dependencies() -> None:
     from src.model.model_registry import ModelSpec as _ModelSpec, canonicalize_model_token as _canonicalize_model_token
     from src.model.training import build_optimizer as _build_optimizer, evaluate_one_epoch as _evaluate_one_epoch, train_one_epoch as _train_one_epoch
     from src.model.snn_builder import build_snn_classifier as _build_snn_classifier
-    from src.readout.readout import build_readout as _build_readout
+    from src.readout.readout import build_readout as _build_readout, canonicalize_readout_mode as _canonicalize_readout_mode
     from src.util.random import seed_everything as _runtime_seed_everything
     torch=_torch; tqdm=_tqdm; DDP=_DDP; DistributedSampler=_DistributedSampler
     make_loader=_make_loader; resolve_dataset_bundle=_resolve_dataset_bundle; select_training_view_for_model=_select_training_view_for_model
     ModelSpec=_ModelSpec; canonicalize_model_token=_canonicalize_model_token; build_optimizer=_build_optimizer; evaluate_one_epoch=_evaluate_one_epoch; train_one_epoch=_train_one_epoch
-    build_snn_classifier=_build_snn_classifier; build_readout=_build_readout; _seed_everything=_runtime_seed_everything
+    build_snn_classifier=_build_snn_classifier; build_readout=_build_readout; canonicalize_readout_mode=_canonicalize_readout_mode; _seed_everything=_runtime_seed_everything
 
 def _load_json_light(path: Path) -> dict[str, Any]: return json.loads(path.read_text(encoding='utf-8'))
 def _parse_bool_config_value(value: Any, *, default: bool) -> bool: return parse_bool_token(value, default=default)
@@ -59,7 +59,7 @@ def _is_rank0(ctx: DDPContext) -> bool: return bool(ctx.is_rank0)
 def build_arg_parser() -> argparse.ArgumentParser:
     p=argparse.ArgumentParser(description='Supervised model training entrypoint for selected checkpoint production.')
     p.add_argument('--dataset', required=True); p.add_argument('--prep_root', required=True); p.add_argument('--model', required=True); p.add_argument('--hidden_spec', required=True)
-    p.add_argument('--readout_mode', required=True, choices=('temporal_membrane','final_membrane','first_spike','max_rate','spikegru_max_over_time'))
+    p.add_argument('--readout_mode', required=True, choices=('temporal_membrane','final_membrane','first_spike','max_fire','max_rate','spikegru_max_over_time'))
     p.add_argument('--epochs', required=True, type=int); p.add_argument('--batch_size', required=True, type=int); p.add_argument('--lr', required=True, type=float)
     p.add_argument('--num_workers', type=int, default=0); p.add_argument('--seed', required=True, type=int); p.add_argument('--gpu_index', type=int, default=0)
     p.add_argument('--ddp', default='false', help='2-GPU DDP 사용 여부(true/false).')
@@ -69,20 +69,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument('--regularization_signal', default='y_mem', choices=('y_mem','y_spike')); p.add_argument('--regularization_curve_space', default='exact', choices=('exact',))
     p.add_argument('--regularization_curve_scale', default='raw', choices=('raw','db')); p.add_argument('--regularization_centering', default='raw', choices=('raw','centered'))
     p.add_argument('--regularization_reducer', default='mean', choices=('mean','median')); p.add_argument('--regularization_distance_metric', default='centered_l2', choices=('centered_l2','diff_l2'))
-    p.add_argument('--lambda_psd_rep_1d', default=0.0, type=float); p.add_argument('--lambda_psd_pca_1d', default=0.0, type=float); p.add_argument('--lambda_psd_pca_mimo', default=0.0, type=float)
+    p.add_argument('--regularization_psd_curve_tokens', nargs='*', default=None)
+    p.add_argument('--regularization_userbin_count', type=int, default=None)
+    p.add_argument('--regularization_userbin_edges', nargs='*', default=None)
+    p.add_argument('--regularization_userbin_reducer', default=None)
+    p.add_argument('--regularization_userbin_width', type=float, default=None)
+    p.add_argument('--lambda_psd_rep_1d', default=0.0, type=float); p.add_argument('--lambda_psd_pca', default=0.0, type=float); p.add_argument('--lambda_psd_pca_1d', default=None, type=float); p.add_argument('--lambda_psd_pca_mimo', default=None, type=float)
     p.add_argument('--psd_reg_variant', default='raw', choices=('raw','centered')); p.add_argument('--psd_reg_output_family', default='spike', choices=('spike','membrane'))
     p.add_argument('--psd_reg_curve_scale', default='raw', choices=('raw','db')); p.add_argument('--psd_reg_relation', default='adjacent', choices=('adjacent','input'))
     p.add_argument('--pca_dim_per_layer', nargs='*', default=None)
-    p.add_argument('--constraint_mode', default='none', choices=('none','clip','structure','clipstructure','clip_structure'))
+    p.add_argument('--scenario_mode', default='none', choices=('none','clip','structure','clipstructure','clip_structure'))
+    p.add_argument('--constraint_mode', default=None, choices=('none','clip','structure','clipstructure','clip_structure'))
     p.add_argument('--w_clip_edges', nargs='*', default=None)
     p.add_argument('--alpha_clip_edges', nargs='*', default=None)
     p.add_argument('--band_neuron_ends', nargs='*', default=None)
+    p.add_argument('--band_edge', default=None)
     p.add_argument('--tear', type=int, default=1)
     p.add_argument('--rf_frequency_clip_edges', nargs='*', default=None)
     p.add_argument('--lif_alpha_clip_edges', nargs='*', default=None)
     p.add_argument('--constraint_tear', type=int, default=None)
     p.add_argument('--anal_epoch_list', nargs='*', default=None); p.add_argument('--checkpoint_root', required=True); p.add_argument('--metric_root', required=True)
     p.add_argument('--output_root', default=None); p.add_argument('--v_th', type=float, default=1.0); p.add_argument('--resume_checkpoint', default=None); p.add_argument('--config', default=None)
+    p.add_argument('--compile_model', default='false')
     return p
 
 def _normalize_anal_epoch_list(values: Sequence[str] | None, *, epochs: int) -> list[int]:
@@ -154,13 +162,26 @@ def _reduce_train_metrics_ddp(metrics: Any, ctx: DDPContext) -> Any:
     return TrainEpochMetrics(loss=float(vals[0]/total), task_loss=float(vals[1]/total), regularization_loss=float(vals[2]/total), regularization_global_loss=float(vals[3]/total), regularization_adjacent_loss=float(vals[4]/total), psd_regularization_total=float(vals[5]/total), psd_regularization_rep_1d=float(vals[6]/total), psd_regularization_pca_1d=float(vals[7]/total), psd_regularization_pca_mimo=float(vals[8]/total), correct=int(vals[9].item()), total=int(vals[10].item()), accuracy=float(vals[9]/total))
 
 def _pca_psd_regularization_requested(args: argparse.Namespace) -> bool:
-    return float(getattr(args,'lambda_psd_pca_1d',0.0))!=0.0 or float(getattr(args,'lambda_psd_pca_mimo',0.0))!=0.0
+    return float(getattr(args,'lambda_psd_pca',0.0))!=0.0
+
+
+def _normalize_lambda_psd_pca_args(args: argparse.Namespace) -> None:
+    new = getattr(args, 'lambda_psd_pca', None)
+    old1 = getattr(args, 'lambda_psd_pca_1d', None)
+    old2 = getattr(args, 'lambda_psd_pca_mimo', None)
+    if new is None:
+        new = 0.0
+    old1 = 0.0 if old1 is None else float(old1)
+    old2 = 0.0 if old2 is None else float(old2)
+    if float(new) != 0.0 and (old1 != 0.0 or old2 != 0.0):
+        raise ValueError('Do not mix lambda_psd_pca with deprecated lambda_psd_pca_1d/lambda_psd_pca_mimo.')
+    if float(new) == 0.0 and (old1 != 0.0 or old2 != 0.0):
+        args.lambda_psd_pca = float(old1 + old2)
 
 def _psd_regularization_metadata_from_args(args: argparse.Namespace) -> dict[str, Any]:
     return {
         'lambda_psd_rep_1d': float(getattr(args,'lambda_psd_rep_1d',0.0)),
-        'lambda_psd_pca_1d': float(getattr(args,'lambda_psd_pca_1d',0.0)),
-        'lambda_psd_pca_mimo': float(getattr(args,'lambda_psd_pca_mimo',0.0)),
+        'lambda_psd_pca': float(getattr(args,'lambda_psd_pca',0.0)),
         'psd_reg_variant': str(getattr(args,'psd_reg_variant','raw')),
         'psd_reg_output_family': str(getattr(args,'psd_reg_output_family','spike')),
         'psd_reg_curve_scale': str(getattr(args,'psd_reg_curve_scale','raw')),
@@ -171,9 +192,9 @@ def _psd_regularization_metadata_from_args(args: argparse.Namespace) -> dict[str
     }
 
 def _assert_psd_resume_compatible(current_psd_meta: dict[str, Any], ck_psd_meta: dict[str, Any] | None) -> None:
-    psd_enabled_now = any(float(current_psd_meta[k]) != 0.0 for k in ('lambda_psd_rep_1d','lambda_psd_pca_1d','lambda_psd_pca_mimo'))
+    psd_enabled_now = any(float(current_psd_meta[k]) != 0.0 for k in ('lambda_psd_rep_1d','lambda_psd_pca'))
     if ck_psd_meta is not None:
-        compare_keys = ('lambda_psd_rep_1d','lambda_psd_pca_1d','lambda_psd_pca_mimo','psd_reg_variant','psd_reg_output_family','psd_reg_curve_scale','psd_reg_relation')
+        compare_keys = ('lambda_psd_rep_1d','lambda_psd_pca','psd_reg_variant','psd_reg_output_family','psd_reg_curve_scale','psd_reg_relation')
         for key in compare_keys:
             if str(ck_psd_meta.get(key)) != str(current_psd_meta.get(key)):
                 raise ValueError(f'PSD regularization resume mismatch at {key}: current={current_psd_meta.get(key)} checkpoint={ck_psd_meta.get(key)}')
@@ -192,6 +213,11 @@ def _parse_pca_dim_per_layer(values: Sequence[str] | None) -> list[int] | None:
     return dims or None
 
 def _normalize_constraint_args(args: argparse.Namespace) -> ConstraintConfig:
+    if getattr(args, 'constraint_mode', None) is not None:
+        a = normalize_constraint_mode(getattr(args, 'scenario_mode', 'none'))
+        b = normalize_constraint_mode(getattr(args, 'constraint_mode', 'none'))
+        if a != b:
+            raise ValueError(f'scenario_mode and constraint_mode conflict: {a!r} vs {b!r}.')
     def _merge(name: str, alias: str):
         base = getattr(args, name, None)
         ali = getattr(args, alias, None)
@@ -205,10 +231,16 @@ def _normalize_constraint_args(args: argparse.Namespace) -> ConstraintConfig:
         raise ValueError('Both tear and constraint_tear were provided with different values.')
     if getattr(args, 'constraint_tear', None) is not None:
         tear = int(getattr(args, 'constraint_tear'))
+    band_edge = getattr(args, 'band_edge', None)
+    if isinstance(band_edge, str) and band_edge.strip() not in {'', 'none', 'null'}:
+        band_edge = json.loads(band_edge)
+    elif isinstance(band_edge, str):
+        band_edge = None
     return ConstraintConfig(
-        mode=normalize_constraint_mode(getattr(args, 'constraint_mode', 'none')),
+        mode=normalize_constraint_mode(getattr(args, 'scenario_mode', getattr(args,'constraint_mode','none'))),
         w_clip_edges=None if w_edges is None else tuple(float(v) for v in w_edges),
         alpha_clip_edges=None if a_edges is None else tuple(float(v) for v in a_edges),
+        band_edge=band_edge,
         band_neuron_ends=None if getattr(args, 'band_neuron_ends', None) is None else tuple(str(v) for v in getattr(args, 'band_neuron_ends')),
         tear=int(tear),
     )
@@ -270,6 +302,20 @@ def _checkpoint_payload(**kwargs):
     model=kwargs.pop('model')
     return {**kwargs,'schema_version':CHECKPOINT_SCHEMA_VERSION,'state_dict':_unwrap_model(model).state_dict()}
 
+
+def _canonical_run_readout_mode(mode: str) -> str:
+    return canonicalize_readout_mode(mode)
+
+
+def _maybe_compile_model(model: Any, *, requested: bool) -> tuple[Any, bool, str]:
+    if not requested:
+        return model, False, 'disabled'
+    compile_fn = getattr(torch, 'compile', None)
+    if compile_fn is None:
+        raise RuntimeError('compile_model=true but torch.compile is unavailable in this environment.')
+    compiled = compile_fn(model)
+    return compiled, True, 'torch.compile_default'
+
 def _atomic_torch_save(payload: dict[str, Any], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True); temp_dir=Path(tempfile.mkdtemp(prefix='checkpoint_write_', dir=str(path.parent.parent))); temp_path=temp_dir/path.name
     try: torch.save(payload,temp_path); os.replace(temp_path,path)
@@ -277,6 +323,7 @@ def _atomic_torch_save(payload: dict[str, Any], path: Path) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser=build_arg_parser(); args=parse_args_with_config(parser, argv=argv, stage_key='model_training')
+    _normalize_lambda_psd_pca_args(args)
     _load_runtime_dependencies(); ctx=None
     try:
         ddp=_ddp_requested(args); args.ddp=ddp; args.batch_size_is_global=_parse_bool_config_value(args.batch_size_is_global, default=True)
@@ -302,8 +349,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         test_loader=None
         if (not ctx.enabled) or _is_rank0(ctx):
             test_loader=make_loader(bundle.test_dataset,batch_size=int(args.batch_size),shuffle=False,num_workers=int(args.num_workers),pin_memory=ctx.device.type=='cuda',seed=int(args.seed))
-        readout=build_readout(str(args.readout_mode), num_classes=bundle.num_classes, sequence_length=bundle.sequence_length, device=ctx.device)
+        canonical_readout_mode = _canonical_run_readout_mode(str(args.readout_mode))
+        readout=build_readout(canonical_readout_mode, num_classes=bundle.num_classes, sequence_length=bundle.sequence_length, device=ctx.device)
         model=build_snn_classifier(model_token=model_spec,input_dim=bundle.input_dim,sequence_length=bundle.sequence_length,num_classes=bundle.num_classes,input_shape=None,hidden_sizes=tuple(int(v) for v in bundle.default_hidden_sizes),arch_spec=str(args.hidden_spec).strip(),output_layer_overrides=readout.output_layer_overrides(),v_th=float(args.v_th),constraint_config=constraint_config).to(ctx.device)
+        compile_requested = _parse_bool_config_value(getattr(args, 'compile_model', False), default=False)
+        model, compile_applied, compile_policy = _maybe_compile_model(model, requested=compile_requested)
         readout.to(ctx.device)
         if resume_checkpoint is not None:
             payload=torch.load(resume_checkpoint, map_location=ctx.device, weights_only=False)
@@ -328,7 +378,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         all_rows=[]
         for epoch in range(resume_epoch+1, int(args.epochs)+1):
             if train_sampler is not None: train_sampler.set_epoch(epoch)
-            train_metrics=train_one_epoch(model, train_loader, readout=readout, optimizer=optimizer, device=ctx.device, progress_desc=(f'train epoch {epoch}' if _is_rank0(ctx) else None), disable_progress=(ctx.enabled and (not _is_rank0(ctx))), regularization_lambda1=float(args.regularization_lambda1), regularization_lambda2=float(args.regularization_lambda2), regularization_signal=str(args.regularization_signal), regularization_curve_space=str(args.regularization_curve_space), regularization_curve_scale=str(args.regularization_curve_scale), regularization_centering=str(args.regularization_centering), regularization_reducer=str(args.regularization_reducer), regularization_distance_metric=str(args.regularization_distance_metric), lambda_psd_rep_1d=float(args.lambda_psd_rep_1d), lambda_psd_pca_1d=float(args.lambda_psd_pca_1d), lambda_psd_pca_mimo=float(args.lambda_psd_pca_mimo), psd_reg_variant=str(args.psd_reg_variant), psd_reg_output_family=str(args.psd_reg_output_family), psd_reg_curve_scale=str(args.psd_reg_curve_scale), psd_reg_relation=str(args.psd_reg_relation), pca_reference_bank=pca_reference_bank)
+            train_metrics=train_one_epoch(model, train_loader, readout=readout, optimizer=optimizer, device=ctx.device, progress_desc=(f'train epoch {epoch}' if _is_rank0(ctx) else None), disable_progress=(ctx.enabled and (not _is_rank0(ctx))), regularization_lambda1=float(args.regularization_lambda1), regularization_lambda2=float(args.regularization_lambda2), regularization_signal=str(args.regularization_signal), regularization_curve_space=str(args.regularization_curve_space), regularization_curve_scale=str(args.regularization_curve_scale), regularization_centering=str(args.regularization_centering), regularization_reducer=str(args.regularization_reducer), regularization_distance_metric=str(args.regularization_distance_metric), lambda_psd_rep_1d=float(args.lambda_psd_rep_1d), lambda_psd_pca=float(args.lambda_psd_pca), psd_reg_variant=str(args.psd_reg_variant), psd_reg_output_family=str(args.psd_reg_output_family), psd_reg_curve_scale=str(args.psd_reg_curve_scale), psd_reg_relation=str(args.psd_reg_relation), pca_reference_bank=pca_reference_bank)
             train_metrics=_reduce_train_metrics_ddp(train_metrics, ctx)
             if epoch not in anal_epochs: continue
             if ctx.enabled: torch.distributed.barrier()
@@ -340,16 +390,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 psd_meta = _psd_regularization_metadata_from_args(args)
                 psd_meta['pca_reference_bank_layer_keys'] = sorted(list((pca_reference_bank or {}).keys()))
                 psd_meta['pca_reference_bank_dims'] = {k:int(v.dim) for k,v in (pca_reference_bank or {}).items()}
-                payload=_checkpoint_payload(epoch=epoch, model=model, model_token=model_spec.canonical_token, readout_mode=str(args.readout_mode), dataset_token=dataset_token, prep_root=str(prep_root), prepared_dataset_path=str(prepared_dataset_path), seed=int(args.seed), training_args={'ddp':bool(args.ddp),'ddp_world_size':int(args.ddp_world_size),'batch_size_is_global':bool(args.batch_size_is_global),'batch_size':int(args.batch_size)}, metric_snapshot={'train_loss':float(train_metrics.loss),'test_loss':float(test_metrics.loss), 'train_accuracy': float(train_metrics.accuracy), 'test_accuracy': float(test_metrics.accuracy)}, constraint_metadata=model_meta.get('constraint_metadata'), psd_regularization_metadata=psd_meta)
+                payload=_checkpoint_payload(epoch=epoch, model=model, model_token=model_spec.canonical_token, readout_mode=canonical_readout_mode, dataset_token=dataset_token, prep_root=str(prep_root), prepared_dataset_path=str(prepared_dataset_path), seed=int(args.seed), training_args={'ddp':bool(args.ddp),'ddp_world_size':int(args.ddp_world_size),'batch_size_is_global':bool(args.batch_size_is_global),'batch_size':int(args.batch_size)}, metric_snapshot={'train_loss':float(train_metrics.loss),'test_loss':float(test_metrics.loss), 'train_accuracy': float(train_metrics.accuracy), 'test_accuracy': float(test_metrics.accuracy)}, constraint_metadata=model_meta.get('constraint_metadata'), psd_regularization_metadata=psd_meta, compile_model_requested=bool(compile_requested), compile_model_applied=bool(compile_applied), compile_model_policy=str(compile_policy))
                 _atomic_torch_save(payload, checkpoint_root / f'checkpoint_epoch_{epoch:06d}.pt')
-                all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='train', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=str(args.readout_mode), epoch=epoch, metric='loss', value=train_metrics.loss))
-                all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='test', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=str(args.readout_mode), epoch=epoch, metric='loss', value=test_metrics.loss))
-                all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='train', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=str(args.readout_mode), epoch=epoch, metric='accuracy', value=float(train_metrics.accuracy), value_unit='ratio'))
-                all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='test', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=str(args.readout_mode), epoch=epoch, metric='accuracy', value=float(test_metrics.accuracy), value_unit='ratio'))
-                all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='train', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=str(args.readout_mode), epoch=epoch, metric='psd_regularization_total', value=train_metrics.psd_regularization_total))
-                all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='train', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=str(args.readout_mode), epoch=epoch, metric='psd_regularization_rep_1d', value=train_metrics.psd_regularization_rep_1d))
-                all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='train', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=str(args.readout_mode), epoch=epoch, metric='psd_regularization_pca_1d', value=train_metrics.psd_regularization_pca_1d))
-                all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='train', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=str(args.readout_mode), epoch=epoch, metric='psd_regularization_pca_mimo', value=train_metrics.psd_regularization_pca_mimo))
+                all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='train', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=canonical_readout_mode, epoch=epoch, metric='loss', value=train_metrics.loss))
+                all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='test', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=canonical_readout_mode, epoch=epoch, metric='loss', value=test_metrics.loss))
+                all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='train', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=canonical_readout_mode, epoch=epoch, metric='accuracy', value=float(train_metrics.accuracy), value_unit='ratio'))
+                all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='test', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=canonical_readout_mode, epoch=epoch, metric='accuracy', value=float(test_metrics.accuracy), value_unit='ratio'))
+                all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='train', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=canonical_readout_mode, epoch=epoch, metric='psd_regularization_total', value=train_metrics.psd_regularization_total))
+                all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='train', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=canonical_readout_mode, epoch=epoch, metric='psd_regularization_rep_1d', value=train_metrics.psd_regularization_rep_1d))
+                all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='train', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=canonical_readout_mode, epoch=epoch, metric='psd_regularization_pca_1d', value=train_metrics.psd_regularization_pca_1d))
+                all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='train', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=canonical_readout_mode, epoch=epoch, metric='psd_regularization_pca_mimo', value=train_metrics.psd_regularization_pca_mimo))
             if ctx.enabled: torch.distributed.barrier()
         if _is_rank0(ctx):
             metrics_path=metric_root/'training_metrics.csv'; write_common_csv(metrics_path, all_rows); _assert_clean_checkpoint_dir(checkpoint_root)

@@ -27,8 +27,8 @@ bash/model_training.sh config/model_training.json
 - 기존 `regularization_lambda1/2` 계약은 그대로 유지한다.
 - PCA PSD 규제는 별도 옵션으로 추가한다:
   - `lambda_psd_rep_1d`
-  - `lambda_psd_pca_1d`
-  - `lambda_psd_pca_mimo`
+  - `lambda_psd_pca`
+  - `lambda_psd_pca`
   - `psd_reg_variant` (`raw|centered`)
   - `psd_reg_output_family` (`spike|membrane`)
   - `pca_dim_per_layer` (int list)

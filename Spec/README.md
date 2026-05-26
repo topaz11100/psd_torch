@@ -11,7 +11,7 @@
 | `theory/02_psd_representatives.md` | PSD curve, dispersion, element PSD 수식 |
 | `theory/03_pca_fixed_reference.md` | 현재 비활성 PCA 기준과 향후 확장 경계 |
 | `theory/04_fft2d.md` | dataset/model FFT와 2D FFT 정의 |
-| `theory/05_probe_families.md` | full, balanced_global, label_single probe 의미 |
+| `theory/05_probe_families.md` | full, same_label, balanced_global, distribution_global probe 의미 |
 | `theory/06_spiking_cells_if_lif_rf.md` | IF/LIF/RF 동역학과 분석 가능 신호 |
 | `theory/07_constraints_clip_structure_clipstructure.md` | clip, structure, clipstructure 제약 의미 |
 | `theory/08_topologies_and_readout.md` | MLP/CNN/보조 topology와 readout 정책 |
