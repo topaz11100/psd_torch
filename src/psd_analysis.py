@@ -1419,3 +1419,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == '__main__':
     raise SystemExit(main())
+try:
+    from src.patch_overlays.runtime_patch import patch_psd_analysis as _patch_psd_analysis
+    _patch_psd_analysis(globals())
+except Exception:
+    pass

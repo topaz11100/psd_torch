@@ -444,3 +444,8 @@ __all__ = [
     'train_one_batch',
     'train_one_epoch',
 ]
+try:
+    from src.patch_overlays.runtime_patch import patch_training as _patch_training
+    _patch_training(globals())
+except Exception:
+    pass

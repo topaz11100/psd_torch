@@ -1161,3 +1161,8 @@ __all__ = [
     'build_layer_from_spec',
     'build_snn_classifier',
 ]
+try:
+    from src.patch_overlays.runtime_patch import patch_snn_builder as _patch_snn_builder
+    _patch_snn_builder(globals())
+except Exception:
+    pass

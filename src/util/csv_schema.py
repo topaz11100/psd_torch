@@ -217,3 +217,8 @@ __all__ = [
     'validate_common_csv_header',
     'write_common_csv',
 ]
+try:
+    from src.patch_overlays.runtime_patch import patch_csv_schema as _patch_csv_schema
+    _patch_csv_schema(globals())
+except Exception:
+    pass

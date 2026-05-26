@@ -356,3 +356,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == '__main__':
     raise SystemExit(main())
+try:
+    from src.patch_overlays.runtime_patch import patch_model_training as _patch_model_training
+    _patch_model_training(globals())
+except Exception:
+    pass
