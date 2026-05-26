@@ -252,6 +252,8 @@ def train_one_batch(
     lambda_psd_pca_mimo: float = 0.0,
     psd_reg_variant: str = 'raw',
     psd_reg_output_family: str = 'spike',
+    psd_reg_curve_scale: str = 'raw',
+    psd_reg_relation: str = 'adjacent',
     pca_reference_bank: dict[str, Any] | None = None,
 ) -> TrainEpochMetrics:
     model.train()
@@ -286,6 +288,8 @@ def train_one_batch(
         lambda_pca_1d=float(lambda_psd_pca_1d),
         lambda_pca_mimo=float(lambda_psd_pca_mimo),
         pca_reference_bank=pca_reference_bank,
+        curve_scale=str(psd_reg_curve_scale),
+        relation=str(psd_reg_relation),
     )
     total_loss = task_loss + regularization.total + psd_reg.total
     total_loss.backward()
@@ -358,6 +362,8 @@ def train_one_epoch(
     lambda_psd_pca_mimo: float = 0.0,
     psd_reg_variant: str = 'raw',
     psd_reg_output_family: str = 'spike',
+    psd_reg_curve_scale: str = 'raw',
+    psd_reg_relation: str = 'adjacent',
     pca_reference_bank: dict[str, Any] | None = None,
 ) -> TrainEpochMetrics:
     total_loss_weighted = 0.0
@@ -393,6 +399,8 @@ def train_one_epoch(
             lambda_psd_pca_mimo=lambda_psd_pca_mimo,
             psd_reg_variant=psd_reg_variant,
             psd_reg_output_family=psd_reg_output_family,
+            psd_reg_curve_scale=psd_reg_curve_scale,
+            psd_reg_relation=psd_reg_relation,
             pca_reference_bank=pca_reference_bank,
         )
         total_loss_weighted += float(batch.loss) * int(batch.total)

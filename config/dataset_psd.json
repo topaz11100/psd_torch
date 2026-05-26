@@ -6,6 +6,10 @@
     "batch_size": 128,
     "gpu_index": 0,
     "seed": 0,
-    "num_workers": 0
+    "num_workers": 0,
+    "userbin_edges": null,
+    "userbin_width": null,
+    "userbin_count": 10,
+    "userbin_reducer": "mean"
   }
 }

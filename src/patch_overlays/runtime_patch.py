@@ -241,6 +241,7 @@ def patch_dataset_psd(g: dict[str, Any]) -> None:
 
     def build_arg_parser_patched():
         parser = orig_build()
+        _add_arg(parser, '--userbin_edges', nargs='*', type=float, default=None)
         _add_arg(parser, '--userbin_width', default=None)
         _add_arg(parser, '--userbin_count', type=int, default=10)
         _add_arg(parser, '--userbin_reducer', default='mean', choices=('mean', 'median', 'sum'))

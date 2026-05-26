@@ -9,6 +9,14 @@
     "seed": 0,
     "num_workers": 0,
     "low_vram": 0,
+    "psd_curve_tokens": [
+      "exact_mean_centered_raw",
+      "exact_median_centered_db"
+    ],
+    "analysis_userbin_edges": null,
+    "analysis_userbin_width": null,
+    "analysis_userbin_count": 10,
+    "analysis_userbin_reducer": "mean",
     "analysis_distance_metric": "centered_l2",
     "enable_pca_1d": false,
     "enable_pca_mimo": false,

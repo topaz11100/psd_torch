@@ -71,6 +71,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument('--regularization_reducer', default='mean', choices=('mean','median')); p.add_argument('--regularization_distance_metric', default='centered_l2', choices=('centered_l2','diff_l2'))
     p.add_argument('--lambda_psd_rep_1d', default=0.0, type=float); p.add_argument('--lambda_psd_pca_1d', default=0.0, type=float); p.add_argument('--lambda_psd_pca_mimo', default=0.0, type=float)
     p.add_argument('--psd_reg_variant', default='raw', choices=('raw','centered')); p.add_argument('--psd_reg_output_family', default='spike', choices=('spike','membrane'))
+    p.add_argument('--psd_reg_curve_scale', default='raw', choices=('raw','db')); p.add_argument('--psd_reg_relation', default='adjacent', choices=('adjacent','input'))
     p.add_argument('--pca_dim_per_layer', nargs='*', default=None)
     p.add_argument('--constraint_mode', default='none', choices=('none','clip','structure','clipstructure','clip_structure'))
     p.add_argument('--w_clip_edges', nargs='*', default=None)
@@ -162,6 +163,8 @@ def _psd_regularization_metadata_from_args(args: argparse.Namespace) -> dict[str
         'lambda_psd_pca_mimo': float(getattr(args,'lambda_psd_pca_mimo',0.0)),
         'psd_reg_variant': str(getattr(args,'psd_reg_variant','raw')),
         'psd_reg_output_family': str(getattr(args,'psd_reg_output_family','spike')),
+        'psd_reg_curve_scale': str(getattr(args,'psd_reg_curve_scale','raw')),
+        'psd_reg_relation': str(getattr(args,'psd_reg_relation','adjacent')),
         'pca_dim_per_layer': (_parse_pca_dim_per_layer(getattr(args,'pca_dim_per_layer',None)) or []),
         'ddp_policy': 'rank0_broadcast',
         'pca_reference_bank_policy': 'rank0_build_once_per_run',
@@ -170,7 +173,7 @@ def _psd_regularization_metadata_from_args(args: argparse.Namespace) -> dict[str
 def _assert_psd_resume_compatible(current_psd_meta: dict[str, Any], ck_psd_meta: dict[str, Any] | None) -> None:
     psd_enabled_now = any(float(current_psd_meta[k]) != 0.0 for k in ('lambda_psd_rep_1d','lambda_psd_pca_1d','lambda_psd_pca_mimo'))
     if ck_psd_meta is not None:
-        compare_keys = ('lambda_psd_rep_1d','lambda_psd_pca_1d','lambda_psd_pca_mimo','psd_reg_variant','psd_reg_output_family')
+        compare_keys = ('lambda_psd_rep_1d','lambda_psd_pca_1d','lambda_psd_pca_mimo','psd_reg_variant','psd_reg_output_family','psd_reg_curve_scale','psd_reg_relation')
         for key in compare_keys:
             if str(ck_psd_meta.get(key)) != str(current_psd_meta.get(key)):
                 raise ValueError(f'PSD regularization resume mismatch at {key}: current={current_psd_meta.get(key)} checkpoint={ck_psd_meta.get(key)}')
@@ -252,7 +255,7 @@ def _build_pca_reference_bank_if_needed(model: Any, train_loader: Any, args: arg
                     device_inputs,
                     list(result.hidden_records),
                     str(args.psd_reg_output_family),
-                    _parse_pca_dim_per_layer(args.pca_dim_per_layer),
+                    _parse_pca_dim_per_layer(args.pca_dim_per_layer), relation=str(getattr(args,'psd_reg_relation','adjacent')),
                 )
             obj[0]=_cpu_pca_reference_bank(bank)
             if not obj[0]:
@@ -325,14 +328,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         all_rows=[]
         for epoch in range(resume_epoch+1, int(args.epochs)+1):
             if train_sampler is not None: train_sampler.set_epoch(epoch)
-            train_metrics=train_one_epoch(model, train_loader, readout=readout, optimizer=optimizer, device=ctx.device, progress_desc=(f'train epoch {epoch}' if _is_rank0(ctx) else None), disable_progress=(ctx.enabled and (not _is_rank0(ctx))), regularization_lambda1=float(args.regularization_lambda1), regularization_lambda2=float(args.regularization_lambda2), regularization_signal=str(args.regularization_signal), regularization_curve_space=str(args.regularization_curve_space), regularization_curve_scale=str(args.regularization_curve_scale), regularization_centering=str(args.regularization_centering), regularization_reducer=str(args.regularization_reducer), regularization_distance_metric=str(args.regularization_distance_metric), lambda_psd_rep_1d=float(args.lambda_psd_rep_1d), lambda_psd_pca_1d=float(args.lambda_psd_pca_1d), lambda_psd_pca_mimo=float(args.lambda_psd_pca_mimo), psd_reg_variant=str(args.psd_reg_variant), psd_reg_output_family=str(args.psd_reg_output_family), pca_reference_bank=pca_reference_bank)
+            train_metrics=train_one_epoch(model, train_loader, readout=readout, optimizer=optimizer, device=ctx.device, progress_desc=(f'train epoch {epoch}' if _is_rank0(ctx) else None), disable_progress=(ctx.enabled and (not _is_rank0(ctx))), regularization_lambda1=float(args.regularization_lambda1), regularization_lambda2=float(args.regularization_lambda2), regularization_signal=str(args.regularization_signal), regularization_curve_space=str(args.regularization_curve_space), regularization_curve_scale=str(args.regularization_curve_scale), regularization_centering=str(args.regularization_centering), regularization_reducer=str(args.regularization_reducer), regularization_distance_metric=str(args.regularization_distance_metric), lambda_psd_rep_1d=float(args.lambda_psd_rep_1d), lambda_psd_pca_1d=float(args.lambda_psd_pca_1d), lambda_psd_pca_mimo=float(args.lambda_psd_pca_mimo), psd_reg_variant=str(args.psd_reg_variant), psd_reg_output_family=str(args.psd_reg_output_family), psd_reg_curve_scale=str(args.psd_reg_curve_scale), psd_reg_relation=str(args.psd_reg_relation), pca_reference_bank=pca_reference_bank)
             train_metrics=_reduce_train_metrics_ddp(train_metrics, ctx)
             if epoch not in anal_epochs: continue
             if ctx.enabled: torch.distributed.barrier()
             if _is_rank0(ctx):
                 eval_model=_unwrap_model(model)
                 test_metrics=evaluate_one_epoch(eval_model,test_loader,readout=readout,device=ctx.device,progress_desc=f'test epoch {epoch}',disable_progress=False)
-                tqdm.write(f'[model_training] epoch={epoch} train_loss={train_metrics.loss:.6f} test_loss={test_metrics.loss:.6f}')
+                tqdm.write(f'[model_training] epoch={epoch} train_loss={train_metrics.loss:.6f} test_loss={test_metrics.loss:.6f} train_acc={float(train_metrics.accuracy):.6f} test_acc={float(test_metrics.accuracy):.6f}')
                 model_meta=getattr(_unwrap_model(model),'model_metadata',lambda:{})()
                 psd_meta = _psd_regularization_metadata_from_args(args)
                 psd_meta['pca_reference_bank_layer_keys'] = sorted(list((pca_reference_bank or {}).keys()))
@@ -341,6 +344,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _atomic_torch_save(payload, checkpoint_root / f'checkpoint_epoch_{epoch:06d}.pt')
                 all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='train', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=str(args.readout_mode), epoch=epoch, metric='loss', value=train_metrics.loss))
                 all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='test', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=str(args.readout_mode), epoch=epoch, metric='loss', value=test_metrics.loss))
+                all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='train', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=str(args.readout_mode), epoch=epoch, metric='accuracy', value=float(train_metrics.accuracy), value_unit='ratio'))
+                all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='test', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=str(args.readout_mode), epoch=epoch, metric='accuracy', value=float(test_metrics.accuracy), value_unit='ratio'))
                 all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='train', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=str(args.readout_mode), epoch=epoch, metric='psd_regularization_total', value=train_metrics.psd_regularization_total))
                 all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='train', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=str(args.readout_mode), epoch=epoch, metric='psd_regularization_rep_1d', value=train_metrics.psd_regularization_rep_1d))
                 all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='train', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=str(args.readout_mode), epoch=epoch, metric='psd_regularization_pca_1d', value=train_metrics.psd_regularization_pca_1d))
@@ -354,10 +359,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         if ctx is not None and ctx.enabled and torch.distributed.is_initialized():
             torch.distributed.destroy_process_group()
 
-if __name__ == '__main__':
-    raise SystemExit(main())
 try:
     from src.patch_overlays.runtime_patch import patch_model_training as _patch_model_training
     _patch_model_training(globals())
 except Exception:
     pass
+
+if __name__ == '__main__':
+    raise SystemExit(main())

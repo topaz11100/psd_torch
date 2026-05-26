@@ -503,10 +503,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-if __name__ == '__main__':
-    raise SystemExit(main())
 try:
     from src.patch_overlays.runtime_patch import patch_dataset_psd as _patch_dataset_psd
     _patch_dataset_psd(globals())
 except Exception:
     pass
+
+if __name__ == '__main__':
+    raise SystemExit(main())
