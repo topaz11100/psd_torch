@@ -15,7 +15,7 @@ class ConstraintConfig:
     w_clip_edges: Any = None
     alpha_clip_edges: Any = None
     band_edge: Any = None
-    band_neuron_ends: Any = None  # deprecated alias
+    band_neuron_ends: Any = None  # legacy source-only alias for band_edge
     tear: int = 1
 
 
@@ -39,13 +39,13 @@ class ResolvedConstraintPlan:
     metadata: dict[str, Any]
 
 
-def normalize_constraint_mode(mode: Any) -> str:
+def normalize_scenario_mode(mode: Any) -> str:
     token = str(mode if mode is not None else 'none').strip().lower()
     if token == 'clip_structure':
         return 'clipstructure'
     if token in {'none', 'clip', 'structure', 'clipstructure'}:
         return token
-    raise ValueError(f'Unsupported constraint_mode: {mode!r}')
+    raise ValueError(f'Unsupported scenario_mode: {mode!r}')
 
 
 def _normalize_layerwise_edges(edges: Any, *, lower: float, upper: float, name: str, num_layers: int) -> list[list[list[float]]] | None:
@@ -80,6 +80,9 @@ def _normalize_band_edge(hidden_widths: Sequence[int], band_edge: Any, num_group
         raise ValueError('band_edge entry count must match hidden layer count.')
     out: list[list[int]] = []
     for i, (width, entry, groups) in enumerate(zip(widths, band_edge, num_groups_per_layer)):
+        groups = int(groups)
+        if groups < 1:
+            raise ValueError(f'band_edge[{i}] requires at least one group.')
         if entry is None:
             if width < groups:
                 raise ValueError(f'band_edge[{i}] cannot be null when hidden width {width} < groups {groups}.')
@@ -88,7 +91,7 @@ def _normalize_band_edge(hidden_widths: Sequence[int], band_edge: Any, num_group
         vals = [int(v) for v in entry]
         if len(vals) != groups - 1:
             raise ValueError(f'band_edge[{i}] length must be groups-1={groups-1}.')
-        if any(vals[j] >= vals[j+1] for j in range(len(vals)-1)):
+        if any(vals[j] >= vals[j + 1] for j in range(len(vals) - 1)):
             raise ValueError('band_edge boundaries must be strictly increasing.')
         if any(v <= 0 or v >= width for v in vals):
             raise ValueError('band_edge boundaries must satisfy 1 <= edge < hidden_width.')
@@ -171,17 +174,17 @@ def group_ids_from_ends(width: int, cumulative_ends: Sequence[int], num_groups: 
 
 def resolve_constraint_plan(model_spec: Any, hidden_widths: Sequence[int], constraint_config: ConstraintConfig | None) -> ResolvedConstraintPlan:
     config = constraint_config if constraint_config is not None else ConstraintConfig()
-    mode = normalize_constraint_mode(config.mode)
+    mode = normalize_scenario_mode(config.mode)
     widths = [int(v) for v in hidden_widths]
     if not widths:
         mode = 'none'
     enabled = mode != 'none'
     if not enabled:
-        md = {'scenario_mode': 'none', 'constraint_mode': 'none', 'structure_mask': False, 'clip_params': False, 'supported_scope': 'dense_hidden_layers_only', 'applies_to_output_layer': False, 'tear': int(config.tear), 'num_groups': 0, 'band_edge': None, 'group_cumulative_ends_per_hidden_layer': None}
+        md = {'scenario_mode': 'none', 'structure_mask': False, 'clip_params': False, 'supported_scope': 'dense_hidden_layers_only', 'applies_to_output_layer': False, 'tear': int(config.tear), 'num_groups': 0, 'band_edge': None, 'group_cumulative_ends_per_hidden_layer': None}
         return ResolvedConstraintPlan(config=ConstraintConfig(mode='none', w_clip_edges=config.w_clip_edges, alpha_clip_edges=config.alpha_clip_edges, band_edge=config.band_edge, band_neuron_ends=config.band_neuron_ends, tear=int(config.tear)), enabled=False, structure_mask=False, clip_params=False, num_groups=0, group_cumulative_ends_per_hidden_layer=None, group_ids_per_hidden_layer=None, metadata=md)
 
     if str(model_spec.family) not in {'lif', 'rf', 'if'}:
-        raise ValueError(f'constraint_mode={mode!r} is supported only for dense lif/rf families; got family={model_spec.family!r}.')
+        raise ValueError(f'scenario_mode={mode!r} is supported only for dense if/lif/rf families; got family={model_spec.family!r}.')
     if int(getattr(model_spec, 'branch', 0) or 0) not in (0,):
         pass
 
@@ -200,7 +203,7 @@ def resolve_constraint_plan(model_spec: Any, hidden_widths: Sequence[int], const
         raise ValueError('structure mode does not accept clip edges.')
 
     if config.band_edge is not None and config.band_neuron_ends is not None:
-        raise ValueError('Use band_edge as public key; band_neuron_ends is deprecated alias and cannot be combined.')
+        raise ValueError('Use band_edge as public key; band_neuron_ends is source-only compatibility and cannot be combined.')
     legacy_band = config.band_neuron_ends
     if legacy_band is not None and config.band_edge is None:
         be = [[int(p.strip()) for p in str(e).split(',') if p.strip()] for e in legacy_band]
@@ -221,7 +224,6 @@ def resolve_constraint_plan(model_spec: Any, hidden_widths: Sequence[int], const
 
     md = {
         'scenario_mode': mode,
-        'constraint_mode': mode,
         'structure_mask': bool(structure_mask),
         'clip_params': bool(clip_params),
         'supported_scope': 'dense_hidden_layers_only',
@@ -290,7 +292,7 @@ __all__ = [
     'default_band_neuron_ends',
     'group_ids_from_ends',
     'layer_constraint_for_hidden_index',
-    'normalize_constraint_mode',
+    'normalize_scenario_mode',
     'parse_band_neuron_ends',
     'resolve_constraint_plan',
     'validate_lif_clip_edges',

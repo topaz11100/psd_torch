@@ -15,7 +15,7 @@ if __package__ is None or __package__ == '':
 import argparse, json, os, tempfile, shutil
 from dataclasses import dataclass
 from typing import Any, Sequence
-from src.model.constraints import ConstraintConfig, normalize_constraint_mode
+from src.model.constraints import ConstraintConfig, normalize_scenario_mode
 from src.util.config_cli import parse_args_with_config
 from src.util.csv_schema import common_row, write_common_csv
 from src.util.cli_common import parse_bool_token
@@ -79,7 +79,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument('--psd_reg_curve_scale', default='raw', choices=('raw','db')); p.add_argument('--psd_reg_relation', default='adjacent', choices=('adjacent','input'))
     p.add_argument('--pca_dim_per_layer', nargs='*', default=None)
     p.add_argument('--scenario_mode', default='none', choices=('none','clip','structure','clipstructure','clip_structure'))
-    p.add_argument('--constraint_mode', default=None, choices=('none','clip','structure','clipstructure','clip_structure'))
     p.add_argument('--w_clip_edges', nargs='*', default=None)
     p.add_argument('--alpha_clip_edges', nargs='*', default=None)
     p.add_argument('--band_neuron_ends', nargs='*', default=None)
@@ -213,14 +212,22 @@ def _parse_pca_dim_per_layer(values: Sequence[str] | None) -> list[int] | None:
     return dims or None
 
 def _normalize_constraint_args(args: argparse.Namespace) -> ConstraintConfig:
-    if getattr(args, 'constraint_mode', None) is not None:
-        a = normalize_constraint_mode(getattr(args, 'scenario_mode', 'none'))
-        b = normalize_constraint_mode(getattr(args, 'constraint_mode', 'none'))
-        if a != b:
-            raise ValueError(f'scenario_mode and constraint_mode conflict: {a!r} vs {b!r}.')
+    def _parse_json_like(value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            text = value.strip()
+            if text in {'', 'none', 'null'}:
+                return None
+            return json.loads(text) if text.startswith('[') else value
+        if isinstance(value, (list, tuple)) and len(value) == 1 and isinstance(value[0], str):
+            text = str(value[0]).strip()
+            if text.startswith('['):
+                return json.loads(text)
+        return value
     def _merge(name: str, alias: str):
-        base = getattr(args, name, None)
-        ali = getattr(args, alias, None)
+        base = _parse_json_like(getattr(args, name, None))
+        ali = _parse_json_like(getattr(args, alias, None))
         if base is not None and ali is not None and list(base) != list(ali):
             raise ValueError(f'Both {name} and {alias} were provided with different values.')
         return base if base is not None else ali
@@ -231,15 +238,11 @@ def _normalize_constraint_args(args: argparse.Namespace) -> ConstraintConfig:
         raise ValueError('Both tear and constraint_tear were provided with different values.')
     if getattr(args, 'constraint_tear', None) is not None:
         tear = int(getattr(args, 'constraint_tear'))
-    band_edge = getattr(args, 'band_edge', None)
-    if isinstance(band_edge, str) and band_edge.strip() not in {'', 'none', 'null'}:
-        band_edge = json.loads(band_edge)
-    elif isinstance(band_edge, str):
-        band_edge = None
+    band_edge = _parse_json_like(getattr(args, 'band_edge', None))
     return ConstraintConfig(
-        mode=normalize_constraint_mode(getattr(args, 'scenario_mode', getattr(args,'constraint_mode','none'))),
-        w_clip_edges=None if w_edges is None else tuple(float(v) for v in w_edges),
-        alpha_clip_edges=None if a_edges is None else tuple(float(v) for v in a_edges),
+        mode=normalize_scenario_mode(getattr(args, 'scenario_mode', 'none')),
+        w_clip_edges=_parse_json_like(w_edges),
+        alpha_clip_edges=_parse_json_like(a_edges),
         band_edge=band_edge,
         band_neuron_ends=None if getattr(args, 'band_neuron_ends', None) is None else tuple(str(v) for v in getattr(args, 'band_neuron_ends')),
         tear=int(tear),
@@ -304,7 +307,11 @@ def _checkpoint_payload(**kwargs):
 
 
 def _canonical_run_readout_mode(mode: str) -> str:
-    return canonicalize_readout_mode(mode)
+    try:
+        fn = canonicalize_readout_mode
+    except NameError:
+        from src.readout.readout import canonicalize_readout_mode as fn
+    return fn(mode)
 
 
 def _maybe_compile_model(model: Any, *, requested: bool) -> tuple[Any, bool, str]:
@@ -359,11 +366,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload=torch.load(resume_checkpoint, map_location=ctx.device, weights_only=False)
             ck_meta=payload.get('constraint_metadata')
             if ck_meta is not None:
-                current_mode=normalize_constraint_mode(constraint_config.mode)
-                ck_mode=normalize_constraint_mode(ck_meta.get('constraint_mode', 'none'))
+                current_mode=normalize_scenario_mode(constraint_config.mode)
+                ck_mode=normalize_scenario_mode(ck_meta.get('scenario_mode', 'none'))
                 if current_mode != ck_mode:
-                    raise ValueError(f'Constraint resume mismatch: current={current_mode}, checkpoint={ck_mode}.')
-            elif normalize_constraint_mode(constraint_config.mode) != 'none':
+                    raise ValueError(f'Scenario resume mismatch: current={current_mode}, checkpoint={ck_mode}.')
+            elif normalize_scenario_mode(constraint_config.mode) != 'none':
                 raise ValueError('resume_checkpoint has no constraint_metadata but current run requested constraints.')
             _assert_psd_resume_compatible(_psd_regularization_metadata_from_args(args), payload.get('psd_regularization_metadata'))
             model.load_state_dict(payload['state_dict'])

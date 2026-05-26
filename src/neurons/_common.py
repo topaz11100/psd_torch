@@ -5,6 +5,13 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from src.neurons.spikingjelly_compat import (
+    SPIKINGJELLY_AVAILABLE,
+    install_spikingjelly_contract,
+    reset_spikingjelly_state,
+    spikingjelly_surrogate_spike,
+    surrogate_backend_name,
+)
 
 class FastSigmoidSpike(torch.autograd.Function):
     """Simple surrogate spike used by project-defined layers."""
@@ -25,7 +32,13 @@ class FastSigmoidSpike(torch.autograd.Function):
         return grad, None
 
 
-surrogate_spike = FastSigmoidSpike.apply
+def surrogate_spike(input_tensor: torch.Tensor, slope: float = 10.0) -> torch.Tensor:
+    """SpikingJelly-first surrogate spike with the previous autograd fallback."""
+
+    sj_value = spikingjelly_surrogate_spike(input_tensor, slope=float(slope))
+    if sj_value is not None:
+        return sj_value
+    return FastSigmoidSpike.apply(input_tensor, slope)
 
 
 def trim_open_interval(left: float, right: float, *, epsilon: float = 1.0e-4) -> tuple[float, float]:
@@ -50,7 +63,11 @@ def logit(x: torch.Tensor) -> torch.Tensor:
 
 __all__ = [
     'FastSigmoidSpike',
+    'SPIKINGJELLY_AVAILABLE',
+    'install_spikingjelly_contract',
     'logit',
+    'reset_spikingjelly_state',
     'surrogate_spike',
+    'surrogate_backend_name',
     'trim_open_interval',
 ]

@@ -361,4 +361,11 @@ class CNN2DRFLayer(nn.Module):
 
 
 
+try:
+    from src.neurons.spikingjelly_compat import install_spikingjelly_contract as _install_spikingjelly_contract
+    _install_spikingjelly_contract(CNN2DLIFLayer)
+    _install_spikingjelly_contract(CNN2DRFLayer)
+except Exception:  # pragma: no cover - defensive import fallback
+    pass
+
 __all__ = ['CNN2DLIFLayer', 'CNN2DRFLayer']

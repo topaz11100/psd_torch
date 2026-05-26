@@ -18,6 +18,7 @@ from src.signal.family_spectral_analysis import (
     representative_psd_minibatch_curve_from_maps_torch,
 )
 from src.signal.psd_utils import trace_tensor_to_channel_major_maps
+from src.neurons.spikingjelly_compat import reset_spikingjelly_state
 from src.model.psd_minibatch_regularizer import (
     compute_fixed_pca_reference_bank,
     compute_minibatch_psd_regularizer,
@@ -93,6 +94,8 @@ def _project_parameters_after_optimizer_step(model: nn.Module) -> None:
 
 def _reset_stateful_model(model: nn.Module) -> None:
     base_model = _unwrap_model(model)
+    if reset_spikingjelly_state(base_model):
+        return
     resetter = getattr(base_model, "reset_state", None)
     if callable(resetter):
         resetter()

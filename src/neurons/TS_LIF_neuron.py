@@ -114,4 +114,10 @@ class TSLIFLayer(nn.Module):
 
 
 
+try:
+    from src.neurons.spikingjelly_compat import install_spikingjelly_contract as _install_spikingjelly_contract
+    _install_spikingjelly_contract(TSLIFLayer)
+except Exception:  # pragma: no cover - defensive import fallback
+    pass
+
 __all__ = ['TSLIFLayer']

@@ -19,14 +19,14 @@ def _mk_records():
 
 def test_zero_lambda_returns_zero_safe():
     inp,recs=_mk_records()
-    out=compute_minibatch_psd_regularizer(inp,recs,'raw','spike',0.0,0.0,0.0,None)
+    out=compute_minibatch_psd_regularizer(inp,recs,'raw','spike',0.0,0.0,None)
     assert float(out.total)==0.0
 
 
 def test_pca_lambda_without_bank_raises():
     inp,recs=_mk_records()
     with pytest.raises(ValueError):
-        compute_minibatch_psd_regularizer(inp,recs,'raw','spike',0.0,0.1,0.0,None)
+        compute_minibatch_psd_regularizer(inp,recs,'raw','spike',0.0,0.1,None)
 
 
 def test_fixed_basis_no_grad_and_finite_losses():
@@ -34,7 +34,7 @@ def test_fixed_basis_no_grad_and_finite_losses():
     bank=compute_fixed_pca_reference_bank(inp,recs,'spike',[2])
     for v in bank.values():
         assert not v.x_basis.requires_grad and not v.y_basis.requires_grad
-    out=compute_minibatch_psd_regularizer(inp,recs,'centered','spike',0.1,0.2,0.3,bank)
+    out=compute_minibatch_psd_regularizer(inp,recs,'centered','spike',0.1,0.2,bank)
     assert torch.isfinite(out.total)
     assert torch.isfinite(out.rep_1d)
     assert torch.isfinite(out.pca_1d)

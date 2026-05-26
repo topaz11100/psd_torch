@@ -179,4 +179,10 @@ class LIFLayer(nn.Module):
 
 
 
+try:
+    from src.neurons.spikingjelly_compat import install_spikingjelly_contract as _install_spikingjelly_contract
+    _install_spikingjelly_contract(LIFLayer)
+except Exception:  # pragma: no cover - defensive import fallback
+    pass
+
 __all__ = ['LIFLayer']

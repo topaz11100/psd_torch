@@ -889,7 +889,7 @@ def _build_fixed_cnn2d_classifier(
     dense_hidden_widths = [int(layer.width) for layer in resolved_layer_specs if isinstance(layer, DenseLayerSpec)]
     if len(dense_hidden_widths) != len(resolved_layer_specs):
         if constraint_config is not None and str(getattr(constraint_config, 'mode', 'none')).strip().lower() not in {'none', ''}:
-            raise ValueError('constraint_mode is supported only for dense hidden layers in v1 (no conv/residual arch).')
+            raise ValueError('scenario_mode is supported only for dense hidden layers in v1 (no conv/residual arch).')
     constraint_plan = resolve_constraint_plan(spec, dense_hidden_widths, constraint_config)
 
     hidden_layers: list[nn.Module] = []
@@ -1029,10 +1029,10 @@ def build_snn_classifier(
 
     spec = canonicalize_model_token(model_token) if isinstance(model_token, str) else model_token
     if constraint_config is not None:
-        constraint_mode = str(getattr(constraint_config, 'mode', 'none')).strip().lower()
-        if constraint_mode not in {'', 'none'} and spec.family not in {'lif', 'rf'}:
+        scenario_mode = str(getattr(constraint_config, 'mode', 'none')).strip().lower()
+        if scenario_mode not in {'', 'none'} and spec.family not in {'if', 'lif', 'rf'}:
             raise ValueError(
-                f'constraint_mode={constraint_mode!r} is supported only for dense lif/rf families; got family={spec.family!r}.'
+                f'scenario_mode={scenario_mode!r} is supported only for dense if/lif/rf families; got family={spec.family!r}.'
             )
     if spec.family == 'spikegru':
         if input_shape is not None:
@@ -1094,7 +1094,7 @@ def build_snn_classifier(
     dense_hidden_widths = [int(layer.width) for layer in resolved_layer_specs if isinstance(layer, DenseLayerSpec)]
     if len(dense_hidden_widths) != len(resolved_layer_specs):
         if constraint_config is not None and str(getattr(constraint_config, 'mode', 'none')).strip().lower() not in {'none', ''}:
-            raise ValueError('constraint_mode is supported only for dense hidden layers in v1 (no conv/residual arch).')
+            raise ValueError('scenario_mode is supported only for dense hidden layers in v1 (no conv/residual arch).')
     constraint_plan = resolve_constraint_plan(spec, dense_hidden_widths, constraint_config)
 
     hidden_layers: list[nn.Module] = []

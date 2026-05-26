@@ -5,8 +5,14 @@ try:
 except Exception:  # pragma: no cover
     torch = None
 
-from src.model.constraints import ConstraintConfig, layer_constraint_for_hidden_index, resolve_constraint_plan
+from src.model.constraints import ConstraintConfig, layer_constraint_for_hidden_index, normalize_scenario_mode, resolve_constraint_plan
 from src.model.model_registry import canonicalize_model_token
+
+
+def test_scenario_mode_has_no_constraint_mode_alias():
+    assert normalize_scenario_mode('clip_structure') == 'clipstructure'
+    with pytest.raises(ValueError):
+        normalize_scenario_mode('constraint_mode')
 
 
 def test_clip_edges_3d_validation_and_metadata_lif():

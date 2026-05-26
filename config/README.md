@@ -123,10 +123,11 @@ Wrapper 파일 안의 `CONFIG_PATHS=(...)` 배열에 config를 직접 추가해 
 
 | 목적 | token 형식 | 예시 | `hidden_spec` | 권장 `readout_mode` |
 |---|---|---|---|---|
+| 일반 dense IF | `if_<soft|hard>_<fixed|train>` | `if_soft_fixed` | `256,128` | `temporal_membrane`, `final_membrane`, `first_spike`, `max_fire` |
 | 일반 dense LIF | `lif_<soft|hard>_<fixed|train>` | `lif_soft_fixed` | `256,128` | `temporal_membrane`, `final_membrane`, `first_spike`, `max_fire` |
-| 일반 dense RF | `rf_<soft|hard>_<fixed|train>` | `rf_soft_fixed` | `256,128` | `temporal_membrane`, `final_membrane`, `first_spike`, `max_fire` |
+| 일반 dense RF | `rf_<soft|hard|none>_<fixed|train>` | `rf_soft_fixed`, `rf_none_train` | `256,128` | `temporal_membrane`, `final_membrane`, `first_spike`, `max_fire` |
 | SRNN/dense recurrent LIF | `lif_R_<soft|hard>_<fixed|train>` | `lif_R_soft_fixed` | `256,128` | `temporal_membrane`, `final_membrane`, `max_fire` |
-| SRNN/dense recurrent RF | `rf_R_<soft|hard>_<fixed|train>` | `rf_R_soft_fixed` | `256,128` | `temporal_membrane`, `final_membrane`, `max_fire` |
+| SRNN/dense recurrent RF | `rf_R_<soft|hard|none>_<fixed|train>` | `rf_R_soft_fixed`, `rf_R_none_train` | `256,128` | `temporal_membrane`, `final_membrane`, `max_fire` |
 | fixed CNN LIF | `<vgg11|resnet18>_lif_<soft|hard>_<fixed|train>` | `vgg11_lif_soft_fixed` | `-` | `temporal_membrane`, `final_membrane`, `max_fire` |
 | fixed CNN RF | `<vgg11|resnet18>_rf_<soft|hard>_<fixed|train>` | `resnet18_rf_soft_fixed` | `-` | `temporal_membrane`, `final_membrane`, `max_fire` |
 | 보조 sequence 모델 | `spikegru`, `spikingssm`, `spikformer` | `spikegru` | 모델별 builder 계약 확인 | `spikegru_max_over_time`는 `spikegru` 전용 |
@@ -142,7 +143,7 @@ Readout 의미:
 
 1. **비교하려는 neuron family**를 먼저 고른다. LIF/RF 비교는 같은 reset/threshold suffix를 맞춘다.
 2. **recurrent 효과**가 필요하면 dense token에 `_R`을 붙인다. CNN token에는 `_R`을 붙이지 않는다.
-3. **reset suffix**는 `soft` 또는 `hard`를 명시한다. `none`은 공식 LIF/RF token에서 허용하지 않는다.
+3. **reset suffix**는 IF/LIF에서는 `soft` 또는 `hard`를 명시한다. RF에서는 `soft`, `hard`, `none`을 사용할 수 있으며 `none`은 reset을 비활성화한다.
 4. **threshold suffix**는 `fixed` 또는 `train`을 명시한다. `train`은 threshold parameter 학습 비교가 목적일 때만 쓴다.
 5. **입력 view**는 model family에 따라 registry에서 선택된다. CNN family는 frame/image view를 사용하므로 `hidden_spec`을 `-`로 둔다.
 
@@ -231,14 +232,13 @@ PCA 분석은 row/channel/neuron 축을 고정 basis로 투영해 mode 신호를
 | 인수 | 역할 | 자료형 | 허용값/범위 | 예시 |
 |---|---|---:|---|---|
 | `lambda_psd_rep_1d` | mean/median 대표 PSD penalty 계수 | number | 임의 실수, `0.0`이면 비활성 | `0.1` |
-| `lambda_psd_pca` | PCA mode별 1-D PSD penalty 계수 | number | 임의 실수, `0.0`이면 비활성 | `0.05` |
-| `lambda_psd_pca` | PCA mode cross-spectrum/MIMO penalty 계수 | number | 임의 실수, `0.0`이면 비활성 | `0.01` |
+| `lambda_psd_pca` | PCA mode별 1-D PSD와 PCA MIMO/cross-spectrum penalty에 공통 적용되는 단일 계수 | number | 임의 실수, `0.0`이면 비활성 | `0.05` |
 | `psd_reg_variant` | penalty에 사용할 신호 변형 | string | `raw`, `centered` | `centered` |
 | `psd_reg_output_family` | hidden 출력 family | string | `spike`, `membrane` | `spike` |
 | `pca_dim_per_layer` | fixed PCA reference bank 차원 | integer array | 양의 정수 배열 | `[4]` |
 
 PCA 규제를 켜면 학습 시작 전에 no-grad reference batch로 layer별 `x_basis/y_basis`와 centroid를 고정하고, 학습 minibatch에서는 그 basis만 적용한다. basis 자체는 penalty gradient 대상이 아니다.
-현재 DDP(`ddp=true`)에서 PCA PSD 규제(`lambda_psd_pca` 또는 `lambda_psd_pca`)는 broadcast 동기화 미구현으로 fail-fast(`ValueError`)로 차단한다.
+현재 DDP(`ddp=true`)에서 PCA PSD 규제(`lambda_psd_pca`)는 rank0 기준 reference bank를 broadcast하는 정책을 사용한다.
 
 ## `plotting.json`
 

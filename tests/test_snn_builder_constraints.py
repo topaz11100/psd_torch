@@ -5,6 +5,18 @@ from src.model.constraints import ConstraintConfig
 from src.model.snn_builder import build_snn_classifier
 
 
+def _alpha_edges(layers=2):
+    return [[[0.0, 0.5], [0.5, 1.0]] for _ in range(layers)]
+
+
+def _w_edges(layers=2):
+    return [[[0.0, 0.25], [0.25, 0.5]] for _ in range(layers)]
+
+
+def _band(layers=2):
+    return [[4] for _ in range(layers)]
+
+
 def _forward(model):
     x = torch.randn(2, 16, 8)
     out = model(x, capture_hidden=True)
@@ -15,7 +27,7 @@ def _forward(model):
 def test_lif_clip_smoke_and_output_unconstrained():
     model = build_snn_classifier(
         model_token='lif_soft_fixed', input_dim=8, sequence_length=16, num_classes=3, hidden_sizes=[8, 8], v_th=1.0,
-        constraint_config=ConstraintConfig(mode='clip', alpha_clip_edges=(0.0, 0.5, 1.0), band_neuron_ends=('4', '4'), tear=1),
+        constraint_config=ConstraintConfig(mode='clip', alpha_clip_edges=_alpha_edges(2), band_edge=_band(2), tear=1),
     )
     _forward(model)
     assert model.hidden_layers[0].alpha_lower is not None
@@ -27,7 +39,7 @@ def test_lif_clip_smoke_and_output_unconstrained():
 def test_rf_clip_smoke():
     model = build_snn_classifier(
         model_token='rf_soft_fixed', input_dim=8, sequence_length=16, num_classes=3, hidden_sizes=[8, 8], v_th=1.0,
-        constraint_config=ConstraintConfig(mode='clip', w_clip_edges=(0.0, 0.25, 0.5), band_neuron_ends=('4', '4'), tear=1),
+        constraint_config=ConstraintConfig(mode='clip', w_clip_edges=_w_edges(2), band_edge=_band(2), tear=1),
     )
     _forward(model)
     assert model.hidden_layers[0].freq_lower is not None
@@ -37,13 +49,12 @@ def test_rf_clip_smoke():
 def test_structure_and_tear_behavior():
     model = build_snn_classifier(
         model_token='lif_R_soft_fixed', input_dim=8, sequence_length=16, num_classes=3, hidden_sizes=[8, 8, 8], v_th=1.0,
-        constraint_config=ConstraintConfig(mode='structure', band_neuron_ends=('4', '4', '4'), tear=2),
+        constraint_config=ConstraintConfig(mode='structure', band_edge=[[4], [4], [4]], tear=2),
     )
     _forward(model)
-    # tear=2 => layer0 has no structure mask, but recurrent mask allowed
+    # tear=2 => layer0 uses default all-one masks, layer1/2 get block masks.
     assert torch.allclose(model.hidden_layers[0].input_mask, torch.ones_like(model.hidden_layers[0].input_mask))
-    assert model.hidden_layers[0].recurrent_mask is not None
-    # layer1/2 should get block feedforward mask
+    assert torch.allclose(model.hidden_layers[0].recurrent_mask, torch.ones_like(model.hidden_layers[0].recurrent_mask))
     assert not torch.allclose(model.hidden_layers[1].input_mask, torch.ones_like(model.hidden_layers[1].input_mask))
     assert not torch.allclose(model.hidden_layers[2].input_mask, torch.ones_like(model.hidden_layers[2].input_mask))
 
@@ -51,7 +62,7 @@ def test_structure_and_tear_behavior():
 def test_rf_clipstructure_smoke_and_output_nonrecurrent():
     model = build_snn_classifier(
         model_token='rf_R_soft_fixed', input_dim=8, sequence_length=16, num_classes=3, hidden_sizes=[8, 8], v_th=1.0,
-        constraint_config=ConstraintConfig(mode='clipstructure', w_clip_edges=(0.0, 0.25, 0.5), band_neuron_ends=('4', '4'), tear=1),
+        constraint_config=ConstraintConfig(mode='clipstructure', w_clip_edges=_w_edges(2), band_edge=_band(2), tear=1),
     )
     _forward(model)
     assert model.hidden_layers[0].freq_lower is not None
@@ -63,7 +74,7 @@ def test_rf_clipstructure_smoke_and_output_nonrecurrent():
 def test_gradient_blocking_for_structure_masks():
     model = build_snn_classifier(
         model_token='lif_R_soft_fixed', input_dim=8, sequence_length=16, num_classes=3, hidden_sizes=[8, 8], v_th=1.0,
-        constraint_config=ConstraintConfig(mode='structure', band_neuron_ends=('4', '4'), tear=1),
+        constraint_config=ConstraintConfig(mode='structure', band_edge=_band(2), tear=1),
     )
     x = torch.randn(2, 16, 8)
     out = model(x, capture_hidden=False)
@@ -83,7 +94,7 @@ def test_gradient_blocking_for_structure_masks():
 def test_bounds_are_in_expected_group_ranges():
     lif = build_snn_classifier(
         model_token='lif_soft_fixed', input_dim=8, sequence_length=16, num_classes=3, hidden_sizes=[8, 8], v_th=1.0,
-        constraint_config=ConstraintConfig(mode='clip', alpha_clip_edges=(0.0, 0.5, 1.0), band_neuron_ends=('4', '4'), tear=1),
+        constraint_config=ConstraintConfig(mode='clip', alpha_clip_edges=_alpha_edges(2), band_edge=_band(2), tear=1),
     )
     alpha = lif.hidden_layers[0].effective_alpha().detach()
     assert torch.all(alpha[:4] >= 0.0) and torch.all(alpha[:4] <= 0.5)
@@ -91,7 +102,7 @@ def test_bounds_are_in_expected_group_ranges():
 
     rf = build_snn_classifier(
         model_token='rf_soft_fixed', input_dim=8, sequence_length=16, num_classes=3, hidden_sizes=[8, 8], v_th=1.0,
-        constraint_config=ConstraintConfig(mode='clip', w_clip_edges=(0.0, 0.25, 0.5), band_neuron_ends=('4', '4'), tear=1),
+        constraint_config=ConstraintConfig(mode='clip', w_clip_edges=_w_edges(2), band_edge=_band(2), tear=1),
     )
     freq = rf.hidden_layers[0].effective_frequency().detach()
     assert torch.all(freq[:4] >= 0.0) and torch.all(freq[:4] <= 0.25)
@@ -112,7 +123,20 @@ def test_unsupported_family_error(token, mode):
     with pytest.raises(ValueError):
         build_snn_classifier(
             model_token=token, input_dim=8, sequence_length=16, num_classes=3, hidden_sizes=[8, 8], v_th=1.0,
-            constraint_config=ConstraintConfig(mode=mode, alpha_clip_edges=(0.0, 0.5, 1.0), w_clip_edges=(0.0, 0.25, 0.5), band_neuron_ends=('4', '4'), tear=1),
+            constraint_config=ConstraintConfig(mode=mode, alpha_clip_edges=_alpha_edges(2), w_clip_edges=_w_edges(2), band_edge=_band(2), tear=1),
+        )
+
+
+def test_if_structure_supported_but_clip_rejected():
+    model = build_snn_classifier(
+        model_token='if_R_soft_fixed', input_dim=8, sequence_length=16, num_classes=3, hidden_sizes=[8, 8], v_th=1.0,
+        constraint_config=ConstraintConfig(mode='structure', band_edge=_band(2), tear=1),
+    )
+    _forward(model)
+    with pytest.raises(ValueError):
+        build_snn_classifier(
+            model_token='if_soft_fixed', input_dim=8, sequence_length=16, num_classes=3, hidden_sizes=[8, 8], v_th=1.0,
+            constraint_config=ConstraintConfig(mode='clip', alpha_clip_edges=_alpha_edges(2), band_edge=_band(2), tear=1),
         )
 
 
@@ -127,10 +151,11 @@ def test_none_backward_compatibility():
 def test_constraint_metadata_and_state_dict_buffers():
     model = build_snn_classifier(
         model_token='lif_R_soft_fixed', input_dim=8, sequence_length=16, num_classes=3, hidden_sizes=[8, 8], v_th=1.0,
-        constraint_config=ConstraintConfig(mode='clipstructure', alpha_clip_edges=(0.0, 0.5, 1.0), band_neuron_ends=('4', '4'), tear=1),
+        constraint_config=ConstraintConfig(mode='clipstructure', alpha_clip_edges=_alpha_edges(2), band_edge=_band(2), tear=1),
     )
     meta = model.model_metadata()['constraint_metadata']
-    assert meta['constraint_mode'] == 'clipstructure'
+    assert meta['scenario_mode'] == 'clipstructure'
+    assert 'constraint_mode' not in meta
     assert meta['structure_mask'] is True
     assert meta['clip_params'] is True
     assert meta['applies_to_output_layer'] is False

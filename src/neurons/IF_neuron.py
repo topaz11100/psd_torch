@@ -62,4 +62,10 @@ class IFLayer(nn.Module):
         return (torch.stack(membrane_steps,dim=1) if return_traces else None), torch.stack(spikes,dim=1)
     def filter_stats_vectors(self)->dict[str,torch.Tensor]: return {}
 
+try:
+    from src.neurons.spikingjelly_compat import install_spikingjelly_contract as _install_spikingjelly_contract
+    _install_spikingjelly_contract(IFLayer)
+except Exception:  # pragma: no cover - defensive import fallback
+    pass
+
 __all__=['IFLayer']
