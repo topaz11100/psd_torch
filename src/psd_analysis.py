@@ -128,6 +128,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--analysis_userbin_edges', nargs='*', default=None)
     parser.add_argument('--analysis_userbin_reducer', default=None)
     parser.add_argument('--analysis_userbin_width', type=float, default=None)
+    parser.add_argument('--filter_alpha_userbin_edges', nargs='*', type=float, default=None)
+    parser.add_argument('--filter_alpha_userbin_count', type=int, default=10)
+    parser.add_argument('--filter_frequency_userbin_edges', nargs='*', type=float, default=None)
+    parser.add_argument('--filter_frequency_userbin_count', type=int, default=10)
+    parser.add_argument('--filter_damping_userbin_edges', nargs='*', type=float, default=None)
+    parser.add_argument('--filter_damping_userbin_count', type=int, default=10)
     return parser
 
 
@@ -644,6 +650,183 @@ def _filter_vectors(model: torch.nn.Module) -> dict[str, dict[str, np.ndarray]]:
     return collected
 
 
+_FILTER_DEFAULT_USERBIN_BOUNDS: dict[str, tuple[float, float]] = {
+    'alpha': (0.0, 1.0),
+    'center_frequency': (0.0, 0.5),
+    'damping': (0.1, 1.0),
+}
+
+_FILTER_VALUE_UNITS: dict[str, str] = {
+    'alpha': 'parameter_value',
+    'damping': 'parameter_value',
+    'center_frequency': 'normalized_frequency_cyc_per_sample_nyquist_0p5',
+}
+
+
+def _filter_cli_prefix(parameter: str) -> str:
+    if str(parameter) == 'center_frequency':
+        return 'frequency'
+    return str(parameter)
+
+
+def _filter_value_unit(parameter: str) -> str:
+    return _FILTER_VALUE_UNITS.get(str(parameter), 'parameter_value')
+
+
+def _strict_filter_edges(raw_edges: Any, *, name: str) -> np.ndarray:
+    if isinstance(raw_edges, str):
+        text = raw_edges.strip()
+        if text.startswith('['):
+            raw_edges = json.loads(text)
+        else:
+            raw_edges = [part for part in re.split(r'[\s,]+', text) if part]
+    values = np.asarray([float(value) for value in raw_edges], dtype=np.float64).reshape(-1)
+    if values.size < 2:
+        raise ValueError(f'{name} must contain at least two edge values.')
+    if not np.all(np.isfinite(values)):
+        raise ValueError(f'{name} must contain finite edge values only.')
+    if np.any(np.diff(values) <= 0.0):
+        raise ValueError(f'{name} must be strictly increasing.')
+    return values
+
+
+def _filter_userbin_edges(parameter: str, values: np.ndarray, args: argparse.Namespace) -> np.ndarray:
+    prefix = _filter_cli_prefix(parameter)
+    edge_attr = f'filter_{prefix}_userbin_edges'
+    count_attr = f'filter_{prefix}_userbin_count'
+    raw_edges = getattr(args, edge_attr, None)
+    if raw_edges not in (None, '', []):
+        return _strict_filter_edges(raw_edges, name=edge_attr)
+
+    count = int(getattr(args, count_attr, 10) or 10)
+    if count < 1:
+        raise ValueError(f'{count_attr} must be >= 1.')
+    lower, upper = _FILTER_DEFAULT_USERBIN_BOUNDS.get(str(parameter), (float(np.min(values)), float(np.max(values))))
+    if not np.isfinite(lower) or not np.isfinite(upper) or upper <= lower:
+        lower = float(np.min(values))
+        upper = float(np.max(values))
+        if upper <= lower:
+            delta = max(abs(lower) * 0.01, 1.0e-6)
+            lower -= delta
+            upper += delta
+    return np.linspace(float(lower), float(upper), int(count) + 1, dtype=np.float64)
+
+
+def _filter_frequency_value(parameter: str, scalar: float) -> float | str:
+    if str(parameter) == 'center_frequency':
+        return float(scalar)
+    return ''
+
+
+def _filter_distribution_rows_for_values(
+    *,
+    common_base: dict[str, Any],
+    layer_name: str,
+    layer_index: int | str,
+    distribution_scope: str,
+    parameter: str,
+    values: np.ndarray,
+    args: argparse.Namespace,
+) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    flat = np.asarray(values, dtype=np.float64).reshape(-1)
+    if flat.size == 0:
+        return rows
+    unit = _filter_value_unit(parameter)
+    for index, scalar in enumerate(flat):
+        kwargs = dict(common_base)
+        kwargs.update(
+            category='filter_distribution',
+            layer=str(layer_name),
+            layer_index=layer_index,
+            distribution_scope=str(distribution_scope),
+            parameter_name=str(parameter),
+            distribution_kind='exact',
+            neuron_index=int(index),
+            parameter_value=float(scalar),
+            frequency=_filter_frequency_value(parameter, float(scalar)),
+            frequency_unit=unit if str(parameter) == 'center_frequency' else '',
+            value=float(scalar),
+            value_unit=unit,
+        )
+        rows.append(common_row(**kwargs))
+
+    edges = _filter_userbin_edges(parameter, flat, args)
+    counts, bin_edges = np.histogram(flat, bins=edges)
+    total = int(np.sum(counts))
+    for bin_index, count in enumerate(np.asarray(counts, dtype=np.int64).reshape(-1)):
+        left = float(bin_edges[bin_index])
+        right = float(bin_edges[bin_index + 1])
+        width = right - left
+        center = 0.5 * (left + right)
+        probability = 0.0 if total <= 0 else float(count) / float(total)
+        density = 0.0 if total <= 0 or width <= 0.0 else float(count) / (float(total) * width)
+        kwargs = dict(common_base)
+        kwargs.update(
+            category='filter_distribution',
+            layer=str(layer_name),
+            layer_index=layer_index,
+            distribution_scope=str(distribution_scope),
+            parameter_name=str(parameter),
+            distribution_kind='userbin',
+            bin_index=int(bin_index),
+            bin_left=left,
+            bin_right=right,
+            bin_count=int(count),
+            bin_probability=probability,
+            bin_density=density,
+            parameter_value=center,
+            frequency=_filter_frequency_value(parameter, center),
+            frequency_unit=unit if str(parameter) == 'center_frequency' else '',
+            value=int(count),
+            value_unit='count',
+        )
+        rows.append(common_row(**kwargs))
+    return rows
+
+
+def _filter_model_vectors(filter_vectors: Mapping[str, Mapping[str, np.ndarray]]) -> dict[str, np.ndarray]:
+    grouped: dict[str, list[np.ndarray]] = defaultdict(list)
+    for param_map in filter_vectors.values():
+        for parameter, values in param_map.items():
+            arr = np.asarray(values, dtype=np.float64).reshape(-1)
+            if arr.size > 0:
+                grouped[str(parameter)].append(arr)
+    return {parameter: np.concatenate(chunks, axis=0) for parameter, chunks in grouped.items() if chunks}
+
+
+def _filter_distribution_rows(*, common_base: dict[str, Any], model: torch.nn.Module, layer_index_by_name: Mapping[str, int], args: argparse.Namespace) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    vectors = _filter_vectors(model)
+    for layer_name, param_map in vectors.items():
+        layer_index = layer_index_by_name.get(layer_name, '')
+        for parameter, values in param_map.items():
+            rows.extend(
+                _filter_distribution_rows_for_values(
+                    common_base=common_base,
+                    layer_name=str(layer_name),
+                    layer_index=layer_index,
+                    distribution_scope='layer',
+                    parameter=str(parameter),
+                    values=np.asarray(values, dtype=np.float64),
+                    args=args,
+                )
+            )
+    for parameter, values in _filter_model_vectors(vectors).items():
+        rows.extend(
+            _filter_distribution_rows_for_values(
+                common_base=common_base,
+                layer_name='model',
+                layer_index=0,
+                distribution_scope='model',
+                parameter=str(parameter),
+                values=np.asarray(values, dtype=np.float64),
+                args=args,
+            )
+        )
+    return rows
+
+
 def _summary_stats(values: np.ndarray) -> dict[str, float]:
     flat = np.asarray(values, dtype=np.float64).reshape(-1)
     if flat.size == 0:
@@ -663,7 +846,8 @@ def _summary_stats(values: np.ndarray) -> dict[str, float]:
 def _filter_snapshot_rows(*, common_base: dict[str, Any], model: torch.nn.Module, layer_index_by_name: Mapping[str, int]) -> tuple[list[dict[str, str]], dict[str, dict[str, dict[str, float]]]]:
     rows: list[dict[str, str]] = []
     trend_source: dict[str, dict[str, dict[str, float]]] = {}
-    for layer_name, param_map in _filter_vectors(model).items():
+    vectors = _filter_vectors(model)
+    for layer_name, param_map in vectors.items():
         trend_source[layer_name] = {}
         for parameter, values in param_map.items():
             stats = _summary_stats(values)
@@ -677,9 +861,27 @@ def _filter_snapshot_rows(*, common_base: dict[str, Any], model: torch.nn.Module
                     parameter_name=parameter,
                     statistic=stat_name,
                     value=stat_value,
-                    value_unit='count' if stat_name == 'count' else 'parameter_value',
+                    value_unit='count' if stat_name == 'count' else _filter_value_unit(parameter),
                 )
                 rows.append(common_row(**kwargs))
+    model_vectors = _filter_model_vectors(vectors)
+    if model_vectors:
+        trend_source['model'] = {}
+    for parameter, values in model_vectors.items():
+        stats = _summary_stats(values)
+        trend_source['model'][parameter] = dict(stats)
+        for stat_name, stat_value in stats.items():
+            kwargs = dict(common_base)
+            kwargs.update(
+                category='filter_snapshot',
+                layer='model',
+                layer_index=0,
+                parameter_name=parameter,
+                statistic=stat_name,
+                value=stat_value,
+                value_unit='count' if stat_name == 'count' else _filter_value_unit(parameter),
+            )
+            rows.append(common_row(**kwargs))
     return rows, trend_source
 
 
@@ -728,6 +930,11 @@ def _row_output_name(row: Mapping[str, str]) -> str:
     if category == 'filter_snapshot':
         parameter = _safe_token(row.get('parameter_name', 'parameter'))
         return f'filter_snapshot__epoch_{epoch}__layer_{layer_index}__{parameter}.csv'
+    if category == 'filter_distribution':
+        parameter = _safe_token(row.get('parameter_name', 'parameter'))
+        scope = _safe_token(row.get('distribution_scope', 'scope'))
+        kind = _safe_token(row.get('distribution_kind', 'kind'))
+        return f'filter_distribution__epoch_{epoch}__layer_{layer_index}__{parameter}__{scope}__{kind}.csv'
     if category == 'filter_trend':
         parameter = _safe_token(row.get('parameter_name', 'parameter'))
         statistic = _safe_token(row.get('statistic', 'statistic'))
@@ -1313,8 +1520,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         pair_rows, appendix_rows = _pair_rows_for_checkpoint(summaries=summaries, common_by_key=common_by_key, enable_appendix=bool(args.enable_pairwise_dependency_appendix), extractors=selected_extractors, distance_metric=str(args.analysis_distance_metric))
         filter_rows, filter_snapshot = _filter_snapshot_rows(common_base=checkpoint_base, model=model, layer_index_by_name=layer_index_by_name)
+        filter_distribution_rows = _filter_distribution_rows(common_base=checkpoint_base, model=model, layer_index_by_name=layer_index_by_name, args=args)
         for layer_name, param_map in filter_snapshot.items():
-            layer_index = int(layer_index_by_name.get(layer_name, 999))
+            layer_index = 0 if str(layer_name) == 'model' else int(layer_index_by_name.get(layer_name, 999))
             for parameter, stats in param_map.items():
                 for stat_name, stat_value in stats.items():
                     filter_trend_history[(layer_name, layer_index, parameter, stat_name)].append((int(payload.get('epoch', 0)), float(stat_value), dict(checkpoint_base)))
@@ -1380,6 +1588,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _write_layer_rows(checkpoint_dir, dispersion_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='analysis_dispersion')
         _write_artifact(checkpoint_dir / 'pair_distance.csv', pair_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='pair_distance')
         _write_layer_rows(checkpoint_dir, filter_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='filter_snapshot')
+        _write_layer_rows(checkpoint_dir, filter_distribution_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='filter_distribution')
         for relation_type in ('adjacent',):
             relation_rows = [row for row in layer_distance_profile_rows if row.get('relation_type') == relation_type]
             _write_rows_to_dir(checkpoint_dir / 'layer_distance_profile' / relation_type, relation_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='layer_distance_profile')
@@ -1402,7 +1611,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     for (layer_name, layer_index, parameter, stat_name), history in sorted(filter_trend_history.items()):
         for epoch, stat_value, base in sorted(history, key=lambda item: item[0]):
             kwargs = dict(base)
-            kwargs.update(category='filter_trend', layer=layer_name, layer_index=layer_index, checkpoint_epoch=epoch, parameter_name=parameter, statistic=stat_name, value=stat_value, value_unit='count' if stat_name == 'count' else 'parameter_value')
+            kwargs.update(category='filter_trend', layer=layer_name, layer_index=layer_index, checkpoint_epoch=epoch, parameter_name=parameter, statistic=stat_name, value=stat_value, value_unit='count' if stat_name == 'count' else _filter_value_unit(parameter))
             filter_trend_rows.append(common_row(**kwargs))
     for relation_type in ('adjacent',):
         relation_rows = [row for row in layer_distance_trend_rows if row.get('relation_type') == relation_type]

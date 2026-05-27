@@ -63,6 +63,15 @@ def patch_csv_schema(g: dict[str, Any]) -> None:
             'layer', 'layer_index', 'scope', 'probe_family', 'label', 'signal_kind', 'series',
             'left_psd_token', 'right_psd_token', 'distance_metric', 'value', 'value_unit',
         )
+    if 'filter_distribution' not in cols:
+        axis_cols = tuple(g.get('AXIS_METADATA_COLUMNS', ()))
+        cols['filter_distribution'] = (
+            *axis_cols,
+            'model_token', 'model_family', 'readout_mode', 'seed', 'checkpoint_path', 'checkpoint_epoch',
+            'layer', 'layer_index', 'distribution_scope', 'parameter_name', 'distribution_kind',
+            'neuron_index', 'bin_index', 'bin_left', 'bin_right', 'bin_count', 'bin_probability',
+            'bin_density', 'parameter_value', 'frequency', 'frequency_unit', 'value', 'value_unit',
+        )
     g['CATEGORY_NAMES'] = frozenset(cols)
 
 
@@ -334,6 +343,12 @@ def patch_psd_analysis(g: dict[str, Any]) -> None:
         _add_arg(parser, '--analysis_userbin_width', default=None)
         _add_arg(parser, '--analysis_userbin_count', type=int, default=10)
         _add_arg(parser, '--analysis_userbin_reducer', default='mean', choices=('mean', 'median', 'sum'))
+        _add_arg(parser, '--filter_alpha_userbin_edges', nargs='*', type=float, default=None)
+        _add_arg(parser, '--filter_alpha_userbin_count', type=int, default=10)
+        _add_arg(parser, '--filter_frequency_userbin_edges', nargs='*', type=float, default=None)
+        _add_arg(parser, '--filter_frequency_userbin_count', type=int, default=10)
+        _add_arg(parser, '--filter_damping_userbin_edges', nargs='*', type=float, default=None)
+        _add_arg(parser, '--filter_damping_userbin_count', type=int, default=10)
         return parser
 
     def collect_signal_maps_with_input(*, model: Any, dataset: Any, split_name: str, seed: int, anal_batch: int, num_workers: int, device: torch.device):
@@ -392,6 +407,8 @@ def patch_psd_analysis(g: dict[str, Any]) -> None:
         manifest_rows: list[dict[str, str]] = []
         first_manifest_base = None
         trend_rows: list[dict[str, str]] = []
+        filter_trend_rows: list[dict[str, str]] = []
+        filter_trend_history: dict[tuple[str, int, str, str], list[tuple[int, float, dict[str, Any]]]] = defaultdict(list)
         for checkpoint_path in g['tqdm'](checkpoint_files, desc='psd_analysis:checkpoints', leave=False):
             payload = g['_load_checkpoint'](checkpoint_path, map_location='cpu')
             seed = int(args.seed if args.seed is not None else payload.get('seed', 0))
@@ -412,6 +429,17 @@ def patch_psd_analysis(g: dict[str, Any]) -> None:
                 maps_by_key.update(collect_signal_maps_with_input(model=model, dataset=analysis_dataset, split_name=split_name, seed=seed, anal_batch=int(args.anal_batch), num_workers=int(args.num_workers), device=device))
             checkpoint_dir = output_root / (checkpoint_path.stem if input_is_single_file else f'checkpoint_epoch_{int(payload.get("epoch", len(manifest_rows))):06d}')
             checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            layer_index_by_name: dict[str, int] = {}
+            if hasattr(model, 'iter_named_layers'):
+                for layer_idx, (layer_name, _layer) in enumerate(model.iter_named_layers(), start=1):
+                    layer_index_by_name[str(layer_name)] = int(layer_idx)
+            filter_rows, filter_snapshot = g['_filter_snapshot_rows'](common_base=checkpoint_base, model=model, layer_index_by_name=layer_index_by_name)
+            filter_distribution_rows = g['_filter_distribution_rows'](common_base=checkpoint_base, model=model, layer_index_by_name=layer_index_by_name, args=args)
+            for layer_name, param_map in filter_snapshot.items():
+                layer_idx = 0 if str(layer_name) == 'model' else int(layer_index_by_name.get(layer_name, 999))
+                for parameter, stats in param_map.items():
+                    for stat_name, stat_value in stats.items():
+                        filter_trend_history[(str(layer_name), int(layer_idx), str(parameter), str(stat_name))].append((int(payload.get('epoch', 0)), float(stat_value), dict(checkpoint_base)))
             family_rows: list[dict[str, str]] = []
             dispersion_rows: list[dict[str, str]] = []
             curve_distance_rows: list[dict[str, str]] = []
@@ -459,6 +487,8 @@ def patch_psd_analysis(g: dict[str, Any]) -> None:
             g['_write_layer_rows'](checkpoint_dir, family_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='analysis_curve')
             g['_write_layer_rows'](checkpoint_dir, dispersion_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='analysis_dispersion')
             g['_write_layer_rows'](checkpoint_dir, curve_distance_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='psd_curve_distance')
+            g['_write_layer_rows'](checkpoint_dir, filter_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='filter_snapshot')
+            g['_write_layer_rows'](checkpoint_dir, filter_distribution_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='filter_distribution')
             for relation_type in ('input_reference', 'adjacent'):
                 rows = [row for row in layer_rows if row.get('relation_type') == relation_type]
                 g['_write_rows_to_dir'](checkpoint_dir / 'layer_distance_profile' / relation_type, rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='layer_distance_profile')
@@ -472,6 +502,17 @@ def patch_psd_analysis(g: dict[str, Any]) -> None:
         for relation_type in ('input_reference', 'adjacent'):
             rows = [row for row in trend_rows if row.get('relation_type') == relation_type]
             g['_write_rows_to_dir'](traces_dir / 'layer_distance_trend' / relation_type, rows, manifest_rows=manifest_rows, manifest_base=manifest_base, artifact_name='layer_distance_trend')
+        for (layer_name, layer_index, parameter, stat_name), history in sorted(filter_trend_history.items()):
+            for epoch, stat_value, base in sorted(history, key=lambda item: item[0]):
+                kwargs = dict(base)
+                value_unit = 'count' if str(stat_name) == 'count' else g['_filter_value_unit'](str(parameter))
+                kwargs.update(category='filter_trend', layer=layer_name, layer_index=layer_index, checkpoint_epoch=epoch, parameter_name=parameter, statistic=stat_name, value=stat_value, value_unit=value_unit)
+                filter_trend_rows.append(g['common_row'](**kwargs))
+        grouped_filter_trend: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
+        for row in filter_trend_rows:
+            grouped_filter_trend[(row.get('layer', ''), row.get('layer_index', ''))].append(row)
+        for (layer_name, layer_index), rows in sorted(grouped_filter_trend.items(), key=lambda item: (str(item[0][1]), str(item[0][0]))):
+            g['_write_rows_to_dir'](traces_dir / 'filter_trend' / g['_layer_folder'](layer_name, layer_index), rows, manifest_rows=manifest_rows, manifest_base=manifest_base, artifact_name='filter_trend')
         for warning in ordering_warnings:
             manifest_rows.append(g['_manifest_row'](base=manifest_base, artifact_name='checkpoint_ordering', path=Path(args.checkpoint), status='ok', message=warning))
         manifest_path = output_root / 'analysis_manifest.csv'
