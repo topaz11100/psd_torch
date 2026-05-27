@@ -113,6 +113,12 @@ def row_value_unit(scale: str, metric: str | None = None) -> str:
     return 'power'
 
 
+def curve_key_for_spec(spec: PSDCurveSpec, userbin_reducer: str) -> str:
+    if spec.extractor == 'psd_userbin':
+        return f'{spec.token}__userbin_reducer_{normalize_userbin_reducer(userbin_reducer)}'
+    return spec.token
+
+
 def curve_rows_for_maps(
     *,
     common_row,
@@ -132,7 +138,8 @@ def curve_rows_for_maps(
         rep_np = rep.detach().cpu().numpy().reshape(-1)
         axis_np = axis.detach().cpu().numpy().reshape(-1)
         edge_np = None if edges is None else edges.detach().cpu().numpy().reshape(-1)
-        curves[spec.token] = rep_np
+        curve_key = curve_key_for_spec(spec, userbin_reducer)
+        curves[curve_key] = rep_np
         for i, value in enumerate(rep_np):
             kwargs = dict(base)
             kwargs.update(
@@ -141,7 +148,7 @@ def curve_rows_for_maps(
                 reducer=spec.reducer,
                 variant=spec.centering,
                 scale=spec.scale,
-                psd_token=spec.token,
+                psd_token=curve_key,
                 userbin_reducer=userbin_reducer if spec.extractor == 'psd_userbin' else '',
                 frequency=float(axis_np[i]) if i < len(axis_np) else '',
                 frequency_bin=int(i),
@@ -162,7 +169,7 @@ def curve_rows_for_maps(
                     extractor=spec.extractor,
                     variant=spec.centering,
                     scale=spec.scale,
-                    psd_token=spec.token,
+                    psd_token=curve_key,
                     userbin_reducer=userbin_reducer if spec.extractor == 'psd_userbin' else '',
                     statistic=metric,
                     frequency=float(axis_np[i]) if i < len(axis_np) else '',
@@ -182,12 +189,13 @@ def token_distance_rows(
     common_row,
     base: Mapping[str, Any],
     curves: Mapping[str, np.ndarray],
+    distance_metrics: Sequence[str] = ('centered_l2', 'diff_l2'),
 ) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for left, right in combinations(sorted(curves), 2):
         if np.asarray(curves[left]).shape != np.asarray(curves[right]).shape:
             continue
-        for metric in ('centered_l2', 'diff_l2'):
+        for metric in distance_metrics:
             kwargs = dict(base)
             kwargs.update(
                 category='psd_curve_distance',

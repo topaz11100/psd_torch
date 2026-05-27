@@ -113,7 +113,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--anal_batch', required=True, type=int, help='Maximum samples per analysis forward pass.')
     parser.add_argument('--gpu_index', required=True, type=int, help='CUDA device index for analysis.')
     parser.add_argument('--enable_pairwise_dependency_appendix', action='store_true')
-    parser.add_argument('--analysis_distance_metric', default='centered_l2', choices=('centered_l2', 'diff_l2'), help='PSD curve distance for pair/layer shape distances: centered_l2 or unnormalized first-difference L2.')
+    parser.add_argument('--analysis_distance_metric', nargs='*', default=['centered_l2'], choices=('centered_l2', 'diff_l2'), help='PSD curve distance metrics to sweep for pair/layer shape distances.')
     parser.add_argument('--seed', type=int, default=None)
     parser.add_argument('--num_workers', type=int, default=0)
     parser.add_argument('--config', default=None, help='JSON 설정 파일 경로(.json)')
@@ -124,10 +124,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--pca_min_train_accuracy', type=float, default=0.0)
     parser.add_argument('--pca_dim_per_layer', nargs='*', default=None)
     parser.add_argument('--psd_curve_tokens', nargs='*', default=None)
-    parser.add_argument('--analysis_userbin_count', type=int, default=None)
     parser.add_argument('--analysis_userbin_edges', nargs='*', default=None)
-    parser.add_argument('--analysis_userbin_reducer', default=None)
-    parser.add_argument('--analysis_userbin_width', type=float, default=None)
+    parser.add_argument('--analysis_userbin_reducer', nargs='*', default=['mean'], choices=('mean', 'median', 'sum'))
     parser.add_argument('--filter_alpha_userbin_edges', nargs='*', type=float, default=None)
     parser.add_argument('--filter_alpha_userbin_count', type=int, default=10)
     parser.add_argument('--filter_frequency_userbin_edges', nargs='*', type=float, default=None)
@@ -544,7 +542,7 @@ def _collect_signal_maps(
             key: torch.cat(values, dim=0).contiguous()
             for key, values in collected.items()
             if values
-        }    
+        }
 
 
 def _axis_values(summary: Mapping[str, Any], extractor: str) -> tuple[np.ndarray, np.ndarray | None]:
@@ -1319,6 +1317,36 @@ def _parse_bool_like(value: Any, *, default: bool) -> bool:
     return _parse_bool_config_value(value, default=default)
 
 
+def _split_cli_values(values: Any, *, default: Sequence[str]) -> list[str]:
+    if values is None:
+        return [str(v) for v in default]
+    if isinstance(values, str):
+        raw = [values]
+    else:
+        raw = list(values)
+    out: list[str] = []
+    for item in raw:
+        for chunk in str(item).replace(',', ' ').split():
+            token = chunk.strip()
+            if token:
+                out.append(token)
+    return out or [str(v) for v in default]
+
+
+def _normalize_analysis_distance_metrics(values: Any) -> tuple[str, ...]:
+    allowed = {'centered_l2', 'diff_l2'}
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in _split_cli_values(values, default=('centered_l2',)):
+        token = str(value).strip().lower()
+        if token not in allowed:
+            raise ValueError(f'Unsupported analysis_distance_metric {value!r}. Allowed: {tuple(sorted(allowed))}.')
+        if token not in seen:
+            out.append(token)
+            seen.add(token)
+    return tuple(out)
+
+
 def _safe_basis_filename(basis_id: str) -> str:
     base = re.sub(r'[^a-zA-Z0-9._-]+', '_', str(basis_id)).strip('._')
     if not base:
@@ -1335,13 +1363,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error('--anal_batch must be >= 1.')
     if int(args.num_workers) < 0:
         parser.error('--num_workers must be >= 0.')
+    distance_metrics = _normalize_analysis_distance_metrics(args.analysis_distance_metric)
     pca_dims_cli = _validate_pca_args(args, parser)
     enable_pca_1d = _parse_bool_like(args.enable_pca_1d, default=False)
     enable_pca_mimo = _parse_bool_like(args.enable_pca_mimo, default=False)
     pca_enabled = bool(enable_pca_1d or enable_pca_mimo or args.pca_ref_epoch is not None)
     if pca_enabled and args.pca_ref_epoch is None:
         raise ValueError('pca_ref_epoch must be provided when enable_pca_1d or enable_pca_mimo is enabled.')
-    # Exact-only analysis: userbin aggregation is intentionally disabled.
+    # Base path keeps exact PSD summaries; runtime token overlay expands psd_curve_tokens/userbins.
 
     _load_runtime_dependencies()
 
@@ -1513,12 +1542,33 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ref_kwargs.update(category='analysis_manifest', status='ok', message=json.dumps(meta, ensure_ascii=False), artifact_name='pca_reference', output_csv_path=str(checkpoint_dir / 'pca_reference'), pca_analysis_schema_version=PCA_ANALYSIS_SCHEMA_VERSION, basis_id=str(meta.get('basis_id', '')), reference_epoch=int(meta.get('reference_epoch', -1)), resolved_dim=int(meta.get('resolved_dim', 0)))
                 pca_reference_rows.append(common_row(**ref_kwargs))
 
-        layer_distance_profile_rows, layer_distance_checkpoint_trend_rows = _layer_distance_rows_for_checkpoint(summaries=summaries, common_by_key=common_by_key, extractors=selected_extractors, distance_metric=str(args.analysis_distance_metric))
+        layer_distance_profile_rows: list[dict[str, str]] = []
+        layer_distance_checkpoint_trend_rows: list[dict[str, str]] = []
+        for distance_metric in distance_metrics:
+            profile_rows, trend_rows = _layer_distance_rows_for_checkpoint(
+                summaries=summaries,
+                common_by_key=common_by_key,
+                extractors=selected_extractors,
+                distance_metric=str(distance_metric),
+            )
+            layer_distance_profile_rows.extend(profile_rows)
+            layer_distance_checkpoint_trend_rows.extend(trend_rows)
         layer_dispersion_profile_rows, layer_dispersion_checkpoint_trend_rows = _layer_dispersion_rows_for_checkpoint(summaries=summaries, common_by_key=common_by_key, extractors=selected_extractors)
         layer_distance_trend_rows.extend(layer_distance_checkpoint_trend_rows)
         layer_dispersion_trend_rows.extend(layer_dispersion_checkpoint_trend_rows)
 
-        pair_rows, appendix_rows = _pair_rows_for_checkpoint(summaries=summaries, common_by_key=common_by_key, enable_appendix=bool(args.enable_pairwise_dependency_appendix), extractors=selected_extractors, distance_metric=str(args.analysis_distance_metric))
+        pair_rows: list[dict[str, str]] = []
+        appendix_rows: list[dict[str, str]] = []
+        for distance_metric in distance_metrics:
+            current_pair_rows, current_appendix_rows = _pair_rows_for_checkpoint(
+                summaries=summaries,
+                common_by_key=common_by_key,
+                enable_appendix=bool(args.enable_pairwise_dependency_appendix),
+                extractors=selected_extractors,
+                distance_metric=str(distance_metric),
+            )
+            pair_rows.extend(current_pair_rows)
+            appendix_rows.extend(current_appendix_rows)
         filter_rows, filter_snapshot = _filter_snapshot_rows(common_base=checkpoint_base, model=model, layer_index_by_name=layer_index_by_name)
         filter_distribution_rows = _filter_distribution_rows(common_base=checkpoint_base, model=model, layer_index_by_name=layer_index_by_name, args=args)
         for layer_name, param_map in filter_snapshot.items():
@@ -1625,7 +1675,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         manifest_rows.append(_manifest_row(base=manifest_base, artifact_name='checkpoint_ordering', path=Path(args.checkpoint), status='ok', message=warning))
     manifest_path = output_root / 'analysis_manifest.csv'
     write_common_csv(manifest_path, manifest_rows)
-    print(json.dumps({'status': 'ok', 'source_program': SOURCE_PROGRAM, 'output_root': str(output_root), 'analysis_distance_metric': str(args.analysis_distance_metric), 'checkpoints': [str(p) for p in checkpoint_files]}, sort_keys=True))
+    print(json.dumps({'status': 'ok', 'source_program': SOURCE_PROGRAM, 'output_root': str(output_root), 'analysis_distance_metrics': list(distance_metrics), 'checkpoints': [str(p) for p in checkpoint_files]}, sort_keys=True))
     return 0
 
 

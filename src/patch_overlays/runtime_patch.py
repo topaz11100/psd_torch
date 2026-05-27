@@ -38,6 +38,67 @@ def _add_arg(parser: Any, *flags: str, **kwargs: Any) -> None:
     parser.add_argument(*flags, **kwargs)
 
 
+def _split_cli_values(values: Any, *, default: Sequence[str]) -> list[str]:
+    if values is None:
+        return [str(v) for v in default]
+    if isinstance(values, str):
+        raw = [values]
+    else:
+        raw = list(values)
+    out: list[str] = []
+    for item in raw:
+        for chunk in str(item).replace(',', ' ').split():
+            token = chunk.strip()
+            if token:
+                out.append(token)
+    return out or [str(v) for v in default]
+
+
+def _normalize_choice_values(values: Any, *, default: Sequence[str], allowed: Sequence[str], name: str) -> tuple[str, ...]:
+    allowed_set = {str(v) for v in allowed}
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in _split_cli_values(values, default=default):
+        token = str(value).strip().lower()
+        if token not in allowed_set:
+            raise ValueError(f'Unsupported {name} {value!r}. Allowed: {tuple(allowed)}.')
+        if token not in seen:
+            normalized.append(token)
+            seen.add(token)
+    return tuple(normalized)
+
+
+def _analysis_distance_metrics(args: Any) -> tuple[str, ...]:
+    return _normalize_choice_values(
+        getattr(args, 'analysis_distance_metric', None),
+        default=('centered_l2',),
+        allowed=('centered_l2', 'diff_l2'),
+        name='analysis_distance_metric',
+    )
+
+
+def _analysis_userbin_reducers(args: Any) -> tuple[str, ...]:
+    raw = _normalize_choice_values(
+        getattr(args, 'analysis_userbin_reducer', None),
+        default=('mean',),
+        allowed=('mean', 'median', 'sum'),
+        name='analysis_userbin_reducer',
+    )
+    return tuple(normalize_userbin_reducer(value) for value in raw)
+
+
+def _analysis_curve_batches(specs: Sequence[Any], userbin_reducers: Sequence[str]) -> tuple[tuple[tuple[Any, ...], str], ...]:
+    exact_specs = tuple(spec for spec in specs if getattr(spec, 'extractor', '') == 'psd_exact')
+    userbin_specs = tuple(spec for spec in specs if getattr(spec, 'extractor', '') == 'psd_userbin')
+    batches: list[tuple[tuple[Any, ...], str]] = []
+    if exact_specs:
+        batches.append((exact_specs, 'mean'))
+    for reducer in userbin_reducers:
+        if userbin_specs:
+            batches.append((userbin_specs, str(reducer)))
+    return tuple(batches)
+
+
 def patch_csv_schema(g: dict[str, Any]) -> None:
     cols = g.get('CATEGORY_COLUMNS')
     if not isinstance(cols, dict):
@@ -337,12 +398,11 @@ def patch_psd_analysis(g: dict[str, Any]) -> None:
 
     def build_arg_parser_patched():
         parser = orig_build()
+        _add_arg(parser, '--analysis_distance_metric', nargs='*', default=['centered_l2'], choices=('centered_l2', 'diff_l2'))
         _add_arg(parser, '--psd_curve_tokens', nargs='*', default=None)
         _add_arg(parser, '--analysis_psd_tokens', nargs='*', default=None)
         _add_arg(parser, '--analysis_userbin_edges', nargs='*', type=float, default=None)
-        _add_arg(parser, '--analysis_userbin_width', default=None)
-        _add_arg(parser, '--analysis_userbin_count', type=int, default=10)
-        _add_arg(parser, '--analysis_userbin_reducer', default='mean', choices=('mean', 'median', 'sum'))
+        _add_arg(parser, '--analysis_userbin_reducer', nargs='*', default=['mean'], choices=('mean', 'median', 'sum'))
         _add_arg(parser, '--filter_alpha_userbin_edges', nargs='*', type=float, default=None)
         _add_arg(parser, '--filter_alpha_userbin_count', type=int, default=10)
         _add_arg(parser, '--filter_frequency_userbin_edges', nargs='*', type=float, default=None)
@@ -390,19 +450,27 @@ def patch_psd_analysis(g: dict[str, Any]) -> None:
             parser.error('--num_workers must be >= 0.')
         token_values = getattr(args, 'psd_curve_tokens', None) or getattr(args, 'analysis_psd_tokens', None)
         specs = parse_psd_curve_tokens(token_values, default=[DEFAULT_PSD_TOKEN])
+        distance_metrics = _analysis_distance_metrics(args)
+        userbin_reducers = _analysis_userbin_reducers(args)
         userbin_edges = resolve_userbin_edges(
             edges=getattr(args, 'analysis_userbin_edges', None),
-            width=getattr(args, 'analysis_userbin_width', None),
-            count=getattr(args, 'analysis_userbin_count', 10),
             required=tokens_require_userbins(specs),
         )
-        userbin_reducer = normalize_userbin_reducer(getattr(args, 'analysis_userbin_reducer', 'mean'))
+        curve_batches = _analysis_curve_batches(specs, userbin_reducers)
         g['_load_runtime_dependencies']()
         output_root = Path(args.output_root).expanduser().resolve()
         output_root.mkdir(parents=True, exist_ok=True)
         checkpoint_input = Path(args.checkpoint).expanduser().resolve()
         input_is_single_file = checkpoint_input.is_file()
         checkpoint_files, ordering_warnings = g['_resolve_checkpoint_files'](checkpoint_input)
+        if getattr(args, 'pca_ref_epoch', None) is not None:
+            ref_epoch = int(getattr(args, 'pca_ref_epoch'))
+            ref_candidates = [
+                p for p in checkpoint_files
+                if int(g['_load_checkpoint'](p, map_location='cpu').get('epoch', -1)) == ref_epoch
+            ]
+            if not ref_candidates:
+                raise ValueError(f'pca_ref_epoch={ref_epoch} is not present in checkpoint list.')
         device = g['_require_cuda_device'](int(args.gpu_index))
         manifest_rows: list[dict[str, str]] = []
         first_manifest_base = None
@@ -451,11 +519,22 @@ def patch_psd_analysis(g: dict[str, Any]) -> None:
                 base = dict(checkpoint_base)
                 base.update(layer=layer_name, layer_index=layer_index, scope=scope, probe_family=family, label='' if label is None else int(label), signal_kind=signal_kind, series=series)
                 common_by_key[key] = base
-                c_rows, d_rows, curves = curve_rows_for_maps(common_row=g['common_row'], base=base, maps=maps.to(device), specs=specs, userbin_edges=userbin_edges, userbin_reducer=userbin_reducer, category='analysis_curve')
-                family_rows.extend(c_rows)
-                dispersion_rows.extend(d_rows)
+                curves = {}
+                for batch_specs, batch_userbin_reducer in curve_batches:
+                    c_rows, d_rows, batch_curves = curve_rows_for_maps(
+                        common_row=g['common_row'],
+                        base=base,
+                        maps=maps.to(device),
+                        specs=batch_specs,
+                        userbin_edges=userbin_edges,
+                        userbin_reducer=batch_userbin_reducer,
+                        category='analysis_curve',
+                    )
+                    family_rows.extend(c_rows)
+                    dispersion_rows.extend(d_rows)
+                    curves.update(batch_curves)
                 curves_by_key[key] = curves
-                curve_distance_rows.extend(token_distance_rows(common_row=g['common_row'], base=base, curves=curves))
+                curve_distance_rows.extend(token_distance_rows(common_row=g['common_row'], base=base, curves=curves, distance_metrics=distance_metrics))
             input_by_scope = {key[4:7]: key for key in curves_by_key if key[0] == 'input'}
             for key, curves in curves_by_key.items():
                 if key[0] == 'input':
@@ -466,7 +545,7 @@ def patch_psd_analysis(g: dict[str, Any]) -> None:
                 for token in sorted(set(curves) & set(curves_by_key[input_key])):
                     if curves[token].shape != curves_by_key[input_key][token].shape:
                         continue
-                    for metric in ('centered_l2', 'diff_l2'):
+                    for metric in distance_metrics:
                         row = dict(common_by_key[key])
                         row.update(category='layer_distance_profile', relation_type='input_reference', comparison_index=0, comparison_label=f'input->{key[0]}', track_name=str(key[3]), source_layer='input', source_layer_index=0, source_signal_kind='input', source_series='input', target_layer=key[0], target_layer_index=key[1], target_signal_kind=key[2], target_series=key[3], psd_token=token, distance_metric=metric, value=curve_distance(curves_by_key[input_key][token], curves[token], metric), value_unit='dimensionless')
                         layer_rows.append(g['common_row'](**row))
@@ -480,7 +559,7 @@ def patch_psd_analysis(g: dict[str, Any]) -> None:
                     for token in sorted(set(curves_by_key[src]) & set(curves_by_key[dst])):
                         if curves_by_key[src][token].shape != curves_by_key[dst][token].shape:
                             continue
-                        for metric in ('centered_l2', 'diff_l2'):
+                        for metric in distance_metrics:
                             row = dict(common_by_key[dst])
                             row.update(category='layer_distance_profile', relation_type='adjacent', comparison_index=idx, comparison_label=f'{src[0]}->{dst[0]}', track_name=str(dst[3]), source_layer=src[0], source_layer_index=src[1], source_signal_kind=src[2], source_series=src[3], target_layer=dst[0], target_layer_index=dst[1], target_signal_kind=dst[2], target_series=dst[3], psd_token=token, distance_metric=metric, value=curve_distance(curves_by_key[src][token], curves_by_key[dst][token], metric), value_unit='dimensionless')
                             layer_rows.append(g['common_row'](**row))
@@ -517,7 +596,7 @@ def patch_psd_analysis(g: dict[str, Any]) -> None:
             manifest_rows.append(g['_manifest_row'](base=manifest_base, artifact_name='checkpoint_ordering', path=Path(args.checkpoint), status='ok', message=warning))
         manifest_path = output_root / 'analysis_manifest.csv'
         g['write_common_csv'](manifest_path, manifest_rows)
-        print(json.dumps({'status': 'ok', 'source_program': g['SOURCE_PROGRAM'], 'output_root': str(output_root), 'psd_curve_tokens': [s.token for s in specs], 'checkpoints': [str(p) for p in checkpoint_files]}, sort_keys=True))
+        print(json.dumps({'status': 'ok', 'source_program': g['SOURCE_PROGRAM'], 'output_root': str(output_root), 'psd_curve_tokens': [s.token for s in specs], 'analysis_userbin_reducers': list(userbin_reducers), 'analysis_distance_metrics': list(distance_metrics), 'checkpoints': [str(p) for p in checkpoint_files]}, sort_keys=True))
         return 0
 
     g['build_arg_parser'] = build_arg_parser_patched

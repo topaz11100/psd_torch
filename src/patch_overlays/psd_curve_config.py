@@ -95,11 +95,13 @@ def tokens_require_userbins(specs: Iterable[PSDCurveSpec]) -> bool:
     return any(spec.extractor == 'psd_userbin' for spec in specs)
 
 
-def _float_values(values: Sequence[float] | Sequence[str] | str | None) -> list[float]:
+def _float_values(values: Sequence[float] | Sequence[str] | str | float | int | None) -> list[float]:
     if values is None:
         return []
     if isinstance(values, str):
         raw = values.replace(',', ' ').split()
+    elif isinstance(values, (float, int)):
+        raw = [values]
     else:
         raw = list(values)
     return [float(v) for v in raw if str(v).strip() != '']
@@ -120,6 +122,9 @@ def resolve_userbin_edges(
     required: bool = False,
 ) -> list[float] | None:
     values = _float_values(edges)
+    if len(values) == 1:
+        width = values[0]
+        values = []
     if values:
         resolved = values
     elif width not in (None, ''):
@@ -139,7 +144,7 @@ def resolve_userbin_edges(
             raise ValueError('userbin count must be >= 1.')
         resolved = np.linspace(0.0, 0.5, n + 1, dtype=np.float64).tolist()
     elif required:
-        resolved = np.linspace(0.0, 0.5, 11, dtype=np.float64).tolist()
+        raise ValueError('userbin edges are required for userbin PSD tokens. Provide explicit analysis_userbin_edges or a single bin width.')
     else:
         return None
     if len(resolved) < 2:
