@@ -6,7 +6,20 @@ set -euo pipefail
 # 기본 실행 대상. 여러 분석 시나리오를 고정해 둘 때는 이 배열에 JSON 경로를 추가한다.
 # CLI 인자를 넘기면 아래 배열 대신 인자 목록을 실행한다.
 CONFIG_PATHS=(
-    "config/psd_analysis.json"
+    "config/psd_analysis_scenario/00_soft_fixed/s-mnist_lif_soft_fixed.json"
+    "config/psd_analysis_scenario/00_soft_fixed/s-mnist_rf_soft_fixed.json"
+    "config/psd_analysis_scenario/00_soft_fixed/shd_lif_soft_fixed.json"
+    "config/psd_analysis_scenario/00_soft_fixed/shd_rf_soft_fixed.json"
+
+    "config/psd_analysis_scenario/01_soft_train/s-mnist_lif_soft_train.json"
+    "config/psd_analysis_scenario/01_soft_train/s-mnist_rf_soft_train.json"
+    "config/psd_analysis_scenario/01_soft_train/shd_lif_soft_train.json"
+    "config/psd_analysis_scenario/01_soft_train/shd_rf_soft_train.json"
+    
+    "config/psd_analysis_scenario/02_soft_fixed_clip/s-mnist_lif_soft_fixed_clip.json"
+    "config/psd_analysis_scenario/02_soft_fixed_clip/s-mnist_rf_soft_fixed_clip.json"
+    "config/psd_analysis_scenario/02_soft_fixed_clip/shd_lif_soft_fixed_clip.json"
+    "config/psd_analysis_scenario/02_soft_fixed_clip/shd_rf_soft_fixed_clip.json"
 )
 
 if [ "$#" -gt 0 ]; then
@@ -34,15 +47,4 @@ for CONFIG_PATH in "${CONFIG_PATHS[@]}"; do
     echo "CONFIG=${CONFIG_PATH}"
     echo "LOG=${LOG_PATH}"
     echo "PID=${PID}"
-
-    if wait "$PID"; then
-        STATUS=0
-    else
-        STATUS="$?"
-    fi
-    echo "STATUS=${STATUS}"
-    if [ "$STATUS" -ne 0 ]; then
-        echo "FAILED_CONFIG=${CONFIG_PATH}"
-        exit "$STATUS"
-    fi
 done

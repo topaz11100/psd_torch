@@ -94,7 +94,7 @@
 
 ### model_training 병렬 시나리오 실행
 
-`bash/model_training.sh`와 `bash/model_training_ddp.sh`는 config 파일 하나만 실행하는 단일 wrapper가 아니라 config 목록을 순회해 각 시나리오를 별도 백그라운드 프로세스로 띄우는 launcher다. 각 프로세스는 같은 `RUN_STAMP`와 config stem을 사용해 `logs/<stage>/<stamp>__<config-stem>.log`에 기록한다. `bash/psd_analysis.sh`도 config 목록을 받지만, 분석 job은 nohup을 유지한 채 config별로 직렬 실행한다.
+`bash/model_training.sh`와 `bash/model_training_ddp.sh`는 config 파일 하나만 실행하는 단일 wrapper가 아니라 config 목록을 순회해 각 시나리오를 별도 백그라운드 프로세스로 띄우는 launcher다. 각 프로세스는 같은 `RUN_STAMP`와 config stem을 사용해 `logs/<stage>/<stamp>__<config-stem>.log`에 기록한다.
 
 ```bash
 # 단일 기본 config
@@ -197,13 +197,8 @@ Readout 의미:
 
 | 인수 | 역할 | 자료형 | 필수 | 허용값/범위 | 예시 |
 |---|---|---:|---:|---|---|
-| `psd_curve_tokens` | 분석할 PSD curve token 목록 | string array | 아니오 | `<exact\|userbin>_<mean\|median>_<raw\|centered>_<raw\|db>` | `["exact_mean_centered_raw"]` |
-| `analysis_userbin_edges` | userbin PSD의 normalized frequency 구간. edge list 또는 단일 bin width | number array/number/null | userbin token 사용 시 예 | `[0.0,0.05,...,0.5]` 또는 `0.05`, 범위 `[0,0.5]` | `[0.0,0.1,0.2,0.3,0.4,0.5]` |
-| `analysis_userbin_reducer` | userbin 내부 native frequency bin 집계 방식 목록 | string array | 아니오 | `mean`, `median`, `sum` | `["mean", "sum"]` |
-| `analysis_distance_metric` | curve distance metric 목록 | string array | 아니오 | `centered_l2`, `diff_l2` | `["centered_l2", "diff_l2"]` |
+| `analysis_distance_metric` | curve distance metric | string | 아니오 | `centered_l2`, `diff_l2` | `centered_l2` |
 | `enable_pairwise_dependency_appendix` | pairwise appendix 저장 여부 | boolean | 아니오 | true/false | `false` |
-
-`psd_analysis`는 `psd_curve_tokens`, `analysis_userbin_reducer`, `analysis_distance_metric`의 가능한 조합을 계산한다. `analysis_userbin_reducer`는 userbin token에만 적용되며 exact token은 중복 계산하지 않는다. `analysis_userbin_edges`는 explicit edge list 또는 단일 width 값을 받는다. 단일 width `0.05`는 `[0.0, 0.05, ..., 0.5]`로 해석된다. `analysis_userbin_count`와 `analysis_userbin_width`는 공식 설정에서 사용하지 않는다.
 
 모델 분석 stage는 hidden/output 계층만 분석한다.
 

@@ -1,0 +1,32 @@
+{
+  "psd_analysis": {
+    "checkpoint": "/home/yongokhan/바탕화면/psd/result/ddp_train_scenario/02_soft_fixed_clip/shd_lif_soft_fixed_clip/checkpoints",
+    "dataset": "shd",
+    "prep_root": "/home/yongokhan/바탕화면/prep_data",
+    "output_root": "/home/yongokhan/바탕화면/psd/result/ddp_train_scenario/02_soft_fixed_clip/shd_lif_soft_fixed_clip/psd_analysis",
+    "anal_batch": 128,
+    "gpu_index": 1,
+    "seed": 0,
+    "num_workers": 0,
+    "low_vram": 0,
+    "enable_pairwise_dependency_appendix": false,
+    "analysis_distance_metric": [
+      "centered_l2",
+      "diff_l2"
+    ],
+    "psd_curve_tokens": [
+      "exact_mean_centered_db",
+      "exact_median_centered_db",
+      "userbin_mean_centered_db"
+    ],
+    "analysis_userbin_edges": 0.025,
+    "analysis_userbin_reducer": [
+      "mean"
+    ],
+    "enable_pca_1d": false,
+    "enable_pca_mimo": false,
+    "pca_ref_epoch": null,
+    "pca_min_train_accuracy": 0.0,
+    "pca_dim_per_layer": []
+  }
+}

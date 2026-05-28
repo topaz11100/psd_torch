@@ -41,7 +41,7 @@
     "alpha_clip_edges": null,
     "scenario_mode": "none",
     "lambda_psd_pca": 0.0,
-    "compile_model": true,
+    "compile_model": false,
     "band_edge": null,
     "tear": 1
   }
