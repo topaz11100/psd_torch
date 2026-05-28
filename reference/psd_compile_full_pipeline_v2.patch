@@ -1,0 +1,603 @@
+diff --git a/src/model/training.py b/src/model/training.py
+index 6e428da..eabcf93 100644
+--- a/src/model/training.py
++++ b/src/model/training.py
+@@ -67,8 +67,19 @@ def build_optimizer(
+ 
+ 
+ def _unwrap_model(model: nn.Module) -> nn.Module:
+-    wrapped = getattr(model, 'module', None)
+-    return wrapped if wrapped is not None else model
++    current = model
++    seen: set[int] = set()
++    while True:
++        object_id = id(current)
++        if object_id in seen:
++            return current
++        seen.add(object_id)
++        wrapped = getattr(current, 'module', None)
++        if wrapped is None:
++            wrapped = getattr(current, '_orig_mod', None)
++        if wrapped is None:
++            return current
++        current = wrapped
+ 
+ 
+ def _move_inputs_to_device(model: SNNClassifier, inputs: Any, *, device: torch.device) -> torch.Tensor:
+@@ -106,6 +117,103 @@ def _regularization_enabled(lambda1: float, lambda2: float) -> bool:
+     return lambda1 != 0.0 or lambda2 != 0.0
+ 
+ 
++_COMPILED_TRAIN_STEP_CACHE: dict[tuple[Any, ...], Any] = {}
++_COMPILED_EVAL_STEP_CACHE: dict[tuple[Any, ...], Any] = {}
++
++
++def _normalize_compile_token(value: Any) -> str | None:
++    if value is None:
++        return None
++    token = str(value).strip()
++    if token == '' or token.lower() in {'none', 'null'}:
++        return None
++    return token
++
++
++def _compile_kwargs(
++    *,
++    backend: str | None = 'inductor',
++    mode: str | None = 'default',
++    fullgraph: bool = False,
++    dynamic: bool | None = None,
++) -> dict[str, Any]:
++    kwargs: dict[str, Any] = {}
++    backend_token = _normalize_compile_token(backend)
++    if backend_token is not None:
++        kwargs['backend'] = backend_token
++    mode_token = _normalize_compile_token(mode)
++    if mode_token is not None and mode_token.lower() != 'default':
++        kwargs['mode'] = mode_token
++    if bool(fullgraph):
++        kwargs['fullgraph'] = True
++    if dynamic is not None:
++        kwargs['dynamic'] = bool(dynamic)
++    return kwargs
++
++
++def _compiled_callable(
++    fn: Any,
++    cache: dict[tuple[Any, ...], Any],
++    *,
++    label: str,
++    backend: str | None = 'inductor',
++    mode: str | None = 'default',
++    fullgraph: bool = False,
++    dynamic: bool | None = None,
++) -> Any:
++    compile_fn = getattr(torch, 'compile', None)
++    if compile_fn is None:
++        raise RuntimeError(f'{label} compile requested but torch.compile is unavailable in this environment.')
++    key = (label, _normalize_compile_token(backend), _normalize_compile_token(mode), bool(fullgraph), dynamic)
++    compiled = cache.get(key)
++    if compiled is None:
++        compiled = compile_fn(fn, **_compile_kwargs(backend=backend, mode=mode, fullgraph=fullgraph, dynamic=dynamic))
++        cache[key] = compiled
++    return compiled
++
++
++def _train_step_fn(
++    *,
++    compile_step: bool = False,
++    compile_backend: str | None = 'inductor',
++    compile_mode: str | None = 'default',
++    compile_fullgraph: bool = False,
++    compile_dynamic: bool | None = None,
++) -> Any:
++    if not bool(compile_step):
++        return _train_one_batch_tensor_step
++    return _compiled_callable(
++        _train_one_batch_tensor_step,
++        _COMPILED_TRAIN_STEP_CACHE,
++        label='train_one_batch_tensor_step',
++        backend=compile_backend,
++        mode=compile_mode,
++        fullgraph=compile_fullgraph,
++        dynamic=compile_dynamic,
++    )
++
++
++def _eval_step_fn(
++    *,
++    compile_step: bool = False,
++    compile_backend: str | None = 'inductor',
++    compile_mode: str | None = 'default',
++    compile_fullgraph: bool = False,
++    compile_dynamic: bool | None = None,
++) -> Any:
++    if not bool(compile_step):
++        return _eval_one_batch_tensor_step
++    return _compiled_callable(
++        _eval_one_batch_tensor_step,
++        _COMPILED_EVAL_STEP_CACHE,
++        label='eval_one_batch_tensor_step',
++        backend=compile_backend,
++        mode=compile_mode,
++        fullgraph=compile_fullgraph,
++        dynamic=compile_dynamic,
++    )
++
++
+ def _zero_regularization_parts(reference: torch.Tensor) -> RegularizationLossParts:
+     zero = reference.new_zeros(())
+     return RegularizationLossParts(total=zero, global_loss=zero, adjacent_loss=zero)
+@@ -203,6 +311,23 @@ def compute_regularization_loss(
+     )
+ 
+ 
++def _eval_one_batch_tensor_step(
++    model: SNNClassifier,
++    device_inputs: torch.Tensor,
++    device_target: torch.Tensor,
++    readout: ReadoutBase,
++) -> tuple[torch.Tensor, torch.Tensor]:
++    _reset_stateful_model(model)
++    result = model(device_inputs, capture_hidden=False)
++    _reset_stateful_model(model)
++
++    analysis = readout.analyze_output_record(result.output_record.membrane, result.output_record.spike)
++    loss = readout.loss_from_analysis(analysis, device_target, training=False)
++    pred = readout.predictions_from_analysis(analysis)
++    correct = (pred == device_target).sum()
++    return loss.detach(), correct.detach()
++
++
+ @torch.inference_mode()
+ def eval_one_batch(
+     model: SNNClassifier,
+@@ -211,37 +336,42 @@ def eval_one_batch(
+     *,
+     readout: ReadoutBase,
+     device: torch.device,
++    compile_step: bool = False,
++    compile_backend: str | None = 'inductor',
++    compile_mode: str | None = 'default',
++    compile_fullgraph: bool = False,
++    compile_dynamic: bool | None = None,
+ ) -> EpochMetrics:
+     was_training = bool(model.training)
+     model.eval()
+     try:
+         device_inputs = _move_inputs_to_device(model, inputs, device=device)
+         device_target = _move_target_to_device(target, device=device)
+-
+-        _reset_stateful_model(model)
+-        result = model(device_inputs, capture_hidden=False)
+-        _reset_stateful_model(model)
+-
+-        analysis = readout.analyze_output_record(result.output_record.membrane, result.output_record.spike)
+-        loss = readout.loss_from_analysis(analysis, device_target, training=False)
+-        pred = readout.predictions_from_analysis(analysis)
++        step_fn = _eval_step_fn(
++            compile_step=compile_step,
++            compile_backend=compile_backend,
++            compile_mode=compile_mode,
++            compile_fullgraph=compile_fullgraph,
++            compile_dynamic=compile_dynamic,
++        )
++        loss, correct = step_fn(model, device_inputs, device_target, readout)
+         batch_size = int(device_target.shape[0])
+-        correct = int((pred == device_target).sum().item())
+-        accuracy = 0.0 if batch_size == 0 else float(correct) / float(batch_size)
+-        return EpochMetrics(loss=float(loss.detach().item()), accuracy=accuracy, correct=correct, total=batch_size)
++        correct_int = int(correct.detach().item())
++        accuracy = 0.0 if batch_size == 0 else float(correct_int) / float(batch_size)
++        return EpochMetrics(loss=float(loss.detach().item()), accuracy=accuracy, correct=correct_int, total=batch_size)
+     finally:
+         if was_training:
+             model.train()
+ 
+ 
+-def train_one_batch(
++def _train_one_batch_tensor_step(
+     model: SNNClassifier,
+-    inputs: Any,
+-    target: Any,
++    device_inputs: torch.Tensor,
++    device_target: torch.Tensor,
+     *,
+     readout: ReadoutBase,
+     optimizer: torch.optim.Optimizer,
+-    device: torch.device,
++    capture_hidden: bool,
+     regularization_lambda1: float = 0.0,
+     regularization_lambda2: float = 0.0,
+     regularization_signal: str = 'y_mem',
+@@ -257,17 +387,10 @@ def train_one_batch(
+     psd_reg_curve_scale: str = 'raw',
+     psd_reg_relation: str = 'adjacent',
+     pca_reference_bank: dict[str, Any] | None = None,
+-) -> TrainEpochMetrics:
+-    model.train()
+-    device_inputs = _move_inputs_to_device(model, inputs, device=device)
+-    device_target = _move_target_to_device(target, device=device)
+-    capture_hidden = _regularization_enabled(regularization_lambda1, regularization_lambda2) or any(
+-        float(v) != 0.0 for v in (lambda_psd_rep_1d, lambda_psd_pca)
+-    )
+-
++) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+     optimizer.zero_grad(set_to_none=True)
+     _reset_stateful_model(model)
+-    result = model(device_inputs, capture_hidden=capture_hidden)
++    result = model(device_inputs, capture_hidden=bool(capture_hidden))
+     analysis = readout.analyze_output_record(result.output_record.membrane, result.output_record.spike)
+     task_loss = readout.loss_from_analysis(analysis, device_target, training=True)
+     regularization = compute_regularization_loss(
+@@ -299,25 +422,116 @@ def train_one_batch(
+     _project_parameters_after_optimizer_step(model)
+ 
+     pred = readout.predictions_from_analysis(analysis)
++    correct = (pred == device_target).sum()
++    return (
++        total_loss.detach(),
++        task_loss.detach(),
++        regularization.total.detach(),
++        regularization.global_loss.detach(),
++        regularization.adjacent_loss.detach(),
++        psd_reg.total.detach(),
++        psd_reg.rep_1d.detach(),
++        psd_reg.pca_1d.detach(),
++        psd_reg.pca_mimo.detach(),
++        correct.detach(),
++    )
++
++
++def train_one_batch(
++    model: SNNClassifier,
++    inputs: Any,
++    target: Any,
++    *,
++    readout: ReadoutBase,
++    optimizer: torch.optim.Optimizer,
++    device: torch.device,
++    regularization_lambda1: float = 0.0,
++    regularization_lambda2: float = 0.0,
++    regularization_signal: str = 'y_mem',
++    regularization_curve_space: str = 'exact',
++    regularization_curve_scale: str = 'raw',
++    regularization_centering: str = 'raw',
++    regularization_reducer: str = 'mean',
++    regularization_distance_metric: str = 'centered_l2',
++    lambda_psd_rep_1d: float = 0.0,
++    lambda_psd_pca: float = 0.0,
++    psd_reg_variant: str = 'raw',
++    psd_reg_output_family: str = 'spike',
++    psd_reg_curve_scale: str = 'raw',
++    psd_reg_relation: str = 'adjacent',
++    pca_reference_bank: dict[str, Any] | None = None,
++    compile_step: bool = False,
++    compile_backend: str | None = 'inductor',
++    compile_mode: str | None = 'default',
++    compile_fullgraph: bool = False,
++    compile_dynamic: bool | None = None,
++) -> TrainEpochMetrics:
++    model.train()
++    device_inputs = _move_inputs_to_device(model, inputs, device=device)
++    device_target = _move_target_to_device(target, device=device)
++    capture_hidden = _regularization_enabled(regularization_lambda1, regularization_lambda2) or any(
++        float(v) != 0.0 for v in (lambda_psd_rep_1d, lambda_psd_pca)
++    )
++    step_fn = _train_step_fn(
++        compile_step=compile_step,
++        compile_backend=compile_backend,
++        compile_mode=compile_mode,
++        compile_fullgraph=compile_fullgraph,
++        compile_dynamic=compile_dynamic,
++    )
++    (
++        total_loss,
++        task_loss,
++        regularization_loss,
++        regularization_global_loss,
++        regularization_adjacent_loss,
++        psd_regularization_total,
++        psd_regularization_rep_1d,
++        psd_regularization_pca_1d,
++        psd_regularization_pca_mimo,
++        correct,
++    ) = step_fn(
++        model,
++        device_inputs,
++        device_target,
++        readout=readout,
++        optimizer=optimizer,
++        capture_hidden=capture_hidden,
++        regularization_lambda1=regularization_lambda1,
++        regularization_lambda2=regularization_lambda2,
++        regularization_signal=regularization_signal,
++        regularization_curve_space=regularization_curve_space,
++        regularization_curve_scale=regularization_curve_scale,
++        regularization_centering=regularization_centering,
++        regularization_reducer=regularization_reducer,
++        regularization_distance_metric=regularization_distance_metric,
++        lambda_psd_rep_1d=lambda_psd_rep_1d,
++        lambda_psd_pca=lambda_psd_pca,
++        psd_reg_variant=psd_reg_variant,
++        psd_reg_output_family=psd_reg_output_family,
++        psd_reg_curve_scale=psd_reg_curve_scale,
++        psd_reg_relation=psd_reg_relation,
++        pca_reference_bank=pca_reference_bank,
++    )
++
+     batch_size = int(device_target.shape[0])
+-    correct = int((pred == device_target).sum().item())
+-    accuracy = 0.0 if batch_size == 0 else float(correct) / float(batch_size)
++    correct_int = int(correct.detach().item())
++    accuracy = 0.0 if batch_size == 0 else float(correct_int) / float(batch_size)
+     return TrainEpochMetrics(
+         loss=float(total_loss.detach().item()),
+         accuracy=accuracy,
+-        correct=correct,
++        correct=correct_int,
+         total=batch_size,
+         task_loss=float(task_loss.detach().item()),
+-        regularization_loss=float(regularization.total.detach().item()),
+-        regularization_global_loss=float(regularization.global_loss.detach().item()),
+-        regularization_adjacent_loss=float(regularization.adjacent_loss.detach().item()),
+-        psd_regularization_total=float(psd_reg.total.detach().item()),
+-        psd_regularization_rep_1d=float(psd_reg.rep_1d.detach().item()),
+-        psd_regularization_pca_1d=float(psd_reg.pca_1d.detach().item()),
+-        psd_regularization_pca_mimo=float(psd_reg.pca_mimo.detach().item()),
++        regularization_loss=float(regularization_loss.detach().item()),
++        regularization_global_loss=float(regularization_global_loss.detach().item()),
++        regularization_adjacent_loss=float(regularization_adjacent_loss.detach().item()),
++        psd_regularization_total=float(psd_regularization_total.detach().item()),
++        psd_regularization_rep_1d=float(psd_regularization_rep_1d.detach().item()),
++        psd_regularization_pca_1d=float(psd_regularization_pca_1d.detach().item()),
++        psd_regularization_pca_mimo=float(psd_regularization_pca_mimo.detach().item()),
+     )
+ 
+-
+ @torch.inference_mode()
+ def evaluate_one_epoch(
+     model: SNNClassifier,
+@@ -327,12 +541,28 @@ def evaluate_one_epoch(
+     device: torch.device,
+     progress_desc: str | None = None,
+     disable_progress: bool = False,
++    compile_step: bool = False,
++    compile_backend: str | None = 'inductor',
++    compile_mode: str | None = 'default',
++    compile_fullgraph: bool = False,
++    compile_dynamic: bool | None = None,
+ ) -> EpochMetrics:
+     total_loss_weighted = 0.0
+     total_correct = 0
+     total_examples = 0
+     for inputs, target in tqdm(loader, desc=progress_desc, leave=False, disable=bool(disable_progress)):
+-        batch = eval_one_batch(model, inputs, target, readout=readout, device=device)
++        batch = eval_one_batch(
++            model,
++            inputs,
++            target,
++            readout=readout,
++            device=device,
++            compile_step=compile_step,
++            compile_backend=compile_backend,
++            compile_mode=compile_mode,
++            compile_fullgraph=compile_fullgraph,
++            compile_dynamic=compile_dynamic,
++        )
+         total_loss_weighted += float(batch.loss) * int(batch.total)
+         total_correct += int(batch.correct)
+         total_examples += int(batch.total)
+@@ -365,6 +595,11 @@ def train_one_epoch(
+     psd_reg_curve_scale: str = 'raw',
+     psd_reg_relation: str = 'adjacent',
+     pca_reference_bank: dict[str, Any] | None = None,
++    compile_step: bool = False,
++    compile_backend: str | None = 'inductor',
++    compile_mode: str | None = 'default',
++    compile_fullgraph: bool = False,
++    compile_dynamic: bool | None = None,
+ ) -> TrainEpochMetrics:
+     total_loss_weighted = 0.0
+     task_loss_weighted = 0.0
+@@ -401,6 +636,11 @@ def train_one_epoch(
+             psd_reg_curve_scale=psd_reg_curve_scale,
+             psd_reg_relation=psd_reg_relation,
+             pca_reference_bank=pca_reference_bank,
++            compile_step=compile_step,
++            compile_backend=compile_backend,
++            compile_mode=compile_mode,
++            compile_fullgraph=compile_fullgraph,
++            compile_dynamic=compile_dynamic,
+         )
+         total_loss_weighted += float(batch.loss) * int(batch.total)
+         task_loss_weighted += float(batch.task_loss) * int(batch.total)
+diff --git a/src/model_training.py b/src/model_training.py
+index 3e4a2e6..42e3713 100644
+--- a/src/model_training.py
++++ b/src/model_training.py
+@@ -53,7 +53,19 @@ def _load_runtime_dependencies() -> None:
+ def _load_json_light(path: Path) -> dict[str, Any]: return json.loads(path.read_text(encoding='utf-8'))
+ def _parse_bool_config_value(value: Any, *, default: bool) -> bool: return parse_bool_token(value, default=default)
+ def _ddp_requested(args: argparse.Namespace) -> bool: return _parse_bool_config_value(getattr(args,'ddp',False), default=False)
+-def _unwrap_model(model: Any) -> Any: return getattr(model,'module',model)
++def _unwrap_ddp_model(model: Any) -> Any: return getattr(model,'module',model)
++
++def _unwrap_model(model: Any) -> Any:
++    current=model
++    seen:set[int]=set()
++    while True:
++        object_id=id(current)
++        if object_id in seen: return current
++        seen.add(object_id)
++        wrapped=getattr(current,'module',None)
++        if wrapped is None: wrapped=getattr(current,'_orig_mod',None)
++        if wrapped is None: return current
++        current=wrapped
+ def _is_rank0(ctx: DDPContext) -> bool: return bool(ctx.is_rank0)
+ 
+ def build_arg_parser() -> argparse.ArgumentParser:
+@@ -90,6 +102,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
+     p.add_argument('--anal_epoch_list', nargs='*', default=None); p.add_argument('--checkpoint_root', required=True); p.add_argument('--metric_root', required=True)
+     p.add_argument('--output_root', default=None); p.add_argument('--v_th', type=float, default=1.0); p.add_argument('--resume_checkpoint', default=None); p.add_argument('--config', default=None)
+     p.add_argument('--compile_model', default='false')
++    p.add_argument('--compile_backend', default='inductor')
++    p.add_argument('--compile_mode', default='default')
++    p.add_argument('--compile_fullgraph', default='false')
++    p.add_argument('--compile_dynamic', default='auto')
++    p.add_argument('--compile_threads', default='auto')
++    p.add_argument('--compile_compiled_autograd', default='false')
+     return p
+ 
+ def _normalize_anal_epoch_list(values: Sequence[str] | None, *, epochs: int) -> list[int]:
+@@ -314,14 +332,100 @@ def _canonical_run_readout_mode(mode: str) -> str:
+     return fn(mode)
+ 
+ 
+-def _maybe_compile_model(model: Any, *, requested: bool) -> tuple[Any, bool, str]:
++def _parse_optional_bool_config_value(value: Any, *, default: bool | None = None) -> bool | None:
++    if value is None:
++        return default
++    token=str(value).strip().lower()
++    if token in {'', 'auto', 'none', 'null', 'default'}:
++        return default
++    return _parse_bool_config_value(value, default=False)
++
++def _available_cpu_count() -> int:
++    try:
++        return max(1, len(os.sched_getaffinity(0)))
++    except Exception:
++        return max(1, int(os.cpu_count() or 1))
++
++def _resolve_compile_threads(value: Any) -> int | None:
++    if value is None:
++        return min(32, _available_cpu_count())
++    token=str(value).strip().lower()
++    if token in {'', 'auto'}:
++        return min(32, _available_cpu_count())
++    if token in {'none', 'null', 'default'}:
++        return None
++    threads=int(token)
++    if threads < 1:
++        raise ValueError('compile_threads must be >= 1, auto, or none/default.')
++    return threads
++
++def _normalize_compile_token(value: Any) -> str | None:
++    if value is None:
++        return None
++    token=str(value).strip()
++    if token == '' or token.lower() in {'none', 'null'}:
++        return None
++    return token
++
++def _torch_compile_kwargs(*, backend: Any, mode: Any, fullgraph: bool, dynamic: bool | None) -> dict[str, Any]:
++    kwargs: dict[str, Any] = {}
++    backend_token=_normalize_compile_token(backend)
++    if backend_token is not None:
++        kwargs['backend']=backend_token
++    mode_token=_normalize_compile_token(mode)
++    if mode_token is not None and mode_token.lower()!='default':
++        kwargs['mode']=mode_token
++    if bool(fullgraph):
++        kwargs['fullgraph']=True
++    if dynamic is not None:
++        kwargs['dynamic']=bool(dynamic)
++    return kwargs
++
++def _configure_torch_compile_runtime(args: argparse.Namespace, *, requested: bool) -> dict[str, Any]:
++    meta={'compile_threads': None, 'compile_compiled_autograd_requested': False, 'compile_compiled_autograd_applied': False}
++    if not requested:
++        return meta
++    threads=_resolve_compile_threads(getattr(args,'compile_threads','auto'))
++    if threads is not None:
++        os.environ['TORCHINDUCTOR_COMPILE_THREADS']=str(int(threads))
++        try:
++            import torch._inductor.config as inductor_config
++            inductor_config.compile_threads=int(threads)
++            meta['compile_threads']=int(threads)
++        except Exception as exc:
++            meta['compile_threads_error']=repr(exc)
++    compiled_autograd_requested=_parse_bool_config_value(getattr(args,'compile_compiled_autograd','false'), default=False)
++    meta['compile_compiled_autograd_requested']=bool(compiled_autograd_requested)
++    if compiled_autograd_requested:
++        try:
++            import torch._dynamo.config as dynamo_config
++            if hasattr(dynamo_config, 'compiled_autograd'):
++                dynamo_config.compiled_autograd=True
++                meta['compile_compiled_autograd_applied']=True
++            else:
++                meta['compile_compiled_autograd_error']='torch._dynamo.config.compiled_autograd is unavailable'
++        except Exception as exc:
++            meta['compile_compiled_autograd_error']=repr(exc)
++    return meta
++
++
++def _maybe_compile_model(
++    model: Any,
++    *,
++    requested: bool,
++    backend: Any = 'inductor',
++    mode: Any = 'default',
++    fullgraph: bool = False,
++    dynamic: bool | None = None,
++) -> tuple[Any, bool, str]:
+     if not requested:
+         return model, False, 'disabled'
+     compile_fn = getattr(torch, 'compile', None)
+     if compile_fn is None:
+         raise RuntimeError('compile_model=true but torch.compile is unavailable in this environment.')
+-    compiled = compile_fn(model)
+-    return compiled, True, 'torch.compile_default'
++    kwargs=_torch_compile_kwargs(backend=backend, mode=mode, fullgraph=fullgraph, dynamic=dynamic)
++    compiled = compile_fn(model, **kwargs)
++    return compiled, True, 'torch.compile_model+train_step+eval_step'
+ 
+ def _atomic_torch_save(payload: dict[str, Any], path: Path) -> None:
+     path.parent.mkdir(parents=True, exist_ok=True); temp_dir=Path(tempfile.mkdtemp(prefix='checkpoint_write_', dir=str(path.parent.parent))); temp_path=temp_dir/path.name
+@@ -360,7 +464,12 @@ def main(argv: Sequence[str] | None = None) -> int:
+         readout=build_readout(canonical_readout_mode, num_classes=bundle.num_classes, sequence_length=bundle.sequence_length, device=ctx.device)
+         model=build_snn_classifier(model_token=model_spec,input_dim=bundle.input_dim,sequence_length=bundle.sequence_length,num_classes=bundle.num_classes,input_shape=None,hidden_sizes=tuple(int(v) for v in bundle.default_hidden_sizes),arch_spec=str(args.hidden_spec).strip(),output_layer_overrides=readout.output_layer_overrides(),v_th=float(args.v_th),constraint_config=constraint_config).to(ctx.device)
+         compile_requested = _parse_bool_config_value(getattr(args, 'compile_model', False), default=False)
+-        model, compile_applied, compile_policy = _maybe_compile_model(model, requested=compile_requested)
++        compile_backend = _normalize_compile_token(getattr(args, 'compile_backend', 'inductor')) or 'inductor'
++        compile_mode = _normalize_compile_token(getattr(args, 'compile_mode', 'default')) or 'default'
++        compile_fullgraph = _parse_bool_config_value(getattr(args, 'compile_fullgraph', False), default=False)
++        compile_dynamic = _parse_optional_bool_config_value(getattr(args, 'compile_dynamic', 'auto'), default=None)
++        compile_runtime_meta = _configure_torch_compile_runtime(args, requested=compile_requested)
++        model, compile_applied, compile_policy = _maybe_compile_model(model, requested=compile_requested, backend=compile_backend, mode=compile_mode, fullgraph=compile_fullgraph, dynamic=compile_dynamic)
+         readout.to(ctx.device)
+         if resume_checkpoint is not None:
+             payload=torch.load(resume_checkpoint, map_location=ctx.device, weights_only=False)
+@@ -373,7 +482,7 @@ def main(argv: Sequence[str] | None = None) -> int:
+             elif normalize_scenario_mode(constraint_config.mode) != 'none':
+                 raise ValueError('resume_checkpoint has no constraint_metadata but current run requested constraints.')
+             _assert_psd_resume_compatible(_psd_regularization_metadata_from_args(args), payload.get('psd_regularization_metadata'))
+-            model.load_state_dict(payload['state_dict'])
++            _unwrap_model(model).load_state_dict(payload['state_dict'])
+             resume_epoch=int(payload['epoch'])
+             if _is_rank0(ctx): tqdm.write(f'[model_training] resumed from {resume_checkpoint} at epoch {resume_epoch}')
+         else:
+@@ -385,19 +494,19 @@ def main(argv: Sequence[str] | None = None) -> int:
+         all_rows=[]
+         for epoch in range(resume_epoch+1, int(args.epochs)+1):
+             if train_sampler is not None: train_sampler.set_epoch(epoch)
+-            train_metrics=train_one_epoch(model, train_loader, readout=readout, optimizer=optimizer, device=ctx.device, progress_desc=(f'train epoch {epoch}' if _is_rank0(ctx) else None), disable_progress=(ctx.enabled and (not _is_rank0(ctx))), regularization_lambda1=float(args.regularization_lambda1), regularization_lambda2=float(args.regularization_lambda2), regularization_signal=str(args.regularization_signal), regularization_curve_space=str(args.regularization_curve_space), regularization_curve_scale=str(args.regularization_curve_scale), regularization_centering=str(args.regularization_centering), regularization_reducer=str(args.regularization_reducer), regularization_distance_metric=str(args.regularization_distance_metric), lambda_psd_rep_1d=float(args.lambda_psd_rep_1d), lambda_psd_pca=float(args.lambda_psd_pca), psd_reg_variant=str(args.psd_reg_variant), psd_reg_output_family=str(args.psd_reg_output_family), psd_reg_curve_scale=str(args.psd_reg_curve_scale), psd_reg_relation=str(args.psd_reg_relation), pca_reference_bank=pca_reference_bank)
++            train_metrics=train_one_epoch(model, train_loader, readout=readout, optimizer=optimizer, device=ctx.device, progress_desc=(f'train epoch {epoch}' if _is_rank0(ctx) else None), disable_progress=(ctx.enabled and (not _is_rank0(ctx))), regularization_lambda1=float(args.regularization_lambda1), regularization_lambda2=float(args.regularization_lambda2), regularization_signal=str(args.regularization_signal), regularization_curve_space=str(args.regularization_curve_space), regularization_curve_scale=str(args.regularization_curve_scale), regularization_centering=str(args.regularization_centering), regularization_reducer=str(args.regularization_reducer), regularization_distance_metric=str(args.regularization_distance_metric), lambda_psd_rep_1d=float(args.lambda_psd_rep_1d), lambda_psd_pca=float(args.lambda_psd_pca), psd_reg_variant=str(args.psd_reg_variant), psd_reg_output_family=str(args.psd_reg_output_family), psd_reg_curve_scale=str(args.psd_reg_curve_scale), psd_reg_relation=str(args.psd_reg_relation), pca_reference_bank=pca_reference_bank, compile_step=compile_requested, compile_backend=compile_backend, compile_mode=compile_mode, compile_fullgraph=compile_fullgraph, compile_dynamic=compile_dynamic)
+             train_metrics=_reduce_train_metrics_ddp(train_metrics, ctx)
+             if epoch not in anal_epochs: continue
+             if ctx.enabled: torch.distributed.barrier()
+             if _is_rank0(ctx):
+-                eval_model=_unwrap_model(model)
+-                test_metrics=evaluate_one_epoch(eval_model,test_loader,readout=readout,device=ctx.device,progress_desc=f'test epoch {epoch}',disable_progress=False)
++                eval_model=_unwrap_ddp_model(model)
++                test_metrics=evaluate_one_epoch(eval_model,test_loader,readout=readout,device=ctx.device,progress_desc=f'test epoch {epoch}',disable_progress=False, compile_step=compile_requested, compile_backend=compile_backend, compile_mode=compile_mode, compile_fullgraph=compile_fullgraph, compile_dynamic=compile_dynamic)
+                 tqdm.write(f'[model_training] epoch={epoch} train_loss={train_metrics.loss:.6f} test_loss={test_metrics.loss:.6f} train_acc={float(train_metrics.accuracy):.6f} test_acc={float(test_metrics.accuracy):.6f}')
+                 model_meta=getattr(_unwrap_model(model),'model_metadata',lambda:{})()
+                 psd_meta = _psd_regularization_metadata_from_args(args)
+                 psd_meta['pca_reference_bank_layer_keys'] = sorted(list((pca_reference_bank or {}).keys()))
+                 psd_meta['pca_reference_bank_dims'] = {k:int(v.dim) for k,v in (pca_reference_bank or {}).items()}
+-                payload=_checkpoint_payload(epoch=epoch, model=model, model_token=model_spec.canonical_token, readout_mode=canonical_readout_mode, dataset_token=dataset_token, prep_root=str(prep_root), prepared_dataset_path=str(prepared_dataset_path), seed=int(args.seed), training_args={'ddp':bool(args.ddp),'ddp_world_size':int(args.ddp_world_size),'batch_size_is_global':bool(args.batch_size_is_global),'batch_size':int(args.batch_size)}, metric_snapshot={'train_loss':float(train_metrics.loss),'test_loss':float(test_metrics.loss), 'train_accuracy': float(train_metrics.accuracy), 'test_accuracy': float(test_metrics.accuracy)}, constraint_metadata=model_meta.get('constraint_metadata'), psd_regularization_metadata=psd_meta, compile_model_requested=bool(compile_requested), compile_model_applied=bool(compile_applied), compile_model_policy=str(compile_policy))
++                payload=_checkpoint_payload(epoch=epoch, model=model, model_token=model_spec.canonical_token, readout_mode=canonical_readout_mode, dataset_token=dataset_token, prep_root=str(prep_root), prepared_dataset_path=str(prepared_dataset_path), seed=int(args.seed), training_args={'ddp':bool(args.ddp),'ddp_world_size':int(args.ddp_world_size),'batch_size_is_global':bool(args.batch_size_is_global),'batch_size':int(args.batch_size)}, metric_snapshot={'train_loss':float(train_metrics.loss),'test_loss':float(test_metrics.loss), 'train_accuracy': float(train_metrics.accuracy), 'test_accuracy': float(test_metrics.accuracy)}, constraint_metadata=model_meta.get('constraint_metadata'), psd_regularization_metadata=psd_meta, compile_model_requested=bool(compile_requested), compile_model_applied=bool(compile_applied), compile_train_step_requested=bool(compile_requested), compile_train_step_applied=bool(compile_requested), compile_eval_step_requested=bool(compile_requested), compile_eval_step_applied=bool(compile_requested), compile_backend=str(compile_backend), compile_mode=str(compile_mode), compile_fullgraph=bool(compile_fullgraph), compile_dynamic=compile_dynamic, compile_threads=compile_runtime_meta.get('compile_threads'), compile_compiled_autograd_requested=bool(compile_runtime_meta.get('compile_compiled_autograd_requested')), compile_compiled_autograd_applied=bool(compile_runtime_meta.get('compile_compiled_autograd_applied')), compile_runtime_metadata=dict(compile_runtime_meta), compile_model_policy=str(compile_policy))
+                 _atomic_torch_save(payload, checkpoint_root / f'checkpoint_epoch_{epoch:06d}.pt')
+                 all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='train', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=canonical_readout_mode, epoch=epoch, metric='loss', value=train_metrics.loss))
+                 all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='test', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=canonical_readout_mode, epoch=epoch, metric='loss', value=test_metrics.loss))
