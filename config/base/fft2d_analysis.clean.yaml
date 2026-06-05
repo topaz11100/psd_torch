@@ -1,0 +1,10 @@
+fft2d_analysis:
+  dataset: mnist
+  prep_root: /home/yongokhan/workspace/data/prep_data
+  checkpoint: /home/yongokhan/workspace/result/base/model_training/checkpoints
+  output_root: /home/yongokhan/workspace/result/base/fft2d_analysis
+  num_workers: 0
+  seed: 0
+  gpu_index: 0
+  anal_batch: 128
+  low_vram: 0

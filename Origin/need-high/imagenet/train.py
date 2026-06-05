@@ -6,8 +6,8 @@
 # --------------------------------------------------------
 
 import argparse
+import csv
 import datetime
-import json
 import numpy as np
 import os
 import time
@@ -398,8 +398,13 @@ def main(args):
             
             if log_writer is not None:
                 log_writer.flush()
-            with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
-                f.write(json.dumps(log_stats) + "\n")
+            log_csv_path = os.path.join(args.output_dir, "training_log.csv")
+            write_header = not os.path.exists(log_csv_path)
+            with open(log_csv_path, mode="a", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=sorted(log_stats.keys()))
+                if write_header:
+                    writer.writeheader()
+                writer.writerow(log_stats)
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))

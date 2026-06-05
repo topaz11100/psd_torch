@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import yaml
 import math
 import os
 import random
@@ -1388,8 +1389,8 @@ def main() -> None:
     out_dir = Path(args.output_dir)
     if is_main_process(args):
         out_dir.mkdir(parents=True, exist_ok=True)
-        with (out_dir / "args.json").open("w") as f:
-            json.dump(vars(args), f, indent=2)
+        with (out_dir / "args.yaml").open("w") as f:
+            yaml.safe_dump(vars(args), f, sort_keys=False, allow_unicode=True)
 
     for epoch in range(start_epoch, args.epochs):
         t0 = time.time()

@@ -1,6 +1,6 @@
 import os
 import time
-import json
+import yaml
 import argparse
 from datetime import datetime
 import torch.nn as nn
@@ -234,8 +234,8 @@ else:
     raise NotImplementedError
 
 # dump args
-with open(args.results_dir + '/args.json', 'w') as fid:
-    json.dump(args.__dict__, fid, indent=2)
+with open(args.results_dir + '/args.yaml', 'w') as fid:
+    yaml.safe_dump(args.__dict__, fid, sort_keys=False, allow_unicode=True)
 logging.info(str(args))
 start_epoch = 0
 

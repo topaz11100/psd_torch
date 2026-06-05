@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from src.util.config import save_yaml
+
 SCHEMA_VERSION = 'psd_category_csv_20260502'
 COMMON_PREFIX: tuple[str, ...] = (
     'schema_version',
@@ -39,6 +41,7 @@ CATEGORY_COLUMNS: dict[str, tuple[str, ...]] = {
     'analysis_dispersion': (*AXIS_METADATA_COLUMNS, 'model_token', 'model_family', 'readout_mode', 'seed', 'checkpoint_path', 'checkpoint_epoch', 'layer', 'layer_index', 'scope', 'probe_family', 'label', 'signal_kind', 'series', 'extractor', 'variant', 'scale', 'statistic', 'frequency', 'frequency_unit', 'bin_left', 'bin_right', 'value', 'value_unit'),
     'analysis_2d_fft': (*AXIS_METADATA_COLUMNS, 'model_token', 'model_family', 'readout_mode', 'seed', 'checkpoint_path', 'checkpoint_epoch', 'layer', 'layer_index', 'scope', 'probe_family', 'label', 'sample_role', 'sample_index', 'signal_kind', 'series', 'variant', 'scale', 'row_frequency_index', 'row_frequency', 'row_frequency_unit', 'row_count', 'time_length', 'time_frequency_bin_count', 'time_frequency_grid', 'value_unit'),
     'element_psd': (*AXIS_METADATA_COLUMNS, 'model_token', 'model_family', 'readout_mode', 'seed', 'checkpoint_path', 'checkpoint_epoch', 'layer', 'layer_index', 'scope', 'probe_family', 'label', 'sample_role', 'sample_index', 'signal_kind', 'series', 'variant', 'scale', 'neuron_index', 'neuron_axis_order', 'time_length', 'frequency_bin_count', 'frequency_grid', 'frequency_unit', 'value_unit'),
+    'element_fft': (*AXIS_METADATA_COLUMNS, 'model_token', 'model_family', 'readout_mode', 'seed', 'checkpoint_path', 'checkpoint_epoch', 'layer', 'layer_index', 'scope', 'probe_family', 'label', 'sample_role', 'sample_index', 'signal_kind', 'series', 'variant', 'scale', 'fft_component', 'neuron_index', 'neuron_axis_order', 'time_length', 'frequency_bin_count', 'frequency_grid', 'frequency_unit', 'value_unit'),
     'checkpoint_accuracy': (*AXIS_METADATA_COLUMNS, 'model_token', 'model_family', 'readout_mode', 'seed', 'checkpoint_path', 'checkpoint_epoch', 'scope', 'accuracy', 'correct', 'total', 'value_unit'),
     'pair_distance': (*AXIS_METADATA_COLUMNS, 'model_token', 'model_family', 'readout_mode', 'seed', 'checkpoint_epoch', 'layer', 'layer_index', 'source_scope', 'target_scope', 'source_signal_kind', 'source_series', 'target_signal_kind', 'target_series', 'extractor', 'reducer', 'variant', 'scale', 'distance_metric', 'value', 'value_unit'),
     'layer_distance_profile': (*AXIS_METADATA_COLUMNS, 'model_token', 'model_family', 'readout_mode', 'seed', 'checkpoint_path', 'checkpoint_epoch', 'scope', 'probe_family', 'label', 'track_name', 'source_layer', 'source_layer_index', 'source_signal_kind', 'source_series', 'target_layer', 'target_layer_index', 'target_signal_kind', 'target_series', 'relation_type', 'comparison_index', 'comparison_label', 'extractor', 'reducer', 'variant', 'scale', 'distance_metric', 'value', 'value_unit'),
@@ -46,8 +49,8 @@ CATEGORY_COLUMNS: dict[str, tuple[str, ...]] = {
     'layer_dispersion_profile': (*AXIS_METADATA_COLUMNS, 'model_token', 'model_family', 'readout_mode', 'seed', 'checkpoint_path', 'checkpoint_epoch', 'scope', 'probe_family', 'label', 'layer', 'layer_index', 'signal_kind', 'series', 'extractor', 'variant', 'scale', 'dispersion_statistic', 'dispersion_reduction', 'value', 'value_unit'),
     'layer_dispersion_trend': (*AXIS_METADATA_COLUMNS, 'model_token', 'model_family', 'readout_mode', 'seed', 'checkpoint_path', 'checkpoint_epoch', 'scope', 'probe_family', 'label', 'layer', 'layer_index', 'signal_kind', 'series', 'extractor', 'variant', 'scale', 'dispersion_statistic', 'dispersion_reduction', 'value', 'value_unit'),
     'drift_distance': (*AXIS_METADATA_COLUMNS, 'model_token', 'model_family', 'readout_mode', 'seed', 'checkpoint_epoch_a', 'checkpoint_epoch_b', 'layer', 'layer_index', 'scope', 'signal_kind', 'series', 'reference_signal_kind', 'reference_series', 'extractor', 'reducer', 'variant', 'scale', 'distance_metric', 'value', 'value_unit'),
-    'filter_snapshot': (*AXIS_METADATA_COLUMNS, 'model_token', 'model_family', 'readout_mode', 'seed', 'checkpoint_path', 'checkpoint_epoch', 'layer', 'layer_index', 'parameter_name', 'statistic', 'value', 'value_unit'),
-    'filter_trend': (*AXIS_METADATA_COLUMNS, 'model_token', 'model_family', 'readout_mode', 'seed', 'checkpoint_path', 'layer', 'layer_index', 'parameter_name', 'checkpoint_epoch', 'statistic', 'value', 'value_unit'),
+    'filter_snapshot': (*AXIS_METADATA_COLUMNS, 'model_token', 'model_family', 'readout_mode', 'seed', 'checkpoint_path', 'checkpoint_epoch', 'layer', 'layer_index', 'distribution_scope', 'parameter_name', 'statistic', 'value', 'value_unit'),
+    'filter_trend': (*AXIS_METADATA_COLUMNS, 'model_token', 'model_family', 'readout_mode', 'seed', 'checkpoint_path', 'layer', 'layer_index', 'distribution_scope', 'parameter_name', 'checkpoint_epoch', 'statistic', 'value', 'value_unit'),
     'filter_distribution': (*AXIS_METADATA_COLUMNS, 'model_token', 'model_family', 'readout_mode', 'seed', 'checkpoint_path', 'checkpoint_epoch', 'layer', 'layer_index', 'distribution_scope', 'parameter_name', 'distribution_kind', 'neuron_index', 'bin_index', 'bin_left', 'bin_right', 'bin_count', 'bin_probability', 'bin_density', 'parameter_value', 'frequency', 'frequency_unit', 'value', 'value_unit'),
     'accuracy_loss_join': (*AXIS_METADATA_COLUMNS, 'model_token', 'model_family', 'readout_mode', 'seed', 'checkpoint_epoch', 'metric', 'value', 'value_unit'),
     'pairwise_dependency_appendix': (*AXIS_METADATA_COLUMNS, 'model_token', 'model_family', 'readout_mode', 'seed', 'checkpoint_epoch', 'layer', 'layer_index', 'source_scope', 'target_scope', 'source_signal_kind', 'source_series', 'target_signal_kind', 'target_series', 'extractor', 'reducer', 'variant', 'scale', 'metric', 'value', 'value_unit'),
@@ -171,6 +174,8 @@ def write_common_csv(path: Path | str, rows: Iterable[Mapping[str, Any]], *, ext
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     raw_rows = [dict(row) for row in rows]
+    if path.suffix.lower() in {'.yaml', '.yml'}:
+        return write_manifest_yaml(path, raw_rows, extra_columns=extra_columns)
     normalized = normalize_common_rows(raw_rows) if raw_rows else []
     category = _resolve_category(normalized, path)
     base_columns = list(category_columns(category))
@@ -186,6 +191,30 @@ def write_common_csv(path: Path | str, rows: Iterable[Mapping[str, Any]], *, ext
             writer.writerow({column: encode_csv_value(restored.get(column, '')) for column in fieldnames})
     return path
 
+
+
+def write_manifest_yaml(path: Path | str, rows: Iterable[Mapping[str, Any]], *, extra_columns: Sequence[str] | None = None) -> Path:
+    """Write manifest rows as YAML while preserving the category schema normalization."""
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw_rows = [dict(row) for row in rows]
+    normalized = normalize_common_rows(raw_rows) if raw_rows else []
+    if normalized:
+        category = _resolve_category(normalized, path)
+        base_columns = list(category_columns(category))
+        extra_resolved = _resolve_extra_columns(raw_rows, base_columns, extra_columns)
+        fieldnames = base_columns + extra_resolved
+        payload_rows: list[dict[str, str]] = []
+        for raw, row in zip(raw_rows, normalized):
+            restored = dict(row)
+            for column in extra_resolved:
+                restored[column] = encode_csv_value(raw.get(column, restored.get(column, '')))
+            payload_rows.append({column: encode_csv_value(restored.get(column, '')) for column in fieldnames})
+    else:
+        payload_rows = []
+    save_yaml(path, {'schema_version': SCHEMA_VERSION, 'rows': payload_rows})
+    return path
 
 def validate_common_csv_header(path: Path | str) -> list[str]:
     """Validate that a CSV begins with the category schema prefix."""
@@ -217,6 +246,7 @@ __all__ = [
     'utc_now_iso',
     'validate_common_csv_header',
     'write_common_csv',
+    'write_manifest_yaml',
 ]
 try:
     from src.patch_overlays.runtime_patch import patch_csv_schema as _patch_csv_schema

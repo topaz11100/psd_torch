@@ -1,0 +1,9 @@
+dataset_fft:
+  dataset:
+  - s-mnist
+  prep_root: /home/yongokhan/workspace/data/prep_data
+  output_root: /home/yongokhan/workspace/result/dataset_fft_scenario/04_exact_pca1_centered_db_reg/s-mnist_lif_soft_train_lambda_p0p001
+  batch_size: 256
+  num_workers: 2
+  seed: 0
+  gpu_index: 0

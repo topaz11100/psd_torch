@@ -148,7 +148,7 @@ _DATASET_SPECS = (
     ),
     DatasetSpec(
         canonical_name='cifar10-dvs',
-        aliases=('cifar10_dvs', 'cifar-dvs'),
+        aliases=('cifar10_dvs', 'cifar-dvs', 'cifar10dvs'),
         default_hidden_sizes=(256, 256),
         psd_axis_kind='image_temporal',
         psd_view_name='event_frame_psd_view',
@@ -157,7 +157,7 @@ _DATASET_SPECS = (
     ),
     DatasetSpec(
         canonical_name='dvs128-gesture',
-        aliases=('dvs128_gesture', 'dvs128gesture', 'dvsgesture'),
+        aliases=('dvs128_gesture', 'dvs128gesture', 'dvsgesture', 'gesture128', 'gesture-128'),
         default_hidden_sizes=(256, 256),
         psd_axis_kind='image_temporal',
         psd_view_name='event_frame_psd_view',

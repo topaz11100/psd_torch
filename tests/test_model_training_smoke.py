@@ -3,6 +3,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from src.util.config import save_yaml
+
 import pytest
 
 
@@ -47,7 +49,7 @@ def _write_tiny_prepared_bundle(base: Path) -> tuple[Path, str]:
         'sample_index_dtype': 'int64',
         'num_classes': 2,
     }
-    (root / 'manifest.json').write_text(json.dumps(manifest), encoding='utf-8')
+    save_yaml(root / 'manifest.yaml', manifest)
     return base / 'prepared', dataset
 
 
@@ -58,7 +60,11 @@ def test_model_training_single_smoke(tmp_path: Path):
         'model_training': {
             'dataset': dataset,
             'prep_root': str(prep_root),
-            'model': 'lif_soft_fixed',
+            'neuron_type': 'lif',
+            'recurrent': False,
+            'reset': 'soft',
+            'v_th': ['fixed', 1.0],
+            'filter': 'train',
             'hidden_spec': '8',
             'readout_mode': 'temporal_membrane',
             'epochs': 1,
@@ -67,21 +73,25 @@ def test_model_training_single_smoke(tmp_path: Path):
             'num_workers': 0,
             'seed': 0,
             'gpu_index': 0,
-            'anal_epoch_list': [1],
+            'analysis_checkpoint_epochs': [1],
             'checkpoint_root': str(tmp_path / 'ckpt'),
             'metric_root': str(tmp_path / 'metric'),
-            'output_root': str(tmp_path / 'out'),
             'ddp': False,
             'ddp_world_size': 2,
             'batch_size_is_global': True,
+            'signal_window': 'hann',
+            'compile': False,
+            'amp': 'off',
+            'run_timestamp': 'TEST_RUN',
         }
     }
-    cfg_path = tmp_path / 'smoke.json'
-    cfg_path.write_text(json.dumps(cfg), encoding='utf-8')
-    proc = subprocess.run([sys.executable, 'src/model_training.py', '--config', str(cfg_path)], cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True)
-    assert proc.returncode == 0, proc.stdout + '\n' + proc.stderr
-    ckpt = tmp_path / 'ckpt' / 'checkpoint_epoch_000001.pt'
-    metric = tmp_path / 'metric' / 'training_metrics.csv'
+    cfg_path = tmp_path / 'smoke.yaml'
+    save_yaml(cfg_path, cfg)
+    from src.model_training import main as model_training_main
+    rc = model_training_main(['--config', str(cfg_path)])
+    assert rc == 0
+    ckpt = tmp_path / 'ckpt' / 'run_TEST_RUN' / 'checkpoint_epoch_000001.pt'
+    metric = tmp_path / 'metric' / 'run_TEST_RUN' / 'training_metrics.csv'
     assert ckpt.exists()
     assert metric.exists()
     import torch

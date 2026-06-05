@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import torch
 
+from src.util.precision import configure_tf32
+
 
 def require_cuda_device(gpu_index: int | None = None) -> torch.device:
     """Return one CUDA device or fail fast.
@@ -20,18 +22,7 @@ def require_cuda_device(gpu_index: int | None = None) -> torch.device:
     if gpu_index < 0 or gpu_index >= torch.cuda.device_count():
         raise ValueError(f'Invalid CUDA device index {gpu_index}; available count is {torch.cuda.device_count()}.')
     torch.cuda.set_device(gpu_index)
-    try:
-        torch.set_float32_matmul_precision('high')
-    except Exception:
-        pass
-    try:
-        torch.backends.cuda.matmul.allow_tf32 = True
-    except Exception:
-        pass
-    try:
-        torch.backends.cudnn.allow_tf32 = True
-    except Exception:
-        pass
+    configure_tf32(enabled=True)
     return torch.device(f'cuda:{gpu_index}')
 
 

@@ -6,9 +6,10 @@
   --model_training.sh
   --psd_analysis.sh
   --element_psd.sh
+  --element_fft.sh
   --fft2d_analysis.sh
   --plotting.sh
---config/                       stage별 JSON 설정과 README
+--config/                       stage별 YAML 설정과 README
 --Spec/                         현재 이론/구현 명세
   --theory/
   --implementation/
@@ -21,6 +22,7 @@
   --model_training.py           학습 및 checkpoint 생성
   --psd_analysis.py             모델 hidden/output PSD 분석
   --element_psd.py              모델 hidden/output element PSD 분석
+  --element_fft.py              모델 hidden/output element FFT 분석
   --2d_fft_analysis.py          모델 hidden/output 2D FFT 분석
   --plotting.py                 CSV plotting
   --data/                       prepared dataset storage/registry/preprocessing

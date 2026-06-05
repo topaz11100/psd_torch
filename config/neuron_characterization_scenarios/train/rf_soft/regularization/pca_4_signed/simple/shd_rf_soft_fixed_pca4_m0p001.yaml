@@ -1,0 +1,48 @@
+model_training:
+  dataset: shd
+  prep_root: /home/yongokhan/workspace/data/prep_data
+  checkpoint_root: /home/yongokhan/workspace/result/neuron_characterization_scenarios/rf_soft/regularization/pca_4_signed/simple/shd_rf_soft_fixed_pca4_m0p001/checkpoints
+  metric_root: /home/yongokhan/workspace/result/neuron_characterization_scenarios/rf_soft/regularization/pca_4_signed/simple/shd_rf_soft_fixed_pca4_m0p001/metrics
+  neuron_type: rf
+  recurrent: false
+  reset: soft
+  v_th:
+  - fixed
+  - 1.0
+  filter: train
+  hidden_spec: 256,256
+  readout_mode: temporal_membrane
+  epochs: 40
+  batch_size: 128
+  lr: 0.005
+  num_workers: 2
+  seed: 0
+  gpu_index: 0
+  analysis_checkpoint_epochs: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40]
+  ddp: true
+  ddp_world_size: 2
+  batch_size_is_global: true
+  signal_curve_space: exact
+  signal_curve_scale: raw
+  signal_curve_centering: raw
+  signal_curve_reducer: mean
+  signal_curve_distance_metric: centered_l2
+  signal_curve_userbin_edges: null
+  signal_curve_userbin_reducer: mean
+  signal_window: hann
+  psd_reg_output_family: spike
+  pca_dim_per_layer:
+  - 4
+  w_clip_edges: null
+  alpha_clip_edges: null
+  scenario_mode: none
+  band_edge: null
+  tear: 1
+  compile_cpu_threads: 2
+  compile: true
+  amp: 'on'
+  ddp_timeout_minutes: 400
+  lambda_psd_rep_input: 0.0
+  lambda_psd_rep_adjacent: 0.0
+  lambda_psd_pca_input: 0.0
+  lambda_psd_pca_adjacent: -0.001

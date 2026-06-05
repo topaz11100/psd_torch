@@ -1,3 +1,9 @@
+# 09 Dynamics Statistics
+
+## 2026 개정 해설
+
+Dynamics statistics는 학습된 뉴런이 어떤 시간상수를 갖는지 요약한다. RF의 center frequency와 damping, LIF의 alpha는 모두 spectral bias를 해석하는 물리적 좌표로 사용된다.
+
 # 동역학 통계
 
 동역학 통계는 PSD/FFT와 별개로 cell parameter의 분포를 기록한다.

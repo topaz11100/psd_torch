@@ -1,20 +1,0 @@
-/home/yongokhan/바탕화면/psd/src/psd_analysis.py:139: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
-  payload = torch.load(path, map_location=map_location)
-psd_analysis:checkpoints:   0%|          | 0/30 [00:00<?, ?it/s]                                                                Traceback (most recent call last):
-  File "/home/yongokhan/바탕화면/psd/src/psd_analysis.py", line 1689, in <module>
-    raise SystemExit(main())
-  File "/home/yongokhan/바탕화면/psd/src/patch_overlays/runtime_patch.py", line 484, in main_patched
-    model, _readout, model_spec, readout_mode = g['_build_model_from_checkpoint'](payload, device=device)
-  File "/home/yongokhan/바탕화면/psd/src/psd_analysis.py", line 304, in _build_model_from_checkpoint
-    model = build_snn_classifier(
-  File "/home/yongokhan/바탕화면/psd/src/patch_overlays/runtime_patch.py", line 172, in wrapped_build_snn_classifier
-    model = orig(*args, **kwargs)
-  File "/home/yongokhan/바탕화면/psd/src/model/snn_builder.py", line 1073, in build_snn_classifier
-    resolved_layer_specs = resolve_arch_spec(
-  File "/home/yongokhan/바탕화면/psd/src/model/arch_spec.py", line 171, in resolve_arch_spec
-    explicit = parse_hidden_spec(arch_spec_text)
-  File "/home/yongokhan/바탕화면/psd/src/model/arch_spec.py", line 129, in parse_hidden_spec
-    return parse_hidden_spec_tokens(tokens)
-  File "/home/yongokhan/바탕화면/psd/src/model/arch_spec.py", line 108, in parse_hidden_spec_tokens
-    raise ValueError(
-ValueError: Dense hidden specs must be comma-delimited positive integers, e.g. 64,32,20. Got '32-32-32'.

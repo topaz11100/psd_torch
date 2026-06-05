@@ -1,38 +1,48 @@
-# PCA 고정 기준(reference) 이론과 현재 구현
+# Fixed PCA Reference
 
-현재 root pipeline에는 PCA 확장이 **실제 구현**되어 있다. 핵심은 row/channel 집단 신호 \(X\in\mathbb{R}^{N\times R\times T}\)를 고정 기저로 투영해 모드 신호 \(Z\in\mathbb{R}^{N\times D\times T}\)를 만든 뒤, 스칼라 대표 PSD와는 다른 정보(모드별 PSD, 모드 간 스펙트럼 결합)를 분석/규제에 반영하는 것이다.
+PSD curve는 epoch와 layer마다 분포가 달라진다. epoch별 PCA를 따로 계산하면 좌표계가 계속 회전하므로 추세 비교가 어렵다. 따라서 프로젝트는 고정 기준 epoch \(e_0\)에서 PCA basis를 계산하고, 모든 checkpoint를 그 basis에 사영한다.
 
-관측행렬은
+## Basis construction
+
+layer \(\ell\)의 curve matrix를
+
 \[
-\widetilde{X}=\text{reshape}_{(N\cdot T,\;R)}(X)
+A^{(\ell)}_{e_0}\in\mathbb{R}^{N\times F}
 \]
-로 두고, 중심화
+
+라 하자. \(F\)는 frequency bin 수다. 평균을 제거한 뒤 SVD를 계산한다.
+
 \[
-\widehat{X}=\widetilde{X}-\mathbf{1}\mu^\top,\qquad \mu\in\mathbb{R}^{R}
+\bar{a}=\frac{1}{N}\sum_{n=1}^{N}A_n,\qquad
+A_c=A-\mathbf{1}\bar{a}^\top,
 \]
-후 SVD(실패 시 covariance-eigh fallback)로 basis \(U_D\in\mathbb{R}^{R\times D}\)를 얻는다.
-투영은
+
 \[
-Z_{n,:,t}=U_D^\top\left(X_{n,:,t}-\mu\right)
+A_c=U\Sigma V^\top.
 \]
-로 정의한다.
 
-## 고정 기준 원칙
+상위 \(K\)개 right singular vector가 fixed basis다.
 
-1. 기준 checkpoint(`pca_ref_epoch`)에서 basis를 1회 적합한다.
-2. 같은 run의 다른 checkpoint에는 같은 basis id를 재사용한다.
-3. basis id가 다른 projection 결과끼리는 직접 distance를 섞지 않는다.
-4. metadata에 dataset, checkpoint/epoch, split/scope, layer, family, row_count, dim, basis/centroid shape를 남긴다.
+\[
+B_K = V_{1:K} \in \mathbb{R}^{K\times F}.
+\]
 
-## mean/median 대표화와 PCA 대표화의 차이
+## Projection
 
-- mean/median 대표화는 row 축 통계량
-  \[
-  \bar{x}_t=\frac1R\sum_{r=1}^R x_{r,t},\qquad \text{or median}_r(x_{r,t})
-  \]
-  만 남기므로 row 간 공분산 구조는 소실된다.
-- PCA 대표화는 \(U_D\)를 통해 row 공분산의 주축 방향을 보존하므로, mode별 PSD와 mode 간 결합(MIMO/cross-spectrum)을 평가할 수 있다.
+임의 epoch \(e\)의 curve \(a_e\)는
 
-## DDP 제약(현재 상태)
+\[
+z_e = B_K(a_e-\bar{a})
+\]
 
-PCA PSD regularization의 분산 동기화(broadcast) 경로는 아직 구현되지 않았다. 따라서 DDP + PCA penalty 조합은 fail-fast로 차단하는 것이 현재 정합한 계약이다.
+로 projection된다. 같은 \(B_K\)와 \(\bar{a}\)를 사용하기 때문에 epoch 간 좌표 비교가 의미를 갖는다.
+
+## Regularization use
+
+학습 중 PSD-PCA regularizer는 input 또는 이전 layer의 spectral coordinates와 hidden layer coordinates 사이의 거리를 penalize한다.
+
+\[
+\mathcal{L}_{\mathrm{PCA}} = \lambda\sum_{\ell} \|z^{(\ell)} - z^{(\ell-1)}\|_2^2.
+\]
+
+이는 raw PSD 전체를 직접 맞추기보다 주요 spectral mode를 보존하도록 유도한다.

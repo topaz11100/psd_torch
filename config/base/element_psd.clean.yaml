@@ -1,0 +1,11 @@
+element_psd:
+  dataset: mnist
+  prep_root: /home/yongokhan/workspace/data/prep_data
+  checkpoint: /home/yongokhan/workspace/result/base/model_training/checkpoints
+  output_root: /home/yongokhan/workspace/result/base/element_psd
+  num_workers: 0
+  seed: 0
+  gpu_index: 0
+  signal_window: hann
+  anal_batch: 128
+  low_vram: 0

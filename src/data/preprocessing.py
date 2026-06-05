@@ -16,7 +16,7 @@ from tqdm import tqdm
 
 from src.data.specs import available_dataset_tokens, canonicalize_dataset_name, get_dataset_spec
 from src.data.storage import SINGLE_STRUCTURED_NPY_STORAGE_FORMAT, fsync_path, load_single_structured_split
-from src.util.config import ensure_dir, save_json
+from src.util.config import ensure_dir, save_yaml
 
 
 _PREPROCESSING_SPEC_DOC = 'Spec/theory/data_prep/data_prep.md'
@@ -653,7 +653,7 @@ def _save_streaming_manifest(
     )
     if max_samples is not None:
         manifest['max_samples_truncated'] = int(max_samples)
-    save_json(out_dir / 'manifest.json', manifest)
+    save_yaml(out_dir / 'manifest.yaml', manifest)
 
 
 def _channel_major_flatten_from_static_image(images: torch.Tensor) -> torch.Tensor:

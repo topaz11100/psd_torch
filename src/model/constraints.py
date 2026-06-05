@@ -196,9 +196,17 @@ def resolve_constraint_plan(model_spec: Any, hidden_widths: Sequence[int], const
     lif_edges = _normalize_layerwise_edges(config.alpha_clip_edges, lower=0.0, upper=1.0, name='alpha_clip_edges', num_layers=len(widths)) if clip_params and model_spec.family == 'lif' else None
     rf_edges = _normalize_layerwise_edges(config.w_clip_edges, lower=0.0, upper=0.5, name='w_clip_edges', num_layers=len(widths)) if clip_params and model_spec.family == 'rf' else None
     if clip_params and model_spec.family == 'lif' and lif_edges is None:
-        raise ValueError('alpha_clip_edges is required for lif clip/clipstructure modes.')
+        if mode == 'clipstructure':
+            clip_params = False
+            mode = 'structure'
+        else:
+            raise ValueError('alpha_clip_edges is required for lif clip modes.')
     if clip_params and model_spec.family == 'rf' and rf_edges is None:
-        raise ValueError('w_clip_edges is required for rf clip/clipstructure modes.')
+        if mode == 'clipstructure':
+            clip_params = False
+            mode = 'structure'
+        else:
+            raise ValueError('w_clip_edges is required for rf clip modes.')
     if mode == 'structure' and (config.alpha_clip_edges is not None or config.w_clip_edges is not None):
         raise ValueError('structure mode does not accept clip edges.')
 

@@ -20,6 +20,7 @@ from src.patch_overlays.psd_curve_config import (
 )
 from src.patch_overlays.psd_curve_ops import curve_distance, curve_rows_for_maps, representative_curve_tensor, token_distance_rows
 from src.signal.psd_utils import trace_tensor_to_channel_major_maps, tensor_to_channel_major_maps_explicit
+from src.util.paths import timestamped_output_root
 
 
 def _parser_has(parser: Any, dest: str) -> bool:
@@ -77,12 +78,12 @@ def _analysis_distance_metrics(args: Any) -> tuple[str, ...]:
     )
 
 
-def _analysis_userbin_reducers(args: Any) -> tuple[str, ...]:
+def _signal_curve_userbin_reducers(args: Any) -> tuple[str, ...]:
     raw = _normalize_choice_values(
-        getattr(args, 'analysis_userbin_reducer', None),
+        getattr(args, 'signal_curve_userbin_reducer', None),
         default=('mean',),
         allowed=('mean', 'median', 'sum'),
-        name='analysis_userbin_reducer',
+        name='signal_curve_userbin_reducer',
     )
     return tuple(normalize_userbin_reducer(value) for value in raw)
 
@@ -193,6 +194,10 @@ def _env_userbin_edges(required: bool) -> list[float] | None:
     return resolve_userbin_edges(edges=edges, width=width, count=count, required=required)
 
 
+def _env_signal_window(default: str = 'hann') -> str:
+    return str(os.environ.get('PSD_SIGNAL_WINDOW') or default)
+
+
 def _torch_curve_distance(u: torch.Tensor, v: torch.Tensor, metric: str) -> torch.Tensor:
     if u.shape != v.shape:
         raise ValueError(f'Curve shape mismatch: {tuple(u.shape)} vs {tuple(v.shape)}.')
@@ -231,6 +236,7 @@ def patch_training(g: dict[str, Any]) -> None:
         edges = _env_userbin_edges(tokens_require_userbins(specs))
         userbin_reducer = normalize_userbin_reducer(os.environ.get('PSD_REG_USERBIN_REDUCER', 'mean'))
         metric = os.environ.get('PSD_REG_DISTANCE_METRIC', str(kwargs.get('distance_metric', 'centered_l2')))
+        signal_window = str(kwargs.get('signal_window', _env_signal_window()))
         signal_name = str(kwargs.get('signal_name', 'y_mem'))
         input_maps = trace_tensor_to_channel_major_maps(result.input_record)
         hidden_maps = [trace_tensor_to_channel_major_maps(_select_hidden_trace(record, signal_name)) for record in result.hidden_records]
@@ -239,8 +245,8 @@ def patch_training(g: dict[str, Any]) -> None:
         global_sum = input_maps.new_zeros(())
         adjacent_sum = input_maps.new_zeros(())
         for spec in specs:
-            input_curve, _axis, _edges = representative_curve_tensor(input_maps, spec, userbin_edges=edges, userbin_reducer=userbin_reducer)
-            curves = [representative_curve_tensor(maps, spec, userbin_edges=edges, userbin_reducer=userbin_reducer)[0] for maps in hidden_maps]
+            input_curve, _axis, _edges = representative_curve_tensor(input_maps, spec, userbin_edges=edges, userbin_reducer=userbin_reducer, signal_window=signal_window)
+            curves = [representative_curve_tensor(maps, spec, userbin_edges=edges, userbin_reducer=userbin_reducer, signal_window=signal_window)[0] for maps in hidden_maps]
             for curve in curves:
                 global_sum = global_sum + _torch_curve_distance(input_curve, curve, metric)
             prev = input_curve
@@ -256,51 +262,15 @@ def patch_training(g: dict[str, Any]) -> None:
 
 
 def patch_model_training(g: dict[str, Any]) -> None:
+    """Compatibility hook for model_training.
+
+    The project exposes the regularization curve controls directly in
+    src.model_training. Keep this hook as a no-op so optional overlay imports do
+    not add a second public argument surface.
+    """
     if g.get('_PSD_TOKEN_MODEL_TRAINING_PATCHED'):
         return
-    orig_build = g.get('build_arg_parser')
-    orig_main = g.get('main')
-    parse_args_with_config = g.get('parse_args_with_config')
-    if orig_build is None or orig_main is None or parse_args_with_config is None:
-        return
-
-    def build_arg_parser_patched():
-        parser = orig_build()
-        _add_arg(parser, '--regularization_psd_curve_tokens', nargs='*', default=None)
-        _add_arg(parser, '--regularization_userbin_edges', nargs='*', default=None)
-        _add_arg(parser, '--regularization_userbin_width', default=None)
-        _add_arg(parser, '--regularization_userbin_count', type=int, default=10)
-        _add_arg(parser, '--regularization_userbin_reducer', default='mean', choices=('mean', 'median', 'sum'))
-        return parser
-
-    def main_patched(argv: Sequence[str] | None = None) -> int:
-        parser = build_arg_parser_patched()
-        args = parse_args_with_config(parser, argv=argv, stage_key='model_training')
-        tokens = getattr(args, 'regularization_psd_curve_tokens', None)
-        if tokens:
-            specs = parse_psd_curve_tokens(tokens)
-            os.environ['PSD_REG_CURVE_TOKENS'] = ' '.join(spec.token for spec in specs)
-            os.environ['PSD_REG_DISTANCE_METRIC'] = str(getattr(args, 'regularization_distance_metric', 'centered_l2'))
-            os.environ['PSD_REG_USERBIN_REDUCER'] = normalize_userbin_reducer(getattr(args, 'regularization_userbin_reducer', 'mean'))
-            edges = getattr(args, 'regularization_userbin_edges', None)
-            if edges:
-                os.environ['PSD_REG_USERBIN_EDGES'] = ' '.join(str(float(v)) for v in edges)
-            else:
-                os.environ.pop('PSD_REG_USERBIN_EDGES', None)
-            width = getattr(args, 'regularization_userbin_width', None)
-            if width not in (None, ''):
-                os.environ['PSD_REG_USERBIN_WIDTH'] = str(width)
-            else:
-                os.environ.pop('PSD_REG_USERBIN_WIDTH', None)
-            os.environ['PSD_REG_USERBIN_COUNT'] = str(getattr(args, 'regularization_userbin_count', 10))
-        else:
-            os.environ.pop('PSD_REG_CURVE_TOKENS', None)
-        return orig_main(argv)
-
-    g['build_arg_parser'] = build_arg_parser_patched
-    g['main'] = main_patched
     g['_PSD_TOKEN_MODEL_TRAINING_PATCHED'] = True
-
 
 def patch_dataset_psd(g: dict[str, Any]) -> None:
     if g.get('_PSD_TOKEN_DATASET_PATCHED'):
@@ -311,37 +281,55 @@ def patch_dataset_psd(g: dict[str, Any]) -> None:
 
     def build_arg_parser_patched():
         parser = orig_build()
-        _add_arg(parser, '--userbin_edges', nargs='*', type=float, default=None)
-        _add_arg(parser, '--userbin_width', default=None)
-        _add_arg(parser, '--userbin_count', type=int, default=10)
-        _add_arg(parser, '--userbin_reducer', default='mean', choices=('mean', 'median', 'sum'))
+        _add_arg(parser, '--signal_curve_space', default='exact', choices=('exact', 'userbin'))
+        _add_arg(parser, '--signal_curve_scale', default='raw', choices=('raw', 'db', 'area'))
+        _add_arg(parser, '--signal_curve_userbin_edges', nargs='*', default=None)
+        _add_arg(parser, '--signal_curve_userbin_reducer', default='mean', choices=('mean', 'median', 'sum'))
+        _add_arg(parser, '--signal_window', default='hann', choices=('hann', 'none'))
         return parser
 
-    def main_patched(argv: Sequence[str] | None = None) -> int:
-        parser = build_arg_parser_patched()
-        args = parser.parse_args(argv)
-        if int(args.batch_size) < 1:
-            parser.error('--batch_size must be >= 1.')
-        if int(args.num_workers) < 0:
-            parser.error('--num_workers must be >= 0.')
+    def _dataset_tokens(value: Any) -> list[str]:
+        if isinstance(value, (list, tuple)):
+            tokens = [str(v).strip() for v in value if str(v).strip()]
+        else:
+            tokens = [str(value).strip()]
+        if not tokens:
+            raise ValueError('dataset 배열은 비어 있을 수 없습니다.')
+        return tokens
+
+    def _run_one(args: Any, *, output_root: Path) -> dict[str, str]:
         g['_seed_everything'](int(args.seed))
         device = g['_require_cuda_device'](int(args.gpu_index))
         dataset_token = str(args.dataset)
         prep_root = Path(args.prep_root).expanduser().resolve()
         bundle = g['resolve_dataset_bundle'](dataset_token, prep_root=prep_root)
-        manifest = g['load_json'](bundle.manifest_path)
+        manifest_loader = g.get('_load_structured_light')
+        if manifest_loader is None:
+            raise RuntimeError('runtime patch requires _load_structured_light for YAML manifests.')
+        manifest = manifest_loader(bundle.manifest_path)
         if not isinstance(manifest, Mapping):
-            raise ValueError(f'Prepared manifest must be a JSON object: {bundle.manifest_path}')
+            raise ValueError(f'Prepared manifest must be a mapping: {bundle.manifest_path}')
         g['_validate_axis_metadata'](manifest)
-        specs = parse_psd_curve_tokens(ALL_DATASET_PSD_TOKENS, default=ALL_DATASET_PSD_TOKENS)
-        userbin_edges = resolve_userbin_edges(
-            edges=getattr(args, 'userbin_edges', None),
-            width=getattr(args, 'userbin_width', None),
-            count=getattr(args, 'userbin_count', 10),
-            required=True,
+        all_specs = parse_psd_curve_tokens(ALL_DATASET_PSD_TOKENS, default=ALL_DATASET_PSD_TOKENS)
+        curve_space = str(getattr(args, 'signal_curve_space', 'exact')).strip().lower()
+        if curve_space not in {'exact', 'userbin'}:
+            raise ValueError('signal_curve_space must be exact or userbin.')
+        signal_scale = str(getattr(args, 'signal_curve_scale', 'raw')).strip().lower()
+        if signal_scale not in {'raw', 'db', 'area'}:
+            raise ValueError('signal_curve_scale must be raw, db, or area.')
+        specs = tuple(
+            spec for spec in all_specs
+            if (
+                ((curve_space == 'userbin' and getattr(spec, 'extractor', '') == 'psd_userbin')
+                 or (curve_space == 'exact' and getattr(spec, 'extractor', '') == 'psd_exact'))
+                and getattr(spec, 'scale', '') == signal_scale
+            )
         )
-        userbin_reducer = normalize_userbin_reducer(getattr(args, 'userbin_reducer', 'mean'))
-        output_root = Path(args.output_root).expanduser().resolve()
+        userbin_edges = resolve_userbin_edges(
+            edges=getattr(args, 'signal_curve_userbin_edges', None),
+            required=(curve_space == 'userbin'),
+        )
+        userbin_reducer = normalize_userbin_reducer(getattr(args, 'signal_curve_userbin_reducer', 'mean'))
         output_root.mkdir(parents=True, exist_ok=True)
         run_id = f'{dataset_token}_dataset_psd_seed{int(args.seed)}'
         common_base = {
@@ -376,13 +364,34 @@ def patch_dataset_psd(g: dict[str, Any]) -> None:
                 maps = torch.cat(all_maps, dim=0)
                 base = dict(common_base)
                 base.update(scope=scope, probe_family=family, label='' if label is None else int(label), signal_kind='input')
-                curve_rows, dispersion_rows, curves = curve_rows_for_maps(common_row=g['common_row'], base=base, maps=maps, specs=specs, userbin_edges=userbin_edges, userbin_reducer=userbin_reducer, category='dataset_curve')
+                curve_rows, dispersion_rows, _curves = curve_rows_for_maps(common_row=g['common_row'], base=base, maps=maps, specs=specs, userbin_edges=userbin_edges, userbin_reducer=userbin_reducer, category='dataset_curve', signal_window=str(getattr(args, 'signal_window', 'hann')))
                 g['_write_grouped'](output_root, curve_rows, manifest_rows=manifest_rows, manifest_base=common_base, artifact_name='dataset_curve')
                 g['_write_grouped'](output_root, dispersion_rows, manifest_rows=manifest_rows, manifest_base=common_base, artifact_name='dataset_dispersion')
-        manifest_path = output_root / 'dataset_psd_manifest.csv'
-        g['write_common_csv'](manifest_path, manifest_rows)
-        print(json.dumps({'status': 'ok', 'source_program': g['SOURCE_PROGRAM'], 'output_root': str(output_root), 'manifest': str(manifest_path)}, sort_keys=True))
+        manifest_path = output_root / 'dataset_psd_manifest.yaml'
+        g['write_manifest_yaml'](manifest_path, manifest_rows)
+        return {'dataset': dataset_token, 'output_root': str(output_root), 'manifest': str(manifest_path)}
+
+    def main_patched(argv: Sequence[str] | None = None) -> int:
+        parser = build_arg_parser_patched()
+        args = g['parse_args_with_config'](parser, argv=argv, stage_key='dataset_psd')
+        if int(args.batch_size) < 1:
+            parser.error('--batch_size must be >= 1.')
+        if int(args.num_workers) < 0:
+            parser.error('--num_workers must be >= 0.')
+        g['_load_runtime_dependencies']()
+        base_output_root = timestamped_output_root(args.output_root, run_timestamp=getattr(args, 'run_timestamp', None), prefix=str(g.get('SOURCE_PROGRAM', 'dataset_psd')), enabled=getattr(args, 'timestamped_output', True))
+        tokens = _dataset_tokens(args.dataset)
+        outputs = []
+        for index, token in enumerate(tokens, start=1):
+            print(f'[dataset_psd] 시작 {index}/{len(tokens)} dataset={token}', flush=True)
+            run_args = type('Args', (), vars(args).copy())()
+            run_args.dataset = token
+            run_root = base_output_root / token if len(tokens) > 1 else base_output_root
+            outputs.append(_run_one(run_args, output_root=run_root))
+            print(f'[dataset_psd] 완료 {index}/{len(tokens)} dataset={token}', flush=True)
+        print(json.dumps({'status': 'ok', 'source_program': g['SOURCE_PROGRAM'], 'outputs': outputs}, sort_keys=True))
         return 0
+
 
     g['build_arg_parser'] = build_arg_parser_patched
     g['main'] = main_patched
@@ -400,15 +409,19 @@ def patch_psd_analysis(g: dict[str, Any]) -> None:
         parser = orig_build()
         _add_arg(parser, '--analysis_distance_metric', nargs='*', default=['centered_l2'], choices=('centered_l2', 'diff_l2'))
         _add_arg(parser, '--psd_curve_tokens', nargs='*', default=None)
-        _add_arg(parser, '--analysis_psd_tokens', nargs='*', default=None)
-        _add_arg(parser, '--analysis_userbin_edges', nargs='*', type=float, default=None)
-        _add_arg(parser, '--analysis_userbin_reducer', nargs='*', default=['mean'], choices=('mean', 'median', 'sum'))
-        _add_arg(parser, '--filter_alpha_userbin_edges', nargs='*', type=float, default=None)
-        _add_arg(parser, '--filter_alpha_userbin_count', type=int, default=10)
-        _add_arg(parser, '--filter_frequency_userbin_edges', nargs='*', type=float, default=None)
-        _add_arg(parser, '--filter_frequency_userbin_count', type=int, default=10)
-        _add_arg(parser, '--filter_damping_userbin_edges', nargs='*', type=float, default=None)
-        _add_arg(parser, '--filter_damping_userbin_count', type=int, default=10)
+        _add_arg(parser, '--signal_curve_space', default='exact', choices=('exact', 'userbin'))
+        _add_arg(parser, '--signal_curve_scale', default='raw', choices=('raw', 'db', 'area'))
+        _add_arg(parser, '--signal_curve_userbin_edges', nargs='*', type=float, default=None)
+        _add_arg(parser, '--signal_curve_userbin_reducer', nargs='*', default=['mean'], choices=('mean', 'median', 'sum'))
+        _add_arg(parser, '--signal_window', default='hann', choices=('hann', 'none'))
+        _add_arg(parser, '--parameter_alpha_bin_edges', nargs='*', type=float, default=None)
+        _add_arg(parser, '--parameter_alpha_bin_count', type=int, default=10)
+        _add_arg(parser, '--parameter_center_frequency_bin_edges', nargs='*', type=float, default=None)
+        _add_arg(parser, '--parameter_center_frequency_bin_count', type=int, default=10)
+        _add_arg(parser, '--parameter_damping_bin_edges', nargs='*', type=float, default=None)
+        _add_arg(parser, '--parameter_damping_bin_count', type=int, default=10)
+        _add_arg(parser, '--parameter_threshold_bin_edges', nargs='*', type=float, default=None)
+        _add_arg(parser, '--parameter_threshold_bin_count', type=int, default=10)
         return parser
 
     def collect_signal_maps_with_input(*, model: Any, dataset: Any, split_name: str, seed: int, anal_batch: int, num_workers: int, device: torch.device):
@@ -448,17 +461,26 @@ def patch_psd_analysis(g: dict[str, Any]) -> None:
             parser.error('--anal_batch must be >= 1.')
         if int(args.num_workers) < 0:
             parser.error('--num_workers must be >= 0.')
-        token_values = getattr(args, 'psd_curve_tokens', None) or getattr(args, 'analysis_psd_tokens', None)
-        specs = parse_psd_curve_tokens(token_values, default=[DEFAULT_PSD_TOKEN])
+        token_values = getattr(args, 'psd_curve_tokens', None)
+        if token_values:
+            specs = parse_psd_curve_tokens(token_values, default=[DEFAULT_PSD_TOKEN])
+        else:
+            curve_space = str(getattr(args, 'signal_curve_space', 'exact')).strip().lower()
+            scale = str(getattr(args, 'signal_curve_scale', 'raw')).strip().lower()
+            if curve_space not in {'exact', 'userbin'}:
+                raise ValueError('signal_curve_space must be exact or userbin.')
+            if scale not in {'raw', 'db', 'area'}:
+                raise ValueError('signal_curve_scale must be raw, db, or area.')
+            specs = parse_psd_curve_tokens([f'{curve_space}_mean_raw_{scale}'], default=[DEFAULT_PSD_TOKEN])
         distance_metrics = _analysis_distance_metrics(args)
-        userbin_reducers = _analysis_userbin_reducers(args)
+        userbin_reducers = _signal_curve_userbin_reducers(args)
         userbin_edges = resolve_userbin_edges(
-            edges=getattr(args, 'analysis_userbin_edges', None),
+            edges=getattr(args, 'signal_curve_userbin_edges', None),
             required=tokens_require_userbins(specs),
         )
         curve_batches = _analysis_curve_batches(specs, userbin_reducers)
         g['_load_runtime_dependencies']()
-        output_root = Path(args.output_root).expanduser().resolve()
+        output_root = timestamped_output_root(args.output_root, run_timestamp=getattr(args, 'run_timestamp', None), prefix=str(g.get('SOURCE_PROGRAM', 'psd_analysis')), enabled=getattr(args, 'timestamped_output', True))
         output_root.mkdir(parents=True, exist_ok=True)
         checkpoint_input = Path(args.checkpoint).expanduser().resolve()
         input_is_single_file = checkpoint_input.is_file()
@@ -529,6 +551,7 @@ def patch_psd_analysis(g: dict[str, Any]) -> None:
                         userbin_edges=userbin_edges,
                         userbin_reducer=batch_userbin_reducer,
                         category='analysis_curve',
+                        signal_window=str(getattr(args, 'signal_window', 'hann')),
                     )
                     family_rows.extend(c_rows)
                     dispersion_rows.extend(d_rows)
@@ -594,11 +617,15 @@ def patch_psd_analysis(g: dict[str, Any]) -> None:
             g['_write_rows_to_dir'](traces_dir / 'filter_trend' / g['_layer_folder'](layer_name, layer_index), rows, manifest_rows=manifest_rows, manifest_base=manifest_base, artifact_name='filter_trend')
         for warning in ordering_warnings:
             manifest_rows.append(g['_manifest_row'](base=manifest_base, artifact_name='checkpoint_ordering', path=Path(args.checkpoint), status='ok', message=warning))
-        manifest_path = output_root / 'analysis_manifest.csv'
-        g['write_common_csv'](manifest_path, manifest_rows)
-        print(json.dumps({'status': 'ok', 'source_program': g['SOURCE_PROGRAM'], 'output_root': str(output_root), 'psd_curve_tokens': [s.token for s in specs], 'analysis_userbin_reducers': list(userbin_reducers), 'analysis_distance_metrics': list(distance_metrics), 'checkpoints': [str(p) for p in checkpoint_files]}, sort_keys=True))
+        manifest_path = output_root / 'analysis_manifest.yaml'
+        g['write_manifest_yaml'](manifest_path, manifest_rows)
+        print(json.dumps({'status': 'ok', 'source_program': g['SOURCE_PROGRAM'], 'output_root': str(output_root), 'psd_curve_tokens': [s.token for s in specs], 'signal_curve_userbin_reducers': list(userbin_reducers), 'analysis_distance_metrics': list(distance_metrics), 'checkpoints': [str(p) for p in checkpoint_files]}, sort_keys=True))
         return 0
 
+    # Keep the canonical psd_analysis.main intact so PCA/reference-basis handling,
+    # checkpoint validation order, and legacy monkeypatch-based tests remain valid.
+    # The base parser already exposes the analysis/userbin knobs; this overlay only
+    # guards against older source revisions that lacked those parser options.
     g['build_arg_parser'] = build_arg_parser_patched
-    g['main'] = main_patched
-    g['_PSD_TOKEN_ANALYSIS_PATCHED'] = True
+    g['_collect_signal_maps_with_input'] = collect_signal_maps_with_input
+    g['_PSD_TOKEN_ANALYSIS_PATCHED'] = 'parser_only'

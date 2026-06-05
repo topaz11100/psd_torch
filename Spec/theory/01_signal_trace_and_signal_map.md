@@ -1,41 +1,43 @@
-# Trace와 SignalMap
+# Signal Trace and Signal Map
 
-## raw trace
+## Trace
 
-모델의 한 layer trace는 일반적으로
+SNN의 한 layer는 시간에 따라 상태를 갱신한다.
 
-$$
-Z \in \mathbb{R}^{B 	imes T 	imes *}
-$$
+\[
+u_t = f_\theta(u_{t-1}, x_t), \qquad s_t = H(u_t - \vartheta),
+\]
 
-로 표현한다. $B$는 batch/sample, $T$는 time step, $*$는 neuron 또는 channel/spatial 축이다.
+여기서 \(u_t\)는 membrane 또는 RF 상태에서 유도된 membrane-like signal이고, \(s_t\)는 surrogate spike다. 분석은 두 신호를 모두 보관한다.
 
-## SignalMap
+- `membrane`: 연속 상태. subthreshold dynamics를 포함한다.
+- `spike`: threshold를 지난 이산적 firing event. sparse code의 spectral footprint를 반영한다.
+- `layer_input`: 해당 layer가 받은 pre-activation current. 뉴런 동역학과 선형 변환을 분리할 때 사용한다.
 
-신호분석은 다음 형태를 기준으로 한다.
+## Channel-major map
 
-$$
-X \in \mathbb{R}^{S 	imes R 	imes T}
-$$
+PSD 연산의 표준 입력은
 
-- $S$: sample axis.
-- $R$: row axis. MLP에서는 neuron, image/event에서는 channel-spatial flatten row다.
-- $T$: time axis.
+\[
+M \in \mathbb{R}^{N\times R\times T}
+\]
 
-MLP trace `B,T,F`는 `B,F,T`로 변환한다. image/event trace `B,T,C,H,W`는 `B,C*H*W,T`로 변환한다.
+이다. \(N\)은 sample 수, \(R\)은 row index, \(T\)는 시간이다. MLP에서는 \(R=C\)이고, CNN에서는 \(R=C\cdot H\cdot W\)다.
 
-## dataset 입력과 model trace
+CNN trace가 \(Y\in\mathbb{R}^{B\times T\times C\times H\times W}\)일 때 변환은
 
-prepared dataset은 manifest의 `psd_time_axis`, `psd_row_axes`, `psd_flatten_rule`, `psd_logical_shape`를 사용해 SignalMap으로 변환한다. 모델 trace는 모델 forward capture에서 나온 hidden/output record만 SignalMap으로 변환한다.
+\[
+M_{b, r, t} = Y_{b,t,c,h,w}, \qquad r=((cH)+h)W+w.
+\]
 
-## metadata
+이 규칙을 manifest의 `psd_row_axes`, `psd_time_axis`, `psd_flatten_rule`에 기록한다.
 
-SignalMap은 tensor만으로 식별되지 않는다. 최소 metadata는 다음이다.
+## Centering
 
-```text
-dataset, run_id, seed, split, scope, probe_family,
-layer, layer_index, signal_kind, series,
-checkpoint_path, checkpoint_epoch
-```
+시간 평균을 제거한 centered variant는
 
-Dataset 분석은 `signal_kind=input`을 사용할 수 있다. 모델 분석은 `signal_kind=input`을 사용하지 않는다.
+\[
+\tilde{y}(t)=y(t)-\frac{1}{T}\sum_{\tau=0}^{T-1}y(\tau)
+\]
+
+로 정의한다. Raw PSD는 DC component를 포함하고, centered PSD는 시간 변화 성분을 강조한다.

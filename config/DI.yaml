@@ -1,0 +1,29 @@
+DI:
+  dataset:
+  - s-mnist
+  - shd
+  prep_root: /home/yongokhan/workspace/data/prep_data
+  output_root: /home/yongokhan/workspace/result/base/DI
+  split: train
+  batch_size: 256
+  num_workers: 0
+  gpu_index: 0
+  device: cuda
+  allow_cpu_fallback: false
+  seed: 0
+  max_samples: null
+  view_name: null
+  demean: true
+  epsilon: 1.0e-12
+  psd_windows:
+  - none
+  - hann
+  psd_row_reducer: mean
+  psd_value_transform: raw
+  timestamped_output: true
+  run_timestamp: null
+  plot_dpi: 180
+  plot_log_y: false
+  save_plots: true
+  pin_memory: true
+  stats_dtype: float64

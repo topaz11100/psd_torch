@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import os
 import sys
-import json
 from pathlib import Path
 from typing import Sequence
+
+from src.util.config import STRUCTURED_SUFFIXES, load_structured
 
 
 def _parse_seed_from_argv(argv: Sequence[str]) -> str:
@@ -25,8 +26,8 @@ def _parse_seed_from_argv(argv: Sequence[str]) -> str:
     if config_path:
         try:
             path = Path(config_path)
-            if path.suffix.lower() == '.json' and path.exists():
-                payload = json.loads(path.read_text(encoding='utf-8'))
+            if path.suffix.lower() in STRUCTURED_SUFFIXES and path.exists():
+                payload = load_structured(path)
                 if isinstance(payload, dict):
                     if 'seed' in payload:
                         return str(payload['seed'])

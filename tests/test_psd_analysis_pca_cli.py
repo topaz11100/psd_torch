@@ -46,7 +46,7 @@ def test_validate_pca_dim_vector_positive_only():
 
 def test_pca_ref_epoch_missing_raises_value_error(monkeypatch, tmp_path: Path):
     pytest.importorskip('torch')
-    cfg = tmp_path / 'cfg.json'
+    cfg = tmp_path / 'cfg.yaml'
     cfg.write_text('{"psd_analysis": {"checkpoint": "x", "dataset": "d", "prep_root": "/p", "output_root": "/o", "anal_batch": 1, "gpu_index": 0, "pca_ref_epoch": 9}}', encoding='utf-8')
     monkeypatch.setattr(pa, '_load_runtime_dependencies', lambda: None)
     monkeypatch.setattr(pa, '_resolve_checkpoint_files', lambda _p: ([Path('c1.pt'), Path('c2.pt')], []))

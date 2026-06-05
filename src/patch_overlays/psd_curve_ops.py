@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from src.patch_overlays.psd_curve_config import PSDCurveSpec, normalize_userbin_reducer
-from src.signal.psd_utils import apply_centering, exact_periodogram_from_maps, power_to_db
+from src.signal.psd_utils import apply_centering, exact_periodogram_from_maps, power_to_db, apply_power_value_scale
 
 
 def _row_reduce(values: torch.Tensor, reducer: str) -> torch.Tensor:
@@ -30,7 +30,7 @@ def _dispersion(values: torch.Tensor, metric: str) -> torch.Tensor:
 
 
 def _scale(values: torch.Tensor, scale: str) -> torch.Tensor:
-    return values if scale == 'raw' else power_to_db(values)
+    return apply_power_value_scale(values, scale, axis=-1)
 
 
 def _userbin_reduce(values: torch.Tensor, freqs: torch.Tensor, edges: Sequence[float], reducer: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -63,11 +63,12 @@ def psd_values_for_spec(
     *,
     userbin_edges: Sequence[float] | None = None,
     userbin_reducer: str = 'mean',
+    signal_window: str | bool | None = 'hann',
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     if maps.ndim != 3:
         raise ValueError(f'Expected PSD maps with shape (samples, rows, time), got {tuple(maps.shape)}.')
     x = maps if spec.centering == 'raw' else apply_centering(maps)
-    freqs, exact = exact_periodogram_from_maps(x)
+    freqs, exact = exact_periodogram_from_maps(x, signal_window=signal_window)
     values = exact.real
     if spec.extractor == 'psd_exact':
         return values, freqs, None
@@ -83,8 +84,9 @@ def representative_curve_tensor(
     *,
     userbin_edges: Sequence[float] | None = None,
     userbin_reducer: str = 'mean',
+    signal_window: str | bool | None = 'hann',
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    values, axis, edges = psd_values_for_spec(maps, spec, userbin_edges=userbin_edges, userbin_reducer=userbin_reducer)
+    values, axis, edges = psd_values_for_spec(maps, spec, userbin_edges=userbin_edges, userbin_reducer=userbin_reducer, signal_window=signal_window)
     curve = _row_reduce(values, spec.reducer).mean(dim=0)
     return _scale(curve, spec.scale), axis, edges
 
@@ -106,8 +108,11 @@ def curve_distance(u: torch.Tensor | np.ndarray, v: torch.Tensor | np.ndarray, m
 
 
 def row_value_unit(scale: str, metric: str | None = None) -> str:
-    if scale == 'db':
+    token = str(scale or 'raw').strip().lower().replace('-', '_')
+    if token == 'db':
         return 'dB'
+    if token in {'area', 'area_norm', 'area_normalized', 'normalized'}:
+        return 'area_normalized_power_fraction'
     if metric == 'variance':
         return 'power^2'
     return 'power'
@@ -128,12 +133,13 @@ def curve_rows_for_maps(
     userbin_edges: Sequence[float] | None,
     userbin_reducer: str,
     category: str,
+    signal_window: str | bool | None = 'hann',
 ) -> tuple[list[dict[str, str]], list[dict[str, str]], dict[str, np.ndarray]]:
     curve_rows: list[dict[str, str]] = []
     dispersion_rows: list[dict[str, str]] = []
     curves: dict[str, np.ndarray] = {}
     for spec in specs:
-        values, axis, edges = psd_values_for_spec(maps, spec, userbin_edges=userbin_edges, userbin_reducer=userbin_reducer)
+        values, axis, edges = psd_values_for_spec(maps, spec, userbin_edges=userbin_edges, userbin_reducer=userbin_reducer, signal_window=signal_window)
         rep = _scale(_row_reduce(values, spec.reducer).mean(dim=0), spec.scale)
         rep_np = rep.detach().cpu().numpy().reshape(-1)
         axis_np = axis.detach().cpu().numpy().reshape(-1)

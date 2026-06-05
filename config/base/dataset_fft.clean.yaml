@@ -1,0 +1,10 @@
+dataset_fft:
+  dataset:
+  - mnist
+  - shd
+  prep_root: /home/yongokhan/workspace/data/prep_data
+  output_root: /home/yongokhan/workspace/result/base/dataset_fft
+  batch_size: 128
+  num_workers: 0
+  seed: 0
+  gpu_index: 0

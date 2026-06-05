@@ -1,3 +1,9 @@
+# 06 Spiking Cells If Lif Rf
+
+## 2026 개정 해설
+
+IF, LIF, RF 뉴런은 같은 spike abstraction을 공유하지만 filter의 pole 구조가 다르다. IF는 누적기, LIF는 1차 저역통과 필터, RF는 감쇠 진동자를 이산 시간으로 적분한 2차 동역학으로 볼 수 있다.
+
 # IF/LIF/RF cell 동역학
 
 ## IF
@@ -13,7 +19,7 @@ $$
 LIF cell은 membrane decay를 갖는다.
 
 $$
-U_t = lpha U_{t-1}+I_t
+U_t = \alpha U_{t-1}+I_t
 $$
 
 분석 가능한 주요 파라미터는 decay `alpha`와 threshold다.

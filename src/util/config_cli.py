@@ -1,12 +1,13 @@
-"""CLI용 JSON 설정 로더와 병합 도우미."""
+"""CLI용 YAML 설정 로더와 병합 도우미."""
 
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 from typing import Any, Sequence
+
+from src.util.config import load_structured
 
 
 def _argv_list(argv: Sequence[str] | None) -> list[str]:
@@ -28,18 +29,15 @@ def extract_config_path(argv: Sequence[str] | None) -> str | None:
 
 
 def load_config_dict(config_path: str, *, stage_key: str | None = None) -> dict[str, Any]:
-    """JSON 설정 파일을 읽어 딕셔너리로 반환한다."""
+    """YAML 설정 파일을 읽어 딕셔너리로 반환한다."""
 
     path = Path(config_path).expanduser().resolve()
     suffix = path.suffix.lower()
-    if suffix in {'.yaml', '.yml'}:
-        raise ValueError('--config는 JSON(.json)만 지원합니다. YAML은 지원하지 않습니다.')
-    if suffix != '.json':
-        raise ValueError(f'--config 파일 확장자는 .json만 허용됩니다: {path}')
-    with path.open('r', encoding='utf-8') as handle:
-        payload = json.load(handle)
+    if suffix not in {'.yaml', '.yml'}:
+        raise ValueError(f'--config 파일 확장자는 .yaml/.yml만 허용됩니다: {path}')
+    payload = load_structured(path)
     if not isinstance(payload, dict):
-        raise ValueError(f'--config JSON 루트는 객체(dict)여야 합니다: {path}')
+        raise ValueError(f'--config 루트는 객체(dict)여야 합니다: {path}')
     if stage_key and stage_key in payload:
         stage_payload = payload[stage_key]
         if not isinstance(stage_payload, dict):
@@ -55,7 +53,7 @@ def parse_args_with_config(
     argv: Sequence[str] | None,
     stage_key: str | None = None,
 ) -> argparse.Namespace:
-    """JSON 설정을 반영한 뒤 인자를 파싱하고 필수 누락을 한국어로 검증한다."""
+    """YAML 설정을 반영한 뒤 인자를 파싱하고 필수 누락을 한국어로 검증한다."""
 
     required_dests = [a.dest for a in parser._actions if getattr(a, 'required', False)]
     resolved_argv = _argv_list(argv)

@@ -54,20 +54,22 @@ _NULL_HIDDEN_SPEC_TOKENS = {'', '-', 'default', 'none', 'null'}
 
 
 _FIXED_CNN_BACKBONES: dict[str, tuple[LayerSpec, ...]] = {
-    # Official CNN experiments use canonical 2-D VGG-11/ResNet-18 backbones and
-    # only swap the spiking neuron family attached to convolutional currents.
+    # reference/SNNs contributes topology only. Input channel count, spatial size,
+    # and temporal framing remain governed by prep_data metadata.
     'vgg11': (
-        ConvLayerSpec(out_channels=64, kernel_size=3, stride=1, padding=1, pool_after=True, bias=True),
-        ConvLayerSpec(out_channels=128, kernel_size=3, stride=1, padding=1, pool_after=True, bias=True),
+        ConvLayerSpec(out_channels=64, kernel_size=3, stride=1, padding=1, pool_after=True, pool_ceil_mode=True, bias=True),
+        ConvLayerSpec(out_channels=128, kernel_size=3, stride=1, padding=1, pool_after=True, pool_ceil_mode=True, bias=True),
         ConvLayerSpec(out_channels=256, kernel_size=3, stride=1, padding=1, bias=True),
-        ConvLayerSpec(out_channels=256, kernel_size=3, stride=1, padding=1, pool_after=True, bias=True),
+        ConvLayerSpec(out_channels=256, kernel_size=3, stride=1, padding=1, pool_after=True, pool_ceil_mode=True, bias=True),
         ConvLayerSpec(out_channels=512, kernel_size=3, stride=1, padding=1, bias=True),
-        ConvLayerSpec(out_channels=512, kernel_size=3, stride=1, padding=1, pool_after=True, bias=True),
+        ConvLayerSpec(out_channels=512, kernel_size=3, stride=1, padding=1, pool_after=True, pool_ceil_mode=True, bias=True),
         ConvLayerSpec(out_channels=512, kernel_size=3, stride=1, padding=1, bias=True),
-        ConvLayerSpec(out_channels=512, kernel_size=3, stride=1, padding=1, pool_after=True, bias=True),
+        ConvLayerSpec(out_channels=512, kernel_size=3, stride=1, padding=1, pool_after=True, pool_ceil_mode=True, bias=True),
     ),
+    # ResNet-18 topology: [2,2,2,2] BasicBlocks. No reference dataset-specific
+    # input front-end or separate prepared-frame projection is imported; the
+    # first BasicBlock consumes prepared frame channels directly.
     'resnet18': (
-        ConvLayerSpec(out_channels=64, kernel_size=7, stride=2, padding=3, pool_after=True, pool_kernel_size=3, pool_stride=2, pool_padding=1, batch_norm=True, bias=False),
         ResidualBlockSpec(out_channels=64, kernel_size=3, stride=1, padding=1),
         ResidualBlockSpec(out_channels=64, kernel_size=3, stride=1, padding=1),
         ResidualBlockSpec(out_channels=128, kernel_size=3, stride=2, padding=1),

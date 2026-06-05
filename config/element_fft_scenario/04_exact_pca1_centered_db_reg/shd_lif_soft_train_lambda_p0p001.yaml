@@ -1,0 +1,10 @@
+element_fft:
+  dataset: shd
+  prep_root: /home/yongokhan/workspace/data/prep_data
+  checkpoint: /home/yongokhan/workspace/result/ddp_train_scenario/04_exact_pca1_centered_db_reg/shd_lif_soft_train_lambda_p0p001/checkpoints
+  output_root: /home/yongokhan/workspace/result/element_fft_scenario/04_exact_pca1_centered_db_reg/shd_lif_soft_train_lambda_p0p001
+  num_workers: 2
+  seed: 0
+  gpu_index: 0
+  anal_batch: 256
+  low_vram: 0

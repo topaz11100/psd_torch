@@ -50,8 +50,10 @@ from src.model.model_registry import ModelSpec, canonicalize_model_token  # noqa
 from src.model.snn_builder import build_snn_classifier  # noqa: E402
 from src.model.training import EpochMetrics, evaluate_one_epoch  # noqa: E402
 from src.readout.readout import build_readout, canonicalize_readout_mode  # noqa: E402
-from src.util.config import load_json  # noqa: E402
+from src.util.config import compact_yaml, load_manifest, resolve_manifest_path, save_yaml  # noqa: E402
 from src.util.csv_schema import common_row, write_common_csv  # noqa: E402
+from src.util.paths import timestamped_output_root  # noqa: E402
+from src.util.checkpoints import checkpoint_state_dict, load_state_dict_compatible, load_torch_checkpoint  # noqa: E402
 
 SOURCE_PROGRAM = "checkpoint_accuracy_eval_plot"
 
@@ -81,7 +83,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--prep_root",
         default=None,
         help=(
-            "Prepared data root containing <dataset>/manifest.json. "
+            "Prepared data root containing <dataset>/manifest.yaml. "
             "If omitted, prep_root stored in the checkpoint is used."
         ),
     )
@@ -117,6 +119,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Overwrite existing CSV/PNG/manifest files in output_root.",
     )
     parser.add_argument(
+        "--run_timestamp",
+        default=None,
+        help="Execution timestamp suffix for the output run directory. Defaults to Asia/Seoul current time.",
+    )
+    parser.add_argument(
+        "--timestamped_output",
+        default="true",
+        help="true이면 output_root 아래 실행시각 폴더를 자동 생성한다. false이면 기존 경로에 직접 저장한다.",
+    )
+    parser.add_argument(
         "--plot_name",
         default="checkpoint_accuracy.png",
         help="Output plot file name. Default: checkpoint_accuracy.png.",
@@ -142,13 +154,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _torch_load_checkpoint(path: Path, *, map_location: str | torch.device = "cpu") -> dict[str, Any]:
-    try:
-        payload = torch.load(path, map_location=map_location, weights_only=False)
-    except TypeError:
-        payload = torch.load(path, map_location=map_location)
-    if not isinstance(payload, dict):
-        raise ValueError(f"Checkpoint must load to a mapping: {path}")
-    return payload
+    return load_torch_checkpoint(path, map_location=map_location)
 
 
 def _checkpoint_epoch(payload: Mapping[str, Any], path: Path) -> tuple[int | None, str]:
@@ -226,7 +232,7 @@ def _json_metadata(value: Any) -> str:
         return ""
     if isinstance(value, str):
         return value
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return compact_yaml(value)
 
 
 def _axis_metadata_columns(manifest: Mapping[str, Any], *, psd_axis_kind: str) -> dict[str, str]:
@@ -246,9 +252,9 @@ def _axis_metadata_columns(manifest: Mapping[str, Any], *, psd_axis_kind: str) -
 
 
 def _read_manifest(manifest_path: Path) -> dict[str, Any]:
-    payload = load_json(manifest_path)
+    payload = load_manifest(manifest_path)
     if not isinstance(payload, dict):
-        raise ValueError(f"Prepared manifest must be a JSON object: {manifest_path}")
+        raise ValueError(f"Prepared manifest must be a mapping: {manifest_path}")
     return payload
 
 
@@ -265,24 +271,44 @@ def _payload_seed(payload: Mapping[str, Any]) -> int:
     return int(value)
 
 
+def _payload_model_config(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    model_config = payload.get("model_config")
+    if isinstance(model_config, Mapping):
+        return model_config
+    training_args = payload.get("training_args") if isinstance(payload.get("training_args"), Mapping) else {}
+    legacy = {
+        "input_dim": payload.get("input_dim") or training_args.get("input_dim"),
+        "sequence_length": payload.get("sequence_length") or training_args.get("sequence_length"),
+        "num_classes": payload.get("num_classes") or training_args.get("num_classes"),
+        "input_shape": payload.get("input_shape") or training_args.get("input_shape"),
+        "hidden_spec": payload.get("hidden_spec") or training_args.get("hidden_spec") or payload.get("arch_spec") or training_args.get("arch_spec"),
+        "arch_spec": payload.get("arch_spec") or training_args.get("arch_spec") or payload.get("hidden_spec") or training_args.get("hidden_spec"),
+        "v_th": payload.get("v_th") or training_args.get("v_th") or 1.0,
+    }
+    if all(legacy.get(k) not in (None, "") for k in ("input_dim", "sequence_length", "num_classes")):
+        return legacy
+    raise ValueError("Checkpoint model_config is missing and legacy dimension metadata is incomplete.")
+
+
 def _payload_readout_mode(payload: Mapping[str, Any]) -> str:
     readout_config = payload.get("readout_config")
-    if not isinstance(readout_config, Mapping):
-        raise ValueError("Checkpoint readout_config must be a mapping.")
-    mode = str(readout_config.get("mode") or readout_config.get("readout_mode") or "").strip()
+    if isinstance(readout_config, Mapping):
+        mode = str(readout_config.get("mode") or readout_config.get("readout_mode") or "").strip()
+    else:
+        training_args = payload.get("training_args") if isinstance(payload.get("training_args"), Mapping) else {}
+        mode = str(payload.get("readout_mode") or training_args.get("readout_mode") or "").strip()
     if not mode:
-        raise ValueError("Checkpoint readout_config is missing mode.")
+        raise ValueError("Checkpoint readout_config/readout_mode is missing mode.")
     return canonicalize_readout_mode(mode)
 
 
 def _build_model_from_checkpoint(payload: Mapping[str, Any], *, device: torch.device):
-    model_token = str(payload.get("model_token") or "").strip()
+    training_args = payload.get("training_args") if isinstance(payload.get("training_args"), Mapping) else {}
+    model_token = str(payload.get("model_token") or payload.get("model") or training_args.get("model") or "").strip()
     if not model_token:
         raise ValueError("Checkpoint is missing model_token.")
     spec = canonicalize_model_token(model_token)
-    model_config = payload.get("model_config")
-    if not isinstance(model_config, Mapping):
-        raise ValueError("Checkpoint model_config must be a mapping.")
+    model_config = _payload_model_config(payload)
 
     mode = _payload_readout_mode(payload)
     input_dim = int(model_config["input_dim"])
@@ -311,10 +337,7 @@ def _build_model_from_checkpoint(payload: Mapping[str, Any], *, device: torch.de
         v_th=v_th,
     ).to(device)
 
-    state_dict = payload.get("state_dict")
-    if not isinstance(state_dict, Mapping):
-        raise ValueError("Checkpoint is missing state_dict mapping.")
-    model.load_state_dict(state_dict)
+    load_state_dict_compatible(model, checkpoint_state_dict(payload), context='checkpoint_accuracy_eval state_dict', strict=True)
     model.eval()
     readout.to(device)
     readout.eval()
@@ -323,7 +346,8 @@ def _build_model_from_checkpoint(payload: Mapping[str, Any], *, device: torch.de
 
 def _run_identity(payload: Mapping[str, Any]) -> tuple[str, str, str, int]:
     dataset = _payload_dataset(payload)
-    model_token = str(payload.get("model_token") or "").strip()
+    training_args = payload.get("training_args") if isinstance(payload.get("training_args"), Mapping) else {}
+    model_token = str(payload.get("model_token") or payload.get("model") or training_args.get("model") or "").strip()
     readout_mode = _payload_readout_mode(payload)
     seed = _payload_seed(payload)
     return dataset, model_token, readout_mode, seed
@@ -472,17 +496,14 @@ def _render_accuracy_plot(
     plt.close(fig)
 
 
-def _write_manifest_json(
+def _write_manifest_yaml(
     *,
     output_path: Path,
     overwrite: bool,
     payload: Mapping[str, Any],
 ) -> None:
     _assert_can_write(output_path, overwrite=overwrite)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as handle:
-        json.dump(dict(payload), handle, ensure_ascii=False, indent=2, sort_keys=True)
-        handle.write("\n")
+    save_yaml(output_path, dict(payload))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -495,12 +516,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--num_workers must be >= 0.")
 
     checkpoint_input = Path(args.checkpoint).expanduser().resolve()
-    output_root = Path(args.output_root).expanduser().resolve()
+    output_root = timestamped_output_root(args.output_root, run_timestamp=getattr(args, 'run_timestamp', None), prefix=SOURCE_PROGRAM, enabled=getattr(args, 'timestamped_output', True))
     output_root.mkdir(parents=True, exist_ok=True)
 
     csv_path = _safe_output_path(output_root, args.csv_name)
     plot_path = _safe_output_path(output_root, args.plot_name)
-    manifest_path = output_root / "checkpoint_accuracy_eval_manifest.json"
+    manifest_path = output_root / "checkpoint_accuracy_eval_manifest.yaml"
     _assert_can_write(csv_path, overwrite=bool(args.overwrite))
     _assert_can_write(plot_path, overwrite=bool(args.overwrite))
     _assert_can_write(manifest_path, overwrite=bool(args.overwrite))
@@ -527,8 +548,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         prep_root = Path(args.prep_root).expanduser().resolve()
 
-    if not (prep_root / dataset_token / "manifest.json").exists():
-        parser.error(f"Prepared manifest is missing: {prep_root / dataset_token / 'manifest.json'}")
+    prepared_manifest_path = resolve_manifest_path(prep_root / dataset_token)
+    if not prepared_manifest_path.exists():
+        parser.error(f"Prepared manifest is missing: {prepared_manifest_path}")
 
     seed = checkpoint_seed if args.seed is None else int(args.seed)
     _seed_everything(seed)
@@ -599,7 +621,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     write_common_csv(csv_path, all_rows)
     _render_accuracy_plot(all_rows, output_path=plot_path, overwrite=True, ylim_0_1=bool(args.ylim_0_1))
-    _write_manifest_json(
+    _write_manifest_yaml(
         output_path=manifest_path,
         overwrite=True,
         payload={

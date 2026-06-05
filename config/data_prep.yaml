@@ -1,0 +1,18 @@
+data_prep:
+  dataset:
+  - mnist
+  - s-mnist
+  - shd
+  prep_root: /home/yongokhan/workspace/data/prep_data
+  raw_data_root: /home/yongokhan/workspace/data/raw_data
+  seed: 0
+  deap_label_axis: valence
+  deap_num_classes: 3
+  download: false
+  force_overwrite: false
+  max_samples: null
+  prep_profile: project_standard
+  shd_dt_ms: 1.0
+  shd_max_time: 1.2
+  ssc_dt_ms: 1.0
+  ssc_max_time: 1.0

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import math
+import os
 from typing import Any, Iterable, Sequence
 
 import torch
@@ -30,8 +31,48 @@ from src.neurons.LIF_neuron import LIFLayer
 from src.neurons.RF_neuron import RFLayer
 from src.neurons.TC_LIF_neuron import TCLIFLayer
 from src.neurons.TS_LIF_neuron import TSLIFLayer
-from src.neurons._common import surrogate_spike
+from src.neurons._common import logit, sequence_backend_name, sequence_buffer_mode, sequence_state_dtype, surrogate_spike, to_sequence_state_dtype
+from src.neurons._compile import compile_callable, disable_compiled_runtime
 from src.neurons.cnn2d import CNN2DLIFLayer, CNN2DRFLayer
+
+
+def _truthy_env(name: str) -> bool:
+    return str(os.environ.get(name, '')).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _configure_default_torch_cpu_threads() -> None:
+    """Bound default CPU parallelism unless the caller already configured it.
+
+    Some CI/shared hosts expose a large CPU count.  Letting PyTorch and BLAS use
+    all visible CPUs made small SNN/CNN smoke paths stall after origin-wrapper
+    imports.  Users can override with ``PSD_TORCH_CPU_THREADS`` or their normal
+    BLAS thread environment variables.
+    """
+
+    if _truthy_env('PSD_DISABLE_DEFAULT_TORCH_THREAD_CAP'):
+        return
+    explicit = os.environ.get('PSD_TORCH_CPU_THREADS')
+    thread_env_keys = ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'NUMEXPR_NUM_THREADS')
+    if explicit is None and any(os.environ.get(key) for key in thread_env_keys):
+        return
+    try:
+        requested = int(explicit) if explicit not in {None, ''} else min(os.cpu_count() or 1, 8)
+    except Exception:
+        requested = min(os.cpu_count() or 1, 8)
+    num_threads = max(1, requested)
+    for key in thread_env_keys:
+        os.environ.setdefault(key, str(num_threads))
+    try:
+        torch.set_num_threads(num_threads)
+    except Exception:
+        pass
+    try:
+        torch.set_num_interop_threads(max(1, min(num_threads, max(1, num_threads // 2))))
+    except Exception:
+        pass
+
+
+_configure_default_torch_cpu_threads()
 
 
 @dataclass
@@ -70,6 +111,8 @@ def _time_distributed_2d(module: nn.Module, input_sequence: torch.Tensor) -> tor
         raise ValueError(f'Expected shape (B,T,C,H,W), got {tuple(input_sequence.shape)}')
     batch_size, time_steps, channels, height, width = [int(v) for v in input_sequence.shape]
     flattened = input_sequence.reshape(batch_size * time_steps, channels, height, width)
+    if flattened.device.type == 'cuda':
+        flattened = flattened.contiguous(memory_format=torch.channels_last)
     output = module(flattened)
     out_channels, out_height, out_width = [int(v) for v in output.shape[1:]]
     return output.reshape(batch_size, time_steps, out_channels, out_height, out_width).contiguous()
@@ -81,6 +124,41 @@ def _squeeze_unit_spatial(record_tensor: torch.Tensor) -> torch.Tensor:
     if record_tensor.ndim != 5 or int(record_tensor.shape[-1]) != 1 or int(record_tensor.shape[-2]) != 1:
         raise ValueError(f'Expected output tensor shape (B,T,C,1,1), got {tuple(record_tensor.shape)}')
     return record_tensor[..., 0, 0].contiguous()
+
+
+def _compile_child_regions(children: Iterable[tuple[str, nn.Module]], compile_kwargs: dict[str, Any]) -> tuple[int, list[str]]:
+    applied_count = 0
+    policies: list[str] = []
+    seen: set[int] = set()
+    for name, child in children:
+        if id(child) in seen:
+            continue
+        seen.add(id(child))
+        hook = getattr(child, 'enable_compiled_forward', None)
+        if not callable(hook):
+            continue
+        applied, policy = hook(**compile_kwargs)
+        policies.append(f'{name}:{policy}')
+        if applied:
+            applied_count += 1
+    return applied_count, policies
+
+
+def _sew_merge(branch_spike: torch.Tensor, shortcut_spike: torch.Tensor, cnf: str = 'ADD') -> torch.Tensor:
+    """Apply the SEW residual merge rule on spike tensors.
+
+    This imports only the residual semantics from ``reference/SNNs/sew_resnet.py``.
+    The input geometry and neuron implementation remain project-owned.
+    """
+
+    token = str(cnf).upper()
+    if token == 'ADD':
+        return branch_spike + shortcut_spike
+    if token == 'AND':
+        return branch_spike * shortcut_spike
+    if token == 'IAND':
+        return (1.0 - branch_spike) * shortcut_spike
+    raise ValueError(f'Unsupported SEW connect function: {cnf!r}')
 
 
 def _output_layer_model_spec(spec: ModelSpec) -> ModelSpec:
@@ -146,17 +224,11 @@ def _make_identity_activation_layer(layer: nn.Module) -> nn.Module:
 
 
 class CNN2DResidualBlock(nn.Module):
-    """Canonical ResNet-18 BasicBlock with spiking neurons replacing ReLU sites."""
+    """Input-agnostic SEW-ResNet BasicBlock implemented with project-native layers."""
 
-    def __init__(
-        self,
-        spec: ModelSpec,
-        *,
-        input_size: int,
-        block_spec: ResidualBlockSpec,
-        v_th: float,
-    ) -> None:
-        """Initialize one ResNet-18 BasicBlock."""
+    sew_connect_function = 'ADD'
+
+    def __init__(self, spec: ModelSpec, *, input_size: int, block_spec: ResidualBlockSpec, v_th: float) -> None:
         super().__init__()
         self.input_size = int(input_size)
         self.output_size = int(block_spec.out_channels)
@@ -164,105 +236,100 @@ class CNN2DResidualBlock(nn.Module):
         self.stride = int(block_spec.stride)
         self.padding = int(block_spec.padding)
         self.batch_norm = bool(block_spec.batch_norm)
-        first_conv = ConvLayerSpec(
-            out_channels=self.output_size,
-            kernel_size=self.kernel_size,
-            stride=self.stride,
-            padding=self.padding,
-            batch_norm=self.batch_norm,
-            bias=False,
-        )
         self.layer1 = _build_conv2d_family_layer(
             spec,
             input_size=self.input_size,
-            layer_spec=first_conv,
+            layer_spec=ConvLayerSpec(out_channels=self.output_size, kernel_size=self.kernel_size, stride=self.stride, padding=self.padding, batch_norm=self.batch_norm, bias=False),
             v_th=v_th,
             output_overrides={},
         )
-        self.conv2 = TimeDistributedConv2DBN(
-            self.output_size,
-            self.output_size,
-            kernel_size=self.kernel_size,
-            stride=1,
-            padding=self.padding,
-            batch_norm=self.batch_norm,
-            bias=False,
-        )
-        activation_spec = ConvLayerSpec(out_channels=self.output_size, kernel_size=1, stride=1, padding=0, batch_norm=False, bias=False)
-        self.residual_activation = _make_identity_activation_layer(
-            _build_conv2d_family_layer(
-                spec,
-                input_size=self.output_size,
-                layer_spec=activation_spec,
-                v_th=v_th,
-                output_overrides={},
-            )
+        self.layer2 = _build_conv2d_family_layer(
+            spec,
+            input_size=self.output_size,
+            layer_spec=ConvLayerSpec(out_channels=self.output_size, kernel_size=self.kernel_size, stride=1, padding=self.padding, batch_norm=self.batch_norm, bias=False),
+            v_th=v_th,
+            output_overrides={},
         )
         self.skip_projection = None
         self.skip_bn = None
+        self.skip_activation = None
         if self.input_size != self.output_size or self.stride != 1:
             self.skip_projection = nn.Conv2d(self.input_size, self.output_size, kernel_size=1, stride=self.stride, padding=0, bias=False)
             self.skip_bn = nn.BatchNorm2d(self.output_size) if self.batch_norm else None
+            self.skip_activation = _make_identity_activation_layer(
+                _build_conv2d_family_layer(
+                    spec,
+                    input_size=self.output_size,
+                    layer_spec=ConvLayerSpec(out_channels=self.output_size, kernel_size=1, stride=1, padding=0, batch_norm=False, bias=False),
+                    v_th=v_th,
+                    output_overrides={},
+                )
+            )
         self._last_layer_input = None
         self._last_trace_records: list[LayerRecord] = []
 
-    def _skip_path(self, input_sequence: torch.Tensor) -> torch.Tensor:
+    def enable_compiled_forward(self, **compile_kwargs: Any) -> tuple[bool, str]:
+        children: list[tuple[str, nn.Module]] = [('layer1', self.layer1), ('layer2', self.layer2)]
+        if self.skip_activation is not None:
+            children.append(('skip_activation', self.skip_activation))
+        applied_count, policies = _compile_child_regions(children, dict(compile_kwargs or {}))
+        if applied_count > 0:
+            return True, 'regional_compile[' + ';'.join(policies) + ']'
+        return False, 'regional_compile_no_child_regions[' + ';'.join(policies) + ']'
+
+    def _skip_path(self, input_sequence: torch.Tensor, *, return_traces: bool) -> torch.Tensor:
         if self.skip_projection is None:
             return input_sequence
         output = _time_distributed_2d(self.skip_projection, input_sequence)
         if self.skip_bn is not None:
             output = _time_distributed_2d(self.skip_bn, output)
-        return output
+        if self.skip_activation is None:
+            return output
+        _skip_membrane, skip_spike = self.skip_activation(output, return_traces=return_traces)
+        return skip_spike
+
+    @staticmethod
+    def _sew_merge(branch_spike: torch.Tensor, shortcut_spike: torch.Tensor, cnf: str = 'ADD') -> torch.Tensor:
+        token = str(cnf).upper()
+        if token == 'ADD':
+            return branch_spike + shortcut_spike
+        if token == 'AND':
+            return branch_spike * shortcut_spike
+        if token == 'IAND':
+            return (1.0 - branch_spike) * shortcut_spike
+        raise ValueError(f'Unsupported SEW connect function: {cnf!r}')
 
     def forward(self, input_sequence: torch.Tensor, *, return_traces: bool = False) -> tuple[torch.Tensor | None, torch.Tensor]:
-        """Run one residual BasicBlock forward pass.
-
-        The second spiking site receives the complete residual sum
-        ``conv2(spike1) + shortcut(input)``.  Therefore the recorded
-        ``residual_add`` layer_input/membrane/spike all correspond to the
-        post-shortcut residual-add signal, not to the branch-only conv2 path.
-        """
         self._last_layer_input = None
         self._last_trace_records = []
         mem1, spike1 = self.layer1(input_sequence, return_traces=return_traces)
-        branch_current = self.conv2(spike1)
-        shortcut_current = self._skip_path(input_sequence)
-        residual_current = branch_current + shortcut_current
-        residual_membrane, residual_spike = self.residual_activation(residual_current, return_traces=return_traces)
+        mem2, branch_spike = self.layer2(spike1, return_traces=return_traces)
+        shortcut_spike = self._skip_path(input_sequence, return_traces=return_traces)
+        merged_spike = self._sew_merge(branch_spike, shortcut_spike, self.sew_connect_function)
         if return_traces:
             layer1_input = getattr(self.layer1, '_last_layer_input', None)
-            residual_input = getattr(self.residual_activation, '_last_layer_input', None)
+            layer2_input = getattr(self.layer2, '_last_layer_input', None)
             if mem1 is None or layer1_input is None:
-                raise RuntimeError('ResNet BasicBlock first spiking neuron did not expose complete traces.')
-            if residual_membrane is None or residual_input is None:
-                raise RuntimeError('ResNet BasicBlock residual spiking neuron did not expose complete traces.')
-            self._last_layer_input = residual_current
+                raise RuntimeError('SEW-ResNet BasicBlock first spiking site did not expose complete traces.')
+            if mem2 is None or layer2_input is None:
+                raise RuntimeError('SEW-ResNet BasicBlock second spiking site did not expose complete traces.')
+            self._last_layer_input = layer2_input
             self._last_trace_records = [
                 LayerRecord(layer_name='conv1', membrane=mem1, spike=spike1, layer_input=layer1_input),
-                LayerRecord(layer_name='residual_add', membrane=residual_membrane, spike=residual_spike, layer_input=residual_current),
+                LayerRecord(layer_name='residual_add', membrane=mem2, spike=merged_spike, layer_input=layer2_input),
             ]
-        return residual_membrane, residual_spike
+        return mem2, merged_spike
 
     def trace_records(self, base_name: str) -> list[LayerRecord]:
-        """Return PSD records for both spiking-neuron sites in this BasicBlock."""
-
-        records: list[LayerRecord] = []
-        for record in self._last_trace_records:
-            records.append(
-                LayerRecord(
-                    layer_name=f'{base_name}_{record.layer_name}',
-                    membrane=record.membrane,
-                    spike=record.spike,
-                    layer_input=record.layer_input,
-                )
-            )
-        return records
+        return [
+            LayerRecord(layer_name=f'{base_name}_{record.layer_name}', membrane=record.membrane, spike=record.spike, layer_input=record.layer_input)
+            for record in self._last_trace_records
+        ]
 
     def filter_stats_vectors(self) -> dict[str, torch.Tensor]:
-        """Return concatenated filter-stat vectors from internal neuron layers."""
         merged: dict[str, list[torch.Tensor]] = {}
-        for layer in (self.layer1, self.residual_activation):
-            if not hasattr(layer, 'filter_stats_vectors'):
+        for layer in (self.layer1, self.layer2, self.skip_activation):
+            if layer is None or not hasattr(layer, 'filter_stats_vectors'):
                 continue
             for key, value in layer.filter_stats_vectors().items():
                 merged.setdefault(str(key), []).append(value.detach().reshape(-1))
@@ -301,12 +368,49 @@ class FixedCNN2DClassifier(nn.Module):
         self.pool_after_enabled = [pool is not None for pool in pool_after]
         self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.extra_metadata = dict(extra_metadata)
+        self.compile_granularity = 'sequence_regions'
+        self._compiled_core_forward = None
+        self._compiled_core_disabled = False
+        self._compiled_core_error = None
+        self._compiled_core_policy = 'eager'
+
+    def enable_compiled_forward(self, **compile_kwargs: Any) -> tuple[bool, str]:
+        kwargs = dict(compile_kwargs or {})
+        child_pairs = list(self.iter_named_layers())
+        child_applied, child_policies = _compile_child_regions(child_pairs, kwargs)
+        if _truthy_env('PSD_ENABLE_CNN_CORE_COMPILE'):
+            compiled, core_applied, core_policy = compile_callable(self._forward_core_no_trace, compile_kwargs=kwargs, label='cnn_core')
+            if core_applied:
+                self._compiled_core_forward = compiled
+                self._compiled_core_disabled = False
+                self._compiled_core_error = None
+                self._compiled_core_policy = core_policy
+            else:
+                self._compiled_core_forward = None
+                self._compiled_core_error = core_policy
+                self._compiled_core_policy = core_policy
+        else:
+            core_applied = False
+            self._compiled_core_forward = None
+            self._compiled_core_error = 'cnn_core_compile_skipped_outer_loop_guard'
+            core_policy = self._compiled_core_error
+            self._compiled_core_policy = core_policy
+        policies = []
+        if child_policies:
+            policies.append('children=' + ';'.join(child_policies))
+        policies.append('core=' + core_policy)
+        self.extra_metadata['compile_granularity'] = 'cnn_sequence_regions' if not core_applied else 'cnn_core_plus_sequence_regions'
+        self.extra_metadata['compile_child_region_count'] = int(child_applied)
+        self.extra_metadata['compile_core_policy'] = self._compiled_core_policy
+        self.extra_metadata['sequence_backend'] = sequence_backend_name()
+        self.extra_metadata['sequence_buffer_mode'] = sequence_buffer_mode()
+        return bool(core_applied or child_applied > 0), 'regional_cnn_compile[' + '|'.join(policies) + ']'
 
     def iter_named_layers(self) -> Iterable[tuple[str, nn.Module]]:
         for meta, layer in zip(self.layer_meta[:-1], self.hidden_layers):
             if isinstance(layer, CNN2DResidualBlock):
                 yield f'{meta.name}_conv1', layer.layer1
-                yield f'{meta.name}_residual_add', layer.residual_activation
+                yield f'{meta.name}_residual_add', layer.layer2
             else:
                 yield meta.name, layer
         yield self.layer_meta[-1].name, self.output_layer
@@ -315,7 +419,7 @@ class FixedCNN2DClassifier(nn.Module):
         for meta, layer in zip(self.layer_meta[:-1], self.hidden_layers):
             if isinstance(layer, CNN2DResidualBlock):
                 yield f'{meta.name}_conv1', layer.layer1
-                yield f'{meta.name}_residual_add', layer.residual_activation
+                yield f'{meta.name}_residual_add', layer.layer2
             else:
                 yield meta.name, layer
 
@@ -346,11 +450,15 @@ class FixedCNN2DClassifier(nn.Module):
 
     def _prepare_input(self, inputs: torch.Tensor) -> torch.Tensor:
         tensor = torch.as_tensor(inputs)
-        expected_channels, expected_time, channels, height, width = self._expected_cnn_shape()
-        if tensor.ndim != 5:
+        expected_channels, expected_time, _channels, height, width = self._expected_cnn_shape()
+        if tensor.ndim == 4 and expected_time is None:
+            tensor = tensor.unsqueeze(1)
+            expected_time = 1
+        elif tensor.ndim != 5:
             raise ValueError(
-                'CNN models require prepared input shape (B,T,C,H,W). '
-                f'Flattened or rank-{tensor.ndim} input is not accepted for CNN models; got shape {tuple(tensor.shape)}.'
+                'CNN models require prepared image input shape (B,T,C,H,W); '
+                'rank-4 (B,C,H,W) is accepted only for static rank-3 image metadata. '
+                f'Got shape {tuple(tensor.shape)}.'
             )
         if int(tensor.shape[2]) != expected_channels:
             raise ValueError(f'Expected frame channels={expected_channels}, got shape {tuple(tensor.shape)}.')
@@ -358,38 +466,65 @@ class FixedCNN2DClassifier(nn.Module):
             raise ValueError(f'Expected temporal frames={expected_time}, got shape {tuple(tensor.shape)}.')
         if int(tensor.shape[3]) != height or int(tensor.shape[4]) != width:
             raise ValueError(f'Expected spatial shape ({height},{width}), got {tuple(tensor.shape[-2:])}.')
-
-        if self.spec.backbone == 'vgg11':
-            pad_h = max(0, 32 - int(tensor.shape[-2]))
-            pad_w = max(0, 32 - int(tensor.shape[-1]))
-            if pad_h > 0 or pad_w > 0:
-                tensor = F.pad(tensor, (0, pad_w, 0, pad_h))
         return tensor.contiguous()
+
+    def _forward_core_no_trace(self, prepared_input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        current = prepared_input
+        for index, layer in enumerate(self.hidden_layers):
+            _membrane, spike = layer(current, return_traces=False)
+            current = spike
+            if self.pool_after_enabled[index]:
+                current = _time_distributed_2d(self.pool_after[index], current)
+        current = _time_distributed_2d(self.global_pool, current)
+        output_membrane_5d, output_spike_5d = self.output_layer(current, return_traces=True)
+        if output_membrane_5d is None:
+            raise RuntimeError('Output layer must always return membrane traces.')
+        output_layer_input_5d = getattr(self.output_layer, '_last_layer_input', None)
+        if output_layer_input_5d is None:
+            raise RuntimeError('Output layer did not expose exact layer_input traces under return_traces=True.')
+        return output_membrane_5d, output_spike_5d, output_layer_input_5d
 
     def forward(self, input_sequence: torch.Tensor, *, capture_hidden: bool = False) -> ForwardResult:
         hidden_records: list[LayerRecord] = []
         prepared_input = self._prepare_input(input_sequence)
+        if not bool(capture_hidden):
+            core_forward = self._compiled_core_forward if (self._compiled_core_forward is not None and not self._compiled_core_disabled) else self._forward_core_no_trace
+            try:
+                output_membrane_5d, output_spike_5d, output_layer_input_5d = core_forward(prepared_input)
+            except Exception as exc:  # pragma: no cover - backend dependent fallback
+                if core_forward is self._forward_core_no_trace:
+                    raise
+                self._compiled_core_disabled = True
+                self._compiled_core_error = f'{type(exc).__name__}: {exc}'
+                output_membrane_5d, output_spike_5d, output_layer_input_5d = self._forward_core_no_trace(prepared_input)
+            output_record = LayerRecord(
+                layer_name=self.layer_meta[-1].name,
+                membrane=_squeeze_unit_spatial(output_membrane_5d),
+                spike=_squeeze_unit_spatial(output_spike_5d),
+                layer_input=_squeeze_unit_spatial(output_layer_input_5d),
+            )
+            return ForwardResult(hidden_records=hidden_records, output_record=output_record, input_record=prepared_input)
+
         current = prepared_input
         for index, (meta, layer) in enumerate(zip(self.layer_meta[:-1], self.hidden_layers)):
-            membrane, spike = layer(current, return_traces=capture_hidden)
+            membrane, spike = layer(current, return_traces=True)
             current = spike
             record_membrane = membrane
-            record_layer_input = getattr(layer, '_last_layer_input', None) if capture_hidden else None
+            record_layer_input = getattr(layer, '_last_layer_input', None)
             if self.pool_after_enabled[index]:
                 current = _time_distributed_2d(self.pool_after[index], current)
-            if capture_hidden:
-                trace_records = getattr(layer, 'trace_records', None)
-                if callable(trace_records):
-                    block_records = trace_records(meta.name)
-                    if not block_records:
-                        raise RuntimeError(f'Layer {meta.name} did not expose BasicBlock trace records under capture_hidden=True.')
-                    hidden_records.extend(block_records)
-                else:
-                    if record_membrane is None:
-                        raise RuntimeError(f'Layer {meta.name} did not return membrane traces under capture_hidden=True.')
-                    if record_layer_input is None:
-                        raise RuntimeError(f'Layer {meta.name} did not expose exact layer_input traces under capture_hidden=True.')
-                    hidden_records.append(LayerRecord(layer_name=meta.name, membrane=record_membrane, spike=current, layer_input=record_layer_input))
+            trace_records = getattr(layer, 'trace_records', None)
+            if callable(trace_records):
+                block_records = trace_records(meta.name)
+                if not block_records:
+                    raise RuntimeError(f'Layer {meta.name} did not expose BasicBlock trace records under capture_hidden=True.')
+                hidden_records.extend(block_records)
+            else:
+                if record_membrane is None:
+                    raise RuntimeError(f'Layer {meta.name} did not return membrane traces under capture_hidden=True.')
+                if record_layer_input is None:
+                    raise RuntimeError(f'Layer {meta.name} did not expose exact layer_input traces under capture_hidden=True.')
+                hidden_records.append(LayerRecord(layer_name=meta.name, membrane=record_membrane, spike=current, layer_input=record_layer_input))
         current = _time_distributed_2d(self.global_pool, current)
         output_membrane_5d, output_spike_5d = self.output_layer(current, return_traces=True)
         if output_membrane_5d is None:
@@ -431,6 +566,18 @@ class SNNClassifier(nn.Module):
         self.output_layer = output_layer
         self.layer_meta = list(layer_meta)
         self.extra_metadata = dict(extra_metadata)
+        self.compile_granularity = 'sequence_regions'
+
+    def enable_compiled_forward(self, **compile_kwargs: Any) -> tuple[bool, str]:
+        applied_count, policies = _compile_child_regions(list(self.iter_named_layers()), dict(compile_kwargs or {}))
+        self.extra_metadata['compile_granularity'] = 'sequence_regions'
+        self.extra_metadata['compile_child_region_count'] = int(applied_count)
+        self.extra_metadata['compile_child_policies'] = list(policies)
+        self.extra_metadata['sequence_backend'] = sequence_backend_name()
+        self.extra_metadata['sequence_buffer_mode'] = sequence_buffer_mode()
+        if applied_count > 0:
+            return True, 'regional_sequence_compile[' + ';'.join(policies) + ']'
+        return False, 'regional_sequence_compile_no_child_regions[' + ';'.join(policies) + ']'
 
     def iter_named_layers(self) -> Iterable[tuple[str, nn.Module]]:
         for meta, layer in zip(self.layer_meta[:-1], self.hidden_layers):
@@ -481,8 +628,46 @@ class SNNClassifier(nn.Module):
         return ForwardResult(hidden_records=hidden_records, output_record=output_record, input_record=input_sequence)
 
 
+def _spikgru_sequence_impl(
+    gate_input_sequence: torch.Tensor,
+    candidate_input_sequence: torch.Tensor,
+    hidden: torch.Tensor,
+    current_state: torch.Tensor,
+    previous_spike: torch.Tensor,
+    alpha: torch.Tensor,
+    hidden_to_gate_weight: torch.Tensor,
+    hidden_to_candidate_weight: torch.Tensor,
+    hidden_to_candidate_bias: torch.Tensor | None,
+    threshold: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    batch_size, time_steps, hidden_size = gate_input_sequence.shape
+    mem_seq = gate_input_sequence.new_empty((batch_size, time_steps, hidden_size))
+    spike_seq = gate_input_sequence.new_empty((batch_size, time_steps, hidden_size))
+    current_seq = gate_input_sequence.new_empty((batch_size, time_steps, hidden_size))
+    gate_seq = gate_input_sequence.new_empty((batch_size, time_steps, hidden_size))
+    alpha_view = alpha.unsqueeze(0)
+    for t in range(time_steps):
+        gate_input_t = gate_input_sequence[:, t, :]
+        candidate_input_t = candidate_input_sequence[:, t, :]
+        z_t = torch.sigmoid(gate_input_t + F.linear(previous_spike, hidden_to_gate_weight, None))
+        drive_t = candidate_input_t + F.linear(previous_spike, hidden_to_candidate_weight, hidden_to_candidate_bias)
+        i_t = alpha_view * current_state + drive_t
+        mem_t = z_t * hidden + (1.0 - z_t) * i_t - threshold * previous_spike
+        spike_t = surrogate_spike(mem_t - threshold)
+        hidden = mem_t
+        current_state = i_t
+        previous_spike = spike_t
+        mem_seq[:, t, :] = mem_t
+        spike_seq[:, t, :] = spike_t
+        current_seq[:, t, :] = i_t
+        gate_seq[:, t, :] = z_t
+    return mem_seq, spike_seq, current_seq, gate_seq
+
+
 class SpikGRUCellBlock(nn.Module):
-    """One vanilla SpikGRU recurrent block with a single update gate."""
+    """One vanilla SpikGRU recurrent block with a compiled sequence region."""
+
+    compile_granularity = 'sequence'
 
     def __init__(self, input_dim: int, hidden_size: int, *, v_th: float = 1.0) -> None:
         super().__init__()
@@ -490,16 +675,52 @@ class SpikGRUCellBlock(nn.Module):
         self.hidden_size = int(hidden_size)
         self.v_threshold = float(v_th)
         self.input_to_candidate = nn.Linear(self.input_dim, self.hidden_size)
-        self.hidden_to_candidate = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
+        self.hidden_to_candidate = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
         self.input_to_gate = nn.Linear(self.input_dim, self.hidden_size)
         self.hidden_to_gate = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
-        self.alpha = nn.Parameter(torch.full((self.hidden_size,), 0.9))
+        self.alpha_raw = nn.Parameter(torch.full((self.hidden_size,), float(logit(0.9).item())))
+        self._compiled_sequence = None
+        self._compiled_sequence_policy = 'eager'
+        self._sequence_compiled_runtime_disabled = False
+        self._sequence_compiled_runtime_error = None
+
+    def enable_compiled_forward(self, **compile_kwargs: Any) -> tuple[bool, str]:
+        compiled, applied, policy = compile_callable(_spikgru_sequence_impl, compile_kwargs=compile_kwargs, label='spikgru_sequence')
+        if applied:
+            self._compiled_sequence = compiled
+            self._compiled_sequence_policy = policy
+            self._sequence_compiled_runtime_disabled = False
+            self._sequence_compiled_runtime_error = None
+        return applied, policy
 
     def initial_state(self, batch_size: int, *, device: torch.device, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         hidden = torch.zeros(batch_size, self.hidden_size, device=device, dtype=dtype)
         current_state = torch.zeros_like(hidden)
         previous_spike = torch.zeros_like(hidden)
         return hidden, current_state, previous_spike
+
+    def run_sequence(
+        self,
+        gate_input_sequence: torch.Tensor,
+        candidate_input_sequence: torch.Tensor,
+        hidden: torch.Tensor,
+        current_state: torch.Tensor,
+        previous_spike: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        dtype = gate_input_sequence.dtype
+        device = gate_input_sequence.device
+        alpha = self.effective_alpha().to(device=device, dtype=dtype)
+        threshold = torch.as_tensor(self.v_threshold, device=device, dtype=dtype)
+        gate_weight = self.hidden_to_gate.weight.to(device=device, dtype=dtype)
+        candidate_weight = self.hidden_to_candidate.weight.to(device=device, dtype=dtype)
+        candidate_bias = None if self.hidden_to_candidate.bias is None else self.hidden_to_candidate.bias.to(device=device, dtype=dtype)
+        fn = self._compiled_sequence
+        if fn is not None and not bool(self._sequence_compiled_runtime_disabled):
+            try:
+                return fn(gate_input_sequence, candidate_input_sequence, hidden, current_state, previous_spike, alpha, gate_weight, candidate_weight, candidate_bias, threshold)
+            except Exception as exc:
+                disable_compiled_runtime(self, label='sequence', exc=exc)
+        return _spikgru_sequence_impl(gate_input_sequence, candidate_input_sequence, hidden, current_state, previous_spike, alpha, gate_weight, candidate_weight, candidate_bias, threshold)
 
     def step(
         self,
@@ -510,12 +731,29 @@ class SpikGRUCellBlock(nn.Module):
         current_state: torch.Tensor,
         previous_spike: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Eager single-step reference retained for parity tests and debugging."""
+
+        alpha = torch.sigmoid(self.alpha_raw).to(device=gate_input_t.device, dtype=gate_input_t.dtype).unsqueeze(0)
         z_t = torch.sigmoid(gate_input_t + self.hidden_to_gate(previous_spike))
         drive_t = candidate_input_t + self.hidden_to_candidate(previous_spike)
+        i_t = alpha * current_state + drive_t
+        mem_t = z_t * hidden + (1.0 - z_t) * i_t - float(self.v_threshold) * previous_spike
+        spike_t = surrogate_spike(mem_t - float(self.v_threshold))
+        return mem_t, i_t, spike_t, z_t, spike_t
+
+    def effective_alpha(self) -> torch.Tensor:
+        return torch.sigmoid(self.alpha_raw)
+
+    def filter_stats_vectors(self) -> dict[str, torch.Tensor]:
+        device = self.alpha_raw.device
+        return {
+            'alpha': self.effective_alpha().detach(),
+            'v_threshold': torch.full((self.hidden_size,), float(self.v_threshold), device=device, dtype=torch.float32),
+        }
 
     def clamp_projected_parameters(self) -> None:
-        with torch.no_grad():
-            self.alpha.clamp_(0.0, 1.0)
+        # Alpha is structurally constrained to (0, 1) through ``sigmoid(alpha_raw)``.
+        return None
 
 
 class SpikGRUClassifier(nn.Module):
@@ -542,6 +780,19 @@ class SpikGRUClassifier(nn.Module):
         self.layer_01 = SpikGRUCellBlock(self.input_dim, self.hidden_size, v_th=v_th)
         self.layer_02 = SpikGRUCellBlock(self.hidden_size, self.hidden_size, v_th=v_th)
         self.readout = nn.Linear(self.hidden_size, self.num_classes)
+        self.compile_granularity = 'sequence_regions'
+        self.extra_metadata: dict[str, Any] = {}
+
+    def enable_compiled_forward(self, **compile_kwargs: Any) -> tuple[bool, str]:
+        applied_count, policies = _compile_child_regions([('layer_01', self.layer_01), ('layer_02', self.layer_02)], dict(compile_kwargs or {}))
+        self.extra_metadata['compile_granularity'] = 'sequence_regions'
+        self.extra_metadata['compile_child_region_count'] = int(applied_count)
+        self.extra_metadata['compile_child_policies'] = list(policies)
+        self.extra_metadata['sequence_backend'] = sequence_backend_name()
+        self.extra_metadata['sequence_buffer_mode'] = sequence_buffer_mode()
+        if applied_count > 0:
+            return True, 'regional_spikgru_sequence_compile[' + ';'.join(policies) + ']'
+        return False, 'regional_spikgru_sequence_compile_no_child_regions[' + ';'.join(policies) + ']'
 
     def iter_named_layers(self) -> Iterable[tuple[str, nn.Module]]:
         yield 'layer_01', self.layer_01
@@ -553,7 +804,7 @@ class SpikGRUClassifier(nn.Module):
         yield 'layer_02', self.layer_02
 
     def model_metadata(self) -> dict[str, Any]:
-        return {
+        payload = {
             'raw_model_token': self.spec.raw_token,
             'canonical_model_token': self.spec.canonical_token,
             'family': self.spec.family,
@@ -576,7 +827,9 @@ class SpikGRUClassifier(nn.Module):
             'arch_layers': [{'kind': 'spikegru', 'hidden_size': self.hidden_size}, {'kind': 'spikegru', 'hidden_size': self.hidden_size}],
             'v_th': self.v_threshold,
             'alpha_init': 0.9,
-            'alpha_clamp': [0.0, 1.0],
+            'alpha_constraint': 'structured_sigmoid_raw_parameter',
+            'candidate_recurrent_bias': True,
+            'origin_formula_contract': 'tempZ=sigmoid(wz(x)+uz(prev_spike)); tempcurrent=alpha*tempcurrent+wi(x)+ui(prev_spike); temp=tempZ*temp+(1-tempZ)*tempcurrent-v_th*prev_spike',
             'spike_reset_term': 'membrane_update_minus_v_th_times_previous_spike',
             'readout': 'non-spiking integrating readout membrane trace',
             'loss_reference': 'max-over-time cross entropy',
@@ -584,43 +837,31 @@ class SpikGRUClassifier(nn.Module):
             'two_gate_backend_included': False,
             'bidirectional_backend_included': False,
             'signed_activation_ablation_included': False,
-            'structure_variation': 'none',
+            'structure_variation': 'alpha_raw_sigmoid_unit_interval',
             'trace_families': ['x_probe', 'x_layer', 'i_current', 'z_gate', 'y_mem', 'y_spike', 'readout_mem'],
         }
+        payload.update(getattr(self, 'extra_metadata', {}))
+        return payload
 
     def clamp_projected_parameters(self) -> None:
         self.layer_01.clamp_projected_parameters()
         self.layer_02.clamp_projected_parameters()
 
     def _run_block(self, block: SpikGRUCellBlock, block_input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        batch_size, time_steps, _input_dim = [int(v) for v in block_input.shape]
-        hidden, current_state, previous_spike = block.initial_state(batch_size, device=block_input.device, dtype=block_input.dtype)
-        mem_steps: list[torch.Tensor] = []
-        spike_steps: list[torch.Tensor] = []
-        current_steps: list[torch.Tensor] = []
-        gate_steps: list[torch.Tensor] = []
-        gate_input_sequence = block.input_to_gate(block_input)
-        candidate_input_sequence = block.input_to_candidate(block_input)
-        for t in range(time_steps):
-            mem_t, i_t, spike_t, z_t, previous_spike = block.step(
-                gate_input_t=gate_input_sequence[:, t, :],
-                candidate_input_t=candidate_input_sequence[:, t, :],
-                hidden=hidden,
-                current_state=current_state,
-                previous_spike=previous_spike,
-            )
-            hidden = mem_t
-            current_state = i_t
-            mem_steps.append(mem_t)
-            spike_steps.append(spike_t)
-            current_steps.append(i_t)
-            gate_steps.append(z_t)
-        return (
-            torch.stack(mem_steps, dim=1).contiguous(),
-            torch.stack(spike_steps, dim=1).contiguous(),
-            torch.stack(current_steps, dim=1).contiguous(),
-            torch.stack(gate_steps, dim=1).contiguous(),
+        batch_size, _time_steps, _input_dim = [int(v) for v in block_input.shape]
+        state_dtype = sequence_state_dtype(block_input)
+        hidden, current_state, previous_spike = block.initial_state(batch_size, device=block_input.device, dtype=state_dtype)
+        gate_input_sequence = to_sequence_state_dtype(block.input_to_gate(block_input), block_input)
+        candidate_input_sequence = to_sequence_state_dtype(block.input_to_candidate(block_input), block_input)
+        mem_seq, spike_seq, current_seq, gate_seq = block.run_sequence(
+            gate_input_sequence,
+            candidate_input_sequence,
+            hidden,
+            current_state,
+            previous_spike,
         )
+        return mem_seq.contiguous(), spike_seq.contiguous(), current_seq.contiguous(), gate_seq.contiguous()
+
 
     def forward(self, input_sequence: torch.Tensor, *, capture_hidden: bool = False) -> ForwardResult:
         if input_sequence.ndim != 3:
@@ -630,7 +871,7 @@ class SpikGRUClassifier(nn.Module):
             raise ValueError(f'SpikeGRU expected input_dim={self.input_dim}, got {input_dim}.')
         layer1_mem, layer1_spike, layer1_current, layer1_gate = self._run_block(self.layer_01, input_sequence)
         layer2_mem, layer2_spike, layer2_current, layer2_gate = self._run_block(self.layer_02, layer1_spike)
-        readout_drive_seq = self.readout(layer2_spike)
+        readout_drive_seq = to_sequence_state_dtype(self.readout(layer2_spike), layer2_spike)
         readout_mem_seq = torch.cumsum(readout_drive_seq, dim=1).contiguous()
         readout_spike_placeholder = torch.zeros_like(readout_mem_seq)
 
@@ -671,6 +912,19 @@ def _resolved_reset_enabled(spec: ModelSpec, *, output_overrides: dict[str, Any]
     return enabled
 
 
+
+
+def _fixed_filter_value_for_family(spec: ModelSpec, *, family: str) -> float | None:
+    mode = str(getattr(spec, 'filter_mode', 'train') or 'train').strip().lower()
+    value = getattr(spec, 'filter_value', None)
+    if mode == 'train':
+        return None
+    if mode != 'fixed' or value is None:
+        raise ValueError(f'Invalid filter setting mode={mode!r}, value={value!r}.')
+    if family not in {'lif', 'rf', 'cnn_lif', 'cnn_rf'}:
+        raise ValueError(f'Fixed filter values are supported only for lif/rf/cnn_lif/cnn_rf families, got {family!r}.')
+    return float(value)
+
 def _build_dense_family_layer(
     spec: ModelSpec,
     *,
@@ -708,6 +962,7 @@ def _build_dense_family_layer(
             recurrent_mask=lc.recurrent_mask,
             emit_spike=output_overrides.get('emit_spike', True),
             reset_enabled=_resolved_reset_enabled(spec, output_overrides=output_overrides),
+            filter_value=_fixed_filter_value_for_family(spec, family='lif'),
         )
     if spec.family == 'rf':
         lc = layer_constraint if layer_constraint is not None else LayerConstraint()
@@ -723,6 +978,7 @@ def _build_dense_family_layer(
             reset_mode=_resolved_model_reset_mode(spec, family='rf'),
             emit_spike=output_overrides.get('emit_spike', True),
             reset_enabled=_resolved_reset_enabled(spec, output_overrides=output_overrides),
+            filter_value=_fixed_filter_value_for_family(spec, family='rf'),
         )
     if spec.family == 'tc_lif':
         return TCLIFLayer(input_size, output_size, recurrent=spec.recurrent, v_threshold=v_th, **output_overrides)
@@ -769,6 +1025,7 @@ def _build_conv2d_family_layer(
             reset_mode=_resolved_model_reset_mode(spec, family='cnn_lif'),
             batch_norm=bool(layer_spec.batch_norm),
             bias=bool(layer_spec.bias),
+            filter_value=_fixed_filter_value_for_family(spec, family='cnn_lif'),
             **cnn_lif_overrides,
         )
     if spec.family == 'cnn_rf':
@@ -785,6 +1042,7 @@ def _build_conv2d_family_layer(
             reset_mode=_resolved_model_reset_mode(spec, family='cnn_rf'),
             batch_norm=bool(layer_spec.batch_norm),
             bias=bool(layer_spec.bias),
+            filter_value=_fixed_filter_value_for_family(spec, family='cnn_rf'),
             **cnn_rf_overrides,
         )
     raise ValueError(f'2-D conv hidden layers are unsupported for model family {spec.family!r}.')
@@ -822,7 +1080,6 @@ def build_layer_from_spec(
             layer_spec=layer_spec,
             v_th=v_th,
             output_overrides=output_overrides,
-            layer_constraint=layer_constraint,
         )
     raise ValueError(f'Convolutional layers are unsupported for model family {spec.family!r}.')
 
@@ -886,12 +1143,6 @@ def _build_fixed_cnn2d_classifier(
     )
     input_channels = int(resolved_input_shape[0] if len(resolved_input_shape) == 3 else resolved_input_shape[1])
 
-    dense_hidden_widths = [int(layer.width) for layer in resolved_layer_specs if isinstance(layer, DenseLayerSpec)]
-    if len(dense_hidden_widths) != len(resolved_layer_specs):
-        if constraint_config is not None and str(getattr(constraint_config, 'mode', 'none')).strip().lower() not in {'none', ''}:
-            raise ValueError('scenario_mode is supported only for dense hidden layers in v1 (no conv/residual arch).')
-    constraint_plan = resolve_constraint_plan(spec, dense_hidden_widths, constraint_config)
-
     hidden_layers: list[nn.Module] = []
     layer_meta: list[LayerMeta] = []
     pool_after: list[nn.Module | None] = []
@@ -907,7 +1158,6 @@ def _build_fixed_cnn2d_classifier(
                 layer_spec=layer_spec,
                 v_th=v_th,
                 output_overrides={},
-            layer_constraint=layer_constraint,
             )
             hidden_layers.append(layer)
             layer_meta.append(LayerMeta(name=f'{spec.backbone}_conv_{conv_count:02d}', size=int(layer_spec.out_channels), is_output=False))
@@ -949,12 +1199,24 @@ def _build_fixed_cnn2d_classifier(
         'lif_trainable_threshold': bool(spec.trainable_threshold) if spec.family == 'cnn_lif' else None,
         'v_th': float(v_th),
         'backbone': spec.backbone,
-        'backbone_structure': 'VGG-11' if spec.backbone == 'vgg11' else 'ResNet-18',
+        'backbone_structure': 'VGG-11 topology' if spec.backbone == 'vgg11' else 'SEW-ResNet-18 topology; first BasicBlock consumes prep_data channels directly',
+        'reference_backbone_contract': 'topology_only_from_reference_SNNs; input geometry comes from prep_data',
+        'sew_resnet_connect_function': 'ADD' if spec.backbone == 'resnet18' else None,
+        'spiking_backend': 'project_native_torch',
+        'cnn_lif_backend': 'torch' if spec.family == 'cnn_lif' else None,
+        'cnn_rf_backend': 'torch' if spec.family == 'cnn_rf' else None,
+        'resnet_input_projection': 'none_first_basicblock_consumes_prepared_frame_channels' if spec.backbone == 'resnet18' else None,
+        'vgg_input_policy': 'first_vgg_conv_consumes_prepared_frame_channels_directly' if spec.backbone == 'vgg11' else None,
         'hidden_spec': serialize_arch_spec(layer_specs),
         'arch_spec': serialize_arch_spec(layer_specs),
         'arch_layers': arch_spec_payload(layer_specs),
         'hidden_sizes': arch_hidden_sizes(layer_specs),
         'cnn_head': 'adaptive_avg_pool_2d_plus_1x1_spiking_output',
+        'cnn_backend': 'project_pure_torch_compile_target',
+        'reference_topology_only': True,
+        'spikingjelly_runtime_backend': False,
+        'input_contract': 'prepared prep_data image frames, rank (B,T,C,H,W); no reference input front-end is imported',
+        'input_policy': 'prepared_data_shape_driven_no_reference_input_frontend',
     }
     return FixedCNN2DClassifier(
         spec=spec,
@@ -1035,9 +1297,7 @@ def build_snn_classifier(
                 f'scenario_mode={scenario_mode!r} is supported only for dense if/lif/rf families; got family={spec.family!r}.'
             )
     if spec.family == 'spikegru':
-        if input_shape is not None:
-            raise ValueError('spikegru is specified as a non-image [B,T,C] model and does not accept input_shape metadata.')
-        return SpikGRUClassifier(
+        classifier = SpikGRUClassifier(
             spec=spec,
             input_dim=int(input_dim),
             sequence_length=int(sequence_length),
@@ -1045,6 +1305,10 @@ def build_snn_classifier(
             hidden_size=128,
             v_th=float(v_th),
         )
+        if input_shape is not None:
+            classifier.extra_metadata['input_shape_metadata_ignored_for_sequence_model'] = [int(v) for v in input_shape]
+            classifier.extra_metadata['runtime_input_contract'] = 'expects selected training view as [B,T,C]; image datasets use flattened sequence_input/flatten_input views for SpikeGRU.'
+        return classifier
 
     if spec.family in {'spikingssm', 'spikformer'}:
         return _build_author_backbone_classifier(
@@ -1054,26 +1318,19 @@ def build_snn_classifier(
             num_classes=int(num_classes),
             input_shape=input_shape,
         )
-    
-    if spec.family in {"cnn_lif", "cnn_rf"} and spec.backbone in {"vgg11", "resnet18"}:
-        from src.model.snnbench_adapter import build_snnbench_cnn_classifier
 
-        return build_snnbench_cnn_classifier(
-            spec=spec,
-            input_dim=int(input_dim),
-            sequence_length=int(sequence_length),
-            num_classes=int(num_classes),
-            input_shape=input_shape,
-            v_th=float(v_th),
-            layer_record_cls=LayerRecord,
-            forward_result_cls=ForwardResult,
-        )
+    # VGG-11/SEW-ResNet18 tokens are implemented by the project-native
+    # pure-Torch CNN2D builder.  The reference code contributes only topology
+    # and SEW residual semantics; no reference input front-end is imported.
 
     if layer_specs is None:
+        # Fixed CNN families use topology resolved from arch_spec/backbone.
+        # Project-wide dense hidden_sizes are intentionally ignored here.
+        resolved_hidden_sizes = None if spec.family in {'cnn_lif', 'cnn_rf'} else (None if hidden_sizes is None else [int(v) for v in hidden_sizes])
         resolved_layer_specs = resolve_arch_spec(
             model_spec=spec,
             arch_spec_text=arch_spec,
-            hidden_sizes=None if hidden_sizes is None else [int(v) for v in hidden_sizes],
+            hidden_sizes=resolved_hidden_sizes,
         )
     else:
         resolved_layer_specs = list(layer_specs)
@@ -1090,12 +1347,10 @@ def build_snn_classifier(
             v_th=float(v_th),
         )
 
-
-    dense_hidden_widths = [int(layer.width) for layer in resolved_layer_specs if isinstance(layer, DenseLayerSpec)]
-    if len(dense_hidden_widths) != len(resolved_layer_specs):
-        if constraint_config is not None and str(getattr(constraint_config, 'mode', 'none')).strip().lower() not in {'none', ''}:
-            raise ValueError('scenario_mode is supported only for dense hidden layers in v1 (no conv/residual arch).')
-    constraint_plan = resolve_constraint_plan(spec, dense_hidden_widths, constraint_config)
+    hidden_widths_for_constraints = [
+        int(layer_spec.width) for layer_spec in resolved_layer_specs if isinstance(layer_spec, DenseLayerSpec)
+    ]
+    constraint_plan = resolve_constraint_plan(spec, hidden_widths_for_constraints, constraint_config)
 
     hidden_layers: list[nn.Module] = []
     layer_meta: list[LayerMeta] = []

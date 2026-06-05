@@ -63,6 +63,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import yaml
 import math
 import os
 import random
@@ -1850,8 +1851,8 @@ def run_train(args: argparse.Namespace, device: torch.device) -> Tuple[Path, Dic
             break
 
     if is_main_process():
-        config_path = best_path.with_suffix(".json")
-        config_path.write_text(json.dumps({"dataset_spec": asdict(spec), "model_config": model_config, "best_metrics": best_metrics, "checkpoint": str(best_path)}, indent=2, ensure_ascii=False), encoding="utf-8")
+        config_path = best_path.with_suffix(".yaml")
+        config_path.write_text(yaml.safe_dump({"dataset_spec": asdict(spec), "model_config": model_config, "best_metrics": best_metrics, "checkpoint": str(best_path)}, sort_keys=False, allow_unicode=True), encoding="utf-8")
     return best_path, best_metrics
 
 

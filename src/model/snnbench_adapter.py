@@ -5,13 +5,12 @@ from typing import Any, Iterable, Sequence
 import torch
 import torch.nn as nn
 
-from spikingjelly.activation_based import encoding, functional
-
 from src.model.snnbench_backbones import (
     TDBatchNorm,
     VGG_SNN,
     make_snnbench_lif_node,
     make_snnbench_rf_node,
+    sew_function,
     spiking_resnet18,
 )
 
@@ -42,13 +41,13 @@ class SNNBenchCNNAdapter(nn.Module):
         self.forward_result_cls = forward_result_cls
 
         if len(self.input_shape) != 4:
-            raise ValueError(f"snn-bench CNN adapter expects input_shape=(T,C,H,W), got {self.input_shape}")
+            raise ValueError(f"reference-topology CNN adapter expects input_shape=(T,C,H,W), got {self.input_shape}")
 
-        time_steps, in_channels, height, width = self.input_shape
+        _time_steps, in_channels, _height, _width = self.input_shape
 
-        self.use_poisson_encoder = int(in_channels) == 3 and int(height) == 32 and int(width) == 32
-        self.encoder = encoding.PoissonEncoder()
-
+        # Prepared frames are consumed directly. data_prep already represents
+        # static images as repeated frames and event datasets as integrated
+        # frame sequences; no additional stochastic encoding or fixed input adapter is inserted.
         self.output_sn = None
 
         if spec.family == "cnn_lif":
@@ -58,7 +57,7 @@ class SNNBenchCNNAdapter(nn.Module):
             self.neuron_tag = "rf"
             node_factory = make_snnbench_rf_node
         else:
-            raise ValueError(f"snn-bench CNN adapter supports cnn_lif/cnn_rf, got {spec.family!r}")
+            raise ValueError(f"reference-topology CNN adapter supports cnn_lif/cnn_rf, got {spec.family!r}")
 
         node_kwargs = {
             "v_threshold": float(v_th),
@@ -83,6 +82,7 @@ class SNNBenchCNNAdapter(nn.Module):
                 norm_layer=TDBatchNorm,
                 single_step_neuron=node_factory,
                 num_classes=int(num_classes),
+                in_channels=int(in_channels),
                 **node_kwargs,
             )
 
@@ -91,44 +91,36 @@ class SNNBenchCNNAdapter(nn.Module):
                 **node_kwargs,
             )
 
-            # snn-bench 원본 ResNet은 CIFAR 전용이라 conv1 입력 채널이 3으로 고정되어 있다.
-            # DVS128Gesture, N-MNIST류를 위해 여기서만 얇게 교체한다.
-            if int(in_channels) != 3:
-                self.core.conv1 = nn.Conv2d(
-                    int(in_channels),
-                    64,
-                    kernel_size=3,
-                    stride=1,
-                    padding=1,
-                    bias=False,
-                )
-                nn.init.kaiming_normal_(self.core.conv1.weight, mode="fan_out", nonlinearity="relu")
-
         else:
-            raise ValueError(f"Unsupported snn-bench backbone: {spec.backbone!r}")
+            raise ValueError(f"Unsupported reference-topology backbone: {spec.backbone!r}")
 
     def reset_state(self) -> None:
-        functional.reset_net(self.core)
-        if self.output_sn is not None:
-            functional.reset_net(self.output_sn)
+        for module in self.modules():
+            if module is self:
+                continue
+            reset = getattr(module, "reset", None)
+            if callable(reset):
+                try:
+                    reset()
+                except TypeError:
+                    pass
+
 
     def _prepare_input(self, x: torch.Tensor) -> torch.Tensor:
         tensor = torch.as_tensor(x)
 
         if tensor.ndim != 5:
-            raise ValueError(f"snn-bench CNN expects input shape (B,T,C,H,W), got {tuple(tensor.shape)}")
+            raise ValueError(f"reference-topology CNN expects input shape (B,T,C,H,W), got {tuple(tensor.shape)}")
 
         expected = self.input_shape
         actual = tuple(int(v) for v in tensor.shape[1:])
 
         if actual != expected:
-            raise ValueError(f"snn-bench CNN expected input_shape={expected}, got {actual}")
+            raise ValueError(f"reference-topology CNN expected input_shape={expected}, got {actual}")
 
         return tensor.contiguous()
 
     def _maybe_encode_frame(self, frame: torch.Tensor) -> torch.Tensor:
-        if self.use_poisson_encoder:
-            return self.encoder(frame).float()
         return frame.float()
 
     def _forward_vgg_one_step(self, frame: torch.Tensor, *, capture_hidden: bool):
@@ -136,39 +128,9 @@ class SNNBenchCNNAdapter(nn.Module):
 
         x = frame
         lif_index = 0
-
         for feature_index, module in enumerate(self.core.features):
             before = x
             x = module(x)
-
-            # 1-based 모델 4번째 레이어: features[3] = MaxPool2d
-            # 이 값은 MaxPool을 지난 직후의 실제 layer output이다.
-            if capture_hidden and feature_index == 3:
-                records.append(
-                    (
-                        "vgg11_layer_04_maxpool",
-                        x,
-                        None,
-                        None,
-                        "hidden",
-                        "module_output",
-                    )
-                )
-
-            # 1-based 모델 9번째 레이어: features[8] = Conv2d(128 -> 256)
-            # 이 값은 Conv2d 직후 출력이다. 즉, TDBatchNorm과 LIF를 지나기 전이다.
-            if capture_hidden and feature_index == 8:
-                records.append(
-                    (
-                        "vgg11_layer_09_conv",
-                        x,
-                        None,
-                        None,
-                        "hidden",
-                        "module_output",
-                    )
-                )
-
             if getattr(module, "is_snnbench_spiking_node", False):
                 lif_index += 1
                 if capture_hidden:
@@ -180,32 +142,52 @@ class SNNBenchCNNAdapter(nn.Module):
                             before,
                         )
                     )
+            elif capture_hidden and isinstance(module, nn.MaxPool2d):
+                records.append(
+                    (
+                        f"vgg11_layer_{feature_index + 1:02d}_maxpool",
+                        x,
+                        None,
+                        None,
+                        "hidden",
+                        "module_output",
+                    )
+                )
 
         x = self.core.fixpool(x)
 
-        # classifier = Flatten -> Linear -> spiking node -> Dropout -> Linear -> spiking node
-        x = self.core.classifier[0](x)
+        classifier_spike_indices = [
+            idx for idx, module in enumerate(self.core.classifier)
+            if getattr(module, "is_snnbench_spiking_node", False)
+        ]
+        if not classifier_spike_indices:
+            raise RuntimeError("VGG classifier must contain at least one spiking output node.")
+        output_spike_index = classifier_spike_indices[-1]
+        fc_spike_index = 0
+        output_membrane = None
+        output_spike = None
 
-        fc1_current = self.core.classifier[1](x)
-        fc1_spike = self.core.classifier[2](fc1_current)
+        for module_index, module in enumerate(self.core.classifier):
+            before = x
+            x = module(x)
+            if getattr(module, "is_snnbench_spiking_node", False):
+                fc_spike_index += 1
+                membrane = getattr(module, "v", before)
+                if module_index == output_spike_index:
+                    output_membrane = membrane
+                    output_spike = x
+                elif capture_hidden:
+                    records.append(
+                        (
+                            f"vgg11_fc{fc_spike_index}_{self.neuron_tag}",
+                            membrane,
+                            x,
+                            before,
+                        )
+                    )
 
-        if capture_hidden:
-            records.append(
-                (
-                    f"vgg11_fc1_{self.neuron_tag}",
-                    getattr(self.core.classifier[2], "v", fc1_current),
-                    fc1_spike,
-                    fc1_current,
-                )
-            )
-
-        x = self.core.classifier[3](fc1_spike)
-
-        output_current = self.core.classifier[4](x)
-        output_node = self.core.classifier[5]
-        output_spike = output_node(output_current)
-        output_membrane = getattr(output_node, "v", output_current)
-
+        if output_membrane is None or output_spike is None:
+            raise RuntimeError("VGG classifier did not produce an output spike record.")
         return output_membrane, output_spike, records
 
     def _forward_resnet_block(self, block, x: torch.Tensor, *, block_name: str, capture_hidden: bool):
@@ -229,44 +211,31 @@ class SNNBenchCNNAdapter(nn.Module):
 
         out = block.conv2(out)
         out = block.bn2(out)
+        conv2_current = out
+        out = block.sn2(out)
 
         if block.downsample is not None:
             identity = block.downsample(x)
+            if getattr(block, "downsample_sn", None) is not None:
+                identity = block.downsample_sn(identity)
 
-        residual_current = out + identity
-        out = block.sn2(residual_current)
+        merged = sew_function(out, identity, getattr(block, "cnf", "ADD"))
 
         if capture_hidden:
             records.append(
                 (
                     f"{block_name}_residual_add",
-                    getattr(block.sn2, "v", residual_current),
-                    out,
-                    residual_current,
+                    getattr(block.sn2, "v", conv2_current),
+                    merged,
+                    conv2_current,
                 )
             )
 
-        return out, records
+        return merged, records
 
     def _forward_resnet_one_step(self, frame: torch.Tensor, *, capture_hidden: bool):
         records = []
-
-        x = self.core.conv1(frame)
-        x = self.core.bn1(x)
-        stem_current = x
-        x = self.core.sn1(x)
-
-        if capture_hidden:
-            records.append(
-                (
-                    f"resnet18_stem_{self.neuron_tag}",
-                    getattr(self.core.sn1, "v", stem_current),
-                    x,
-                    stem_current,
-                )
-            )
-
-        x = self.core.maxpool(x)
+        x = frame
 
         block_index = 0
         for layer in (self.core.layer1, self.core.layer2, self.core.layer3, self.core.layer4):
@@ -401,39 +370,43 @@ class SNNBenchCNNAdapter(nn.Module):
     def iter_named_layers(self) -> Iterable[tuple[str, nn.Module]]:
         if self.spec.backbone == "vgg11":
             tag = self.neuron_tag
-            feature_names = {
-                0: "vgg11_layer_01_conv",
-                1: "vgg11_layer_02_tdbn",
-                2: f"vgg11_{tag}_01",
-                3: "vgg11_layer_04_maxpool",
-                4: "vgg11_layer_05_conv",
-                5: "vgg11_layer_06_tdbn",
-                6: f"vgg11_{tag}_02",
-                7: "vgg11_layer_08_maxpool",
-                8: "vgg11_layer_09_conv",
-                9: "vgg11_layer_10_tdbn",
-                10: f"vgg11_{tag}_03",
-                11: "vgg11_layer_12_conv",
-                12: "vgg11_layer_13_tdbn",
-                13: f"vgg11_{tag}_04",
-                14: "vgg11_layer_15_maxpool",
-            }
-
+            spike_index = 0
             for feature_index, module in enumerate(self.core.features):
-                yield feature_names[feature_index], module
+                if isinstance(module, nn.Conv2d):
+                    name = f"vgg11_layer_{feature_index + 1:02d}_conv"
+                elif isinstance(module, TDBatchNorm):
+                    name = f"vgg11_layer_{feature_index + 1:02d}_tdbn"
+                elif isinstance(module, nn.MaxPool2d):
+                    name = f"vgg11_layer_{feature_index + 1:02d}_maxpool"
+                elif getattr(module, "is_snnbench_spiking_node", False):
+                    spike_index += 1
+                    name = f"vgg11_{tag}_{spike_index:02d}"
+                else:
+                    name = f"vgg11_layer_{feature_index + 1:02d}_{module.__class__.__name__.lower()}"
+                yield name, module
 
-            yield "vgg11_layer_16_fixpool", self.core.fixpool
-            yield "vgg11_layer_17_flatten", self.core.classifier[0]
-            yield "vgg11_layer_18_fc1", self.core.classifier[1]
-            yield f"vgg11_fc1_{tag}", self.core.classifier[2]
-            yield "vgg11_layer_20_dropout", self.core.classifier[3]
-            yield "vgg11_layer_21_fc2", self.core.classifier[4]
-            yield "output", self.core.classifier[5]
+            yield "vgg11_fixpool", self.core.fixpool
+            classifier_spike_indices = [idx for idx, module in enumerate(self.core.classifier) if getattr(module, "is_snnbench_spiking_node", False)]
+            output_spike_index = classifier_spike_indices[-1] if classifier_spike_indices else -1
+            fc_spike_index = 0
+            fc_linear_index = 0
+            for module_index, module in enumerate(self.core.classifier):
+                if isinstance(module, nn.Flatten):
+                    name = "vgg11_flatten"
+                elif isinstance(module, nn.Linear):
+                    fc_linear_index += 1
+                    name = "vgg11_output_fc" if module_index > output_spike_index else f"vgg11_fc{fc_linear_index}"
+                elif getattr(module, "is_snnbench_spiking_node", False):
+                    fc_spike_index += 1
+                    name = "output" if module_index == output_spike_index else f"vgg11_fc{fc_spike_index}_{tag}"
+                elif isinstance(module, nn.Dropout):
+                    name = f"vgg11_dropout_{module_index:02d}"
+                else:
+                    name = f"vgg11_classifier_{module_index:02d}_{module.__class__.__name__.lower()}"
+                yield name, module
             return
 
         if self.spec.backbone == "resnet18":
-            yield f"resnet18_stem_{self.neuron_tag}", self.core.sn1
-
             block_index = 0
             for layer in (self.core.layer1, self.core.layer2, self.core.layer3, self.core.layer4):
                 for block in layer:
@@ -452,18 +425,22 @@ class SNNBenchCNNAdapter(nn.Module):
     def iter_named_hidden_layers(self) -> Iterable[tuple[str, nn.Module]]:
         if self.spec.backbone == "vgg11":
             tag = self.neuron_tag
-            yield f"vgg11_{tag}_01", self.core.features[2]
-            yield "vgg11_layer_04_maxpool", self.core.features[3]
-            yield f"vgg11_{tag}_02", self.core.features[6]
-            yield "vgg11_layer_09_conv", self.core.features[8]
-            yield f"vgg11_{tag}_03", self.core.features[10]
-            yield f"vgg11_{tag}_04", self.core.features[13]
-            yield f"vgg11_fc1_{tag}", self.core.classifier[2]
+            spike_index = 0
+            for module in self.core.features:
+                if getattr(module, "is_snnbench_spiking_node", False):
+                    spike_index += 1
+                    yield f"vgg11_{tag}_{spike_index:02d}", module
+            classifier_spike_indices = [idx for idx, module in enumerate(self.core.classifier) if getattr(module, "is_snnbench_spiking_node", False)]
+            output_spike_index = classifier_spike_indices[-1] if classifier_spike_indices else -1
+            fc_spike_index = 0
+            for module_index, module in enumerate(self.core.classifier):
+                if getattr(module, "is_snnbench_spiking_node", False):
+                    fc_spike_index += 1
+                    if module_index != output_spike_index:
+                        yield f"vgg11_fc{fc_spike_index}_{tag}", module
             return
 
         if self.spec.backbone == "resnet18":
-            yield f"resnet18_stem_{self.neuron_tag}", self.core.sn1
-
             block_index = 0
             for layer in (self.core.layer1, self.core.layer2, self.core.layer3, self.core.layer4):
                 for block in layer:
@@ -475,25 +452,38 @@ class SNNBenchCNNAdapter(nn.Module):
 
         raise ValueError(f"Unsupported backbone: {self.spec.backbone!r}")
 
+    def _lif_backend_name(self) -> str:
+        for module in self.modules():
+            if getattr(module, "is_snnbench_spiking_node", False) and getattr(module, "snnbench_neuron_tag", None) == "lif":
+                return str(getattr(module, "psd_neuron_backend", module.__class__.__module__))
+        return "not_applicable"
+
     def model_metadata(self) -> dict[str, Any]:
         return {
             "raw_model_token": self.spec.raw_token,
             "canonical_model_token": self.spec.canonical_token,
             "family": self.spec.family,
             "backbone": self.spec.backbone,
-            "cnn_source": "snn-bench",
+            "cnn_source": "reference_topology_only_project_adapter",
             "input_dim": self.input_dim,
             "sequence_length": self.sequence_length,
             "output_sequence_length": self.output_sequence_length,
             "num_classes": self.num_classes,
             "cnn_input_shape": list(self.input_shape),
-            "arch_spec": f"snnbench_{self.spec.backbone}",
+            "arch_spec": f"reference_topology_{self.spec.backbone}",
             "hidden_spec": None,
-            "cnn_head": "snnbench_wrapper_temporal_output",
-            "snnbench_neuron": self.neuron_tag,
+            "cnn_head": "project_temporal_output_wrapper",
+            "cnn_neuron": self.neuron_tag,
+            "spiking_runtime": "pure_torch_by_default_spikingjelly_with_explicit_probe_or_force",
             "vgg_depth": 11 if self.spec.backbone == "vgg11" else None,
             "resnet_depth": 18 if self.spec.backbone == "resnet18" else None,
-            "note": "snn-bench backbone definition wrapped for PSD ForwardResult.",
+            "sew_resnet_connect_function": getattr(self.core, "cnf", None) if self.spec.backbone == "resnet18" else None,
+            "reference_backbone_contract": "topology_only_from_reference_SNNs; input geometry comes from prep_data",
+            "resnet_input_projection": "none_first_basicblock_consumes_prepared_frame_channels" if self.spec.backbone == "resnet18" else None,
+            "vgg_input_policy": "first_vgg_conv_consumes_prepared_frame_channels_directly" if self.spec.backbone == "vgg11" else None,
+            "cnn_lif_backend": self._lif_backend_name() if self.spec.family == "cnn_lif" else None,
+            "cnn_rf_backend": "torch" if self.spec.family == "cnn_rf" else None,
+            "note": "Reference topology is wrapped for PSD ForwardResult; prep_data frames are consumed directly with no reference input front-end.",
         }
 
 
@@ -509,7 +499,7 @@ def build_snnbench_cnn_classifier(
     forward_result_cls,
 ):
     if input_shape is None:
-        raise ValueError("snn-bench CNN adapter requires input_shape=(T,C,H,W).")
+        raise ValueError("reference-topology CNN adapter requires input_shape=(T,C,H,W).")
 
     return SNNBenchCNNAdapter(
         spec=spec,

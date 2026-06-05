@@ -1,0 +1,9 @@
+dataset_fft:
+  dataset:
+  - shd
+  prep_root: /home/yongokhan/workspace/data/prep_data
+  output_root: /home/yongokhan/workspace/result/dataset_fft_scenario/02_soft_fixed_clip/shd_rf_soft_fixed_clip
+  batch_size: 256
+  num_workers: 2
+  seed: 0
+  gpu_index: 0

@@ -31,7 +31,7 @@ def test_validate_pca_args_range_and_dim():
 
 
 def test_main_requires_ref_epoch_when_pca_enabled(monkeypatch, tmp_path: Path):
-    cfg = tmp_path / 'cfg.json'
+    cfg = tmp_path / 'cfg.yaml'
     cfg.write_text('{"psd_analysis": {"checkpoint": "x", "dataset": "d", "prep_root": "/p", "output_root": "/o", "anal_batch": 1, "gpu_index": 0, "enable_pca_1d": true, "enable_pca_mimo": false, "pca_ref_epoch": null}}', encoding='utf-8')
     monkeypatch.setattr(pa, '_load_runtime_dependencies', lambda: None)
     with pytest.raises(ValueError, match='pca_ref_epoch must be provided'):
@@ -39,7 +39,7 @@ def test_main_requires_ref_epoch_when_pca_enabled(monkeypatch, tmp_path: Path):
 
 
 def test_main_ref_accuracy_gate_unavailable(monkeypatch, tmp_path: Path):
-    cfg = tmp_path / 'cfg.json'
+    cfg = tmp_path / 'cfg.yaml'
     cfg.write_text('{"psd_analysis": {"checkpoint": "x", "dataset": "d", "prep_root": "/p", "output_root": "/o", "anal_batch": 1, "gpu_index": 0, "enable_pca_1d": true, "enable_pca_mimo": false, "pca_ref_epoch": 1, "pca_min_train_accuracy": 0.1}}', encoding='utf-8')
     monkeypatch.setattr(pa, '_load_runtime_dependencies', lambda: None)
     monkeypatch.setattr(pa, '_resolve_checkpoint_files', lambda _p: ([Path('c1.pt')], []))
@@ -72,5 +72,5 @@ class _DummyBundle:
     train_dataset = object()
     test_dataset = object()
     training_view_name = 'train'
-    manifest_path = Path('/tmp/x.json')
+    manifest_path = Path('/tmp/x.yaml')
     psd_axis_kind = 'temporal'

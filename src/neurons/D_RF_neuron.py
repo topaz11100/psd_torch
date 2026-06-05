@@ -111,7 +111,8 @@ class DRFLayer(nn.Module):
 
     def filter_stats_vectors(self) -> dict[str, torch.Tensor]:
         """Handle ``filter stats vectors`` for the ``D_RF_neuron`` module."""
-        return {}
+        device = next(self.parameters(), torch.empty((), device='cpu')).device
+        return {'v_threshold': torch.as_tensor([float(self.v_threshold)], device=device, dtype=torch.float32)}
 
 
 

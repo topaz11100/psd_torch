@@ -1,39 +1,39 @@
-# PSD/SNN 명세
+# PSD Project Specification
 
-이 명세는 현재 root entrypoint 기반 파이프라인을 기준으로 한다. 공식 실행 경로는 `src/*.py`, `config/*.json`, `bash/*.sh`다.
+이 디렉터리는 프로젝트가 제공하는 실행 계약, 산출물 계약, 분석 이론을 한 곳에 고정한다. 2026년 개정판의 핵심 목표는 다음 세 가지다.
 
-## 이론 문서
+1. **재현 가능한 파이프라인**: 모든 설정은 `seed=0`, `prep_root=/home/yongokhan/workspace/data/prep_data`, `raw_data=/home/yongokhan/workspace/data/raw_data`(`data_prep` 전용), 산출물 루트 `/home/yongokhan/workspace/result/...`를 기본 계약으로 삼는다.
+2. **학습-분석 체크포인트 호환성**: `model_training`이 저장하는 `.pt`는 `psd_analysis`, `2d_fft_analysis`, `element_psd`, `element_fft`, accuracy-eval 도구가 동일한 방식으로 읽을 수 있어야 한다. DDP/`torch.compile` wrapper prefix는 로드 시 정규화한다.
+3. **신호의 주파수 구조 해석**: 모델 입력, hidden membrane/spike, output trace를 같은 좌표계의 시간 신호로 변환하고, PSD/PCA/2D FFT를 통해 layer 간 정보 전달 구조를 비교한다.
 
-| 문서 | 내용 |
-|---|---|
-| `theory/00_overview.md` | 전체 문제 정의, 단계 분리, input 분석 정책 |
-| `theory/01_signal_trace_and_signal_map.md` | trace와 SignalMap의 축 의미 |
-| `theory/02_psd_representatives.md` | PSD curve, dispersion, element PSD 수식 |
-| `theory/03_pca_fixed_reference.md` | 현재 비활성 PCA 기준과 향후 확장 경계 |
-| `theory/04_fft2d.md` | dataset/model FFT와 2D FFT 정의 |
-| `theory/05_probe_families.md` | full, same_label, balanced_global, distribution_global probe 의미 |
-| `theory/06_spiking_cells_if_lif_rf.md` | IF/LIF/RF 동역학과 분석 가능 신호 |
-| `theory/07_constraints_clip_structure_clipstructure.md` | clip, structure, clipstructure 제약 의미 |
-| `theory/08_topologies_and_readout.md` | MLP/CNN/보조 topology와 readout 정책 |
-| `theory/09_dynamics_statistics.md` | filter/동역학 파라미터 통계 |
-| `theory/10_artifacts_distance_and_manifests.md` | CSV category, distance, manifest 정책 |
+## 문서 구조
 
-## 구현 문서
+- `implementation/`: CLI, YAML config/manifest, checkpoint JSON-compatible metadata, 산출물 CSV, 실행 스크립트가 지켜야 하는 기계적 계약.
+  - `implementation/09_compile_sequence_policy.md`: SNN layer sequence-level compile 및 preallocated buffer 계약.
+  - `implementation/10_timestamped_output_policy.md`: 반복 실행 산출물을 실행시각 폴더에 자동 저장하는 경로 계약.
+  - `implementation/11_first_spike_regularizer_compile_policy.md`: first-spike readout compile-friendly tensor path와 signal/PSD regularizer eager-GPU 분리 계약.
+- `theory/`: PSD 대표곡선, PCA 고정 기준계, 2D FFT, probe family, 뉴런 동역학, readout 및 distance metric의 이론적 의미.
+- `traceability.md`: 구현 요구와 파일 위치의 대응표.
 
-| 문서 | 내용 |
-|---|---|
-| `implementation/00_architecture.md` | 현재 코드 구조와 책임 분리 |
-| `implementation/01_config_contract.md` | JSON 설정 계약 |
-| `implementation/02_cli_contract.md` | CLI와 bash wrapper 계약 |
-| `implementation/03_model_factory_and_checkpoints.md` | model token, checkpoint, restore 정책 |
-| `implementation/04_trace_signal_analysis_pipeline.md` | prepared data와 model trace 분석 흐름 |
-| `implementation/05_artifact_writer_reader_plotting.md` | CSV/manifest/plotting schema |
-| `implementation/06_examples_contract.md` | config와 bash 실행 예시 정책 |
+## 파이프라인 요약
 
-## 핵심 불변 조건
+```text
+raw_data
+  └─ data_prep.py
+       → prep_data/<dataset>/manifest.yaml + prepared tensors
 
-1. 모델 신호분석은 input 레이어를 분석하지 않는다.
-2. 입력 데이터 자체 분석은 `dataset_psd.py`와 `dataset_fft.py`에서만 수행한다.
-3. 설정은 JSON만 사용한다.
-4. seed는 고정하지만 deterministic mode는 끈다.
-5. stage별 산출물은 CSV category와 manifest로 추적한다.
+prep_data + model_training.py
+  └─ result/.../run_<timestamp>/checkpoints/checkpoint_epoch_*.pt
+  └─ result/.../run_<timestamp>/metrics/training_metrics.csv
+
+checkpoint + prep_data
+  ├─ psd_analysis.py       → layer/scope별 PSD 대표곡선, 거리, 분산, filter 통계
+  ├─ 2d_fft_analysis.py    → neuron × time map의 2D spectral matrix
+  ├─ element_psd.py        → neuron별 one-dimensional PSD power matrix
+  ├─ element_fft.py        → neuron별 complex FFT component matrix
+  └─ dataset_fft.py        → model-independent dataset input frequency baseline
+```
+
+## 실행 순서 계약
+
+`bash/model_training.sh`, `bash/model_training_ddp.sh`, `bash/psd_analysis.sh`, `bash/fft2d_analysis.sh`, `bash/element_psd.sh`, `bash/element_fft.sh`, `bash/plotting.sh`는 2차원 config 그룹 계약을 따른다. 같은 그룹의 config들은 병렬로 실행되며, 다음 그룹은 이전 그룹의 모든 프로세스가 성공적으로 끝난 뒤 시작한다. 반면 `data_prep`, `dataset_psd`, `dataset_fft`는 하나의 config 내부 `dataset: [...]` 배열을 받아 데이터셋 종류를 직렬 처리한다.

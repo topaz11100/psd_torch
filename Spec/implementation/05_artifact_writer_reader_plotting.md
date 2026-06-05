@@ -1,12 +1,24 @@
-# Artifact writer, reader, plotting
+# Artifact Writer, Reader, and Plotting Contract
 
-CSV row는 `src/util/csv_schema.py`의 category별 column을 따른다. 동적 matrix column은 `write_common_csv(..., extra_columns=...)`로 추가한다.
+모든 분석 CSV는 `src/util/csv_schema.py::common_row`가 정의하는 공통 column superset을 사용한다. 없는 값은 빈 문자열로 남긴다.
 
-각 분석 stage는 manifest CSV를 작성한다.
+## Manifest
 
-- dataset PSD: `dataset_psd_manifest.csv`
-- dataset FFT: `dataset_fft_manifest.csv`
-- model 분석: `analysis_manifest.csv`
-- plotting: `recursive_plot_manifest.csv` 또는 설정한 manifest 이름
+각 stage는 `<stage>_manifest.yaml`를 쓴다. manifest row는 최소한 다음 정보를 포함한다.
 
-Plotting은 CSV를 읽어 PNG만 생성한다. 학습이나 분석 계산을 다시 수행하지 않는다.
+- `source_program`
+- `run_id`
+- `dataset`
+- `seed`
+- `category`
+- `artifact_name`
+- `output_csv_path`
+- `status`
+
+분석 결과를 후처리할 때는 파일명 추론보다 manifest를 우선한다.
+
+## Plotting
+
+`plotting.py`는 `--input`이 파일이면 단일 CSV, 디렉터리면 재귀 CSV tree로 해석한다. `--output`을 지정하면 입력 tree와 같은 상대 경로 구조를 출력 디렉터리에 재현한다.
+
+필터 통계에서 `count`는 단위가 다르므로 기본 plot에서는 제외한다. 필요한 경우 `--include_filter_count`를 명시한다.

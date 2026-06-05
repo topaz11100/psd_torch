@@ -31,7 +31,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--raw_data_root', required=True, help='Absolute raw-data root path.')
     parser.add_argument('--prep_root', required=True, help='Absolute prepared-bundle root path.')
     parser.add_argument('--seed', type=int, default=0, help='Global preprocessing seed recorded in manifest metadata.')
-    parser.add_argument('--config', default=None, help='JSON 설정 파일 경로(.json)')
+    parser.add_argument('--config', default=None, help='YAML 설정 파일 경로(.yaml)')
     parser.add_argument('--force_overwrite', default='false', help='Overwrite an existing prepared bundle for the selected dataset.')
     parser.add_argument('--download', default='false', help='원본 데이터 자동 다운로드 여부.')
     parser.add_argument('--max_samples', type=int, default=None, help='split별 최대 샘플 수(양의 정수 또는 생략).')
@@ -46,7 +46,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _validate_args(args: argparse.Namespace) -> argparse.Namespace:
-    args.raw_data_root = ensure_absolute_path(args.raw_data_root, arg_name='raw_data_root')
+    raw_data_root = getattr(args, 'raw_data_root', None)
+    if raw_data_root in (None, ''):
+        raise ValueError('raw_data_root는 필수 절대경로입니다.')
+    args.raw_data_root = ensure_absolute_path(raw_data_root, arg_name='raw_data_root')
     args.prep_root = ensure_absolute_path(args.prep_root, arg_name='prep_root')
     args.force_overwrite = parse_bool_token(args.force_overwrite, default=False)
     args.download = parse_bool_token(args.download, default=False)

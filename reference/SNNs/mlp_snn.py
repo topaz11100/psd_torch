@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import yaml
 import math
 import os
 import random
@@ -987,16 +988,16 @@ def run_train(args: argparse.Namespace, device: torch.device) -> Tuple[Path, Dic
                 print(f"[early-stop] stopped at epoch {epoch}")
             break
 
-    # Save a compact config JSON next to the checkpoint for convenient PyCharm inspection.
+    # Save a compact YAML config next to the checkpoint for convenient inspection.
     if is_main_process():
-        config_path = best_path.with_suffix(".json")
+        config_path = best_path.with_suffix(".yaml")
         config_payload = {
             "dataset_spec": asdict(spec),
             "model_config": model_config,
             "best_metrics": best_metrics,
             "checkpoint": str(best_path),
         }
-        config_path.write_text(json.dumps(config_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        config_path.write_text(yaml.safe_dump(config_payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
     return best_path, best_metrics
 
 

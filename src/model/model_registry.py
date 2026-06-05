@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import re
+from typing import Any
 
 
 _RESETTABLE_FAMILIES = {
@@ -12,10 +13,15 @@ _RESETTABLE_FAMILIES = {
     'rf': 'rf',
 }
 
+_FIXED_CNN_BACKBONE_ALIASES = {
+    'vgg11': 'vgg11',
+    'resnet18': 'resnet18',
+    'resnet': 'resnet18',
+}
 _FIXED_CNN_BASES: dict[str, tuple[str, str, str]] = {}
-for _backbone in ('vgg11', 'resnet18'):
-    _FIXED_CNN_BASES[f'{_backbone}_lif'] = (_backbone, 'lif', 'cnn_lif')
-    _FIXED_CNN_BASES[f'{_backbone}_rf'] = (_backbone, 'rf', 'cnn_rf')
+for _alias, _backbone in _FIXED_CNN_BACKBONE_ALIASES.items():
+    _FIXED_CNN_BASES[f'{_alias}_lif'] = (_backbone, 'lif', 'cnn_lif')
+    _FIXED_CNN_BASES[f'{_alias}_rf'] = (_backbone, 'rf', 'cnn_rf')
 
 _RESET_SUFFIX_TO_MODE = {
     'soft': 'soft_reset',
@@ -48,6 +54,9 @@ class ModelSpec:
     threshold_suffix: str | None = None
     trainable_threshold: bool | None = None
     backbone: str | None = None
+    threshold_value: float = 1.0
+    filter_mode: str = 'train'
+    filter_value: float | None = None
 
     @property
     def reset_enabled(self) -> bool | None:
@@ -213,6 +222,216 @@ def _canonicalize_d_rf_family(raw: str, normalized: str) -> ModelSpec | None:
     return ModelSpec(raw_token=raw, canonical_token=canonical, family='d_rf', recurrent=False, branch=branch)
 
 
+
+def _parse_boolish(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return bool(value)
+    token = str(value).strip().lower()
+    if token in {'1', 'true', 'yes', 'y', 'on', 'r', 'recurrent'}:
+        return True
+    if token in {'0', 'false', 'no', 'n', 'off', 'none', ''}:
+        return False
+    raise ValueError(f'Cannot parse boolean model field value: {value!r}.')
+
+
+def parse_v_threshold_setting(value: Any = None) -> tuple[bool, float]:
+    """Parse the new config-level v_th pair [fixed|train, initial_value]."""
+
+    if value is None or value == '':
+        return False, 1.0
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return False, float(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith('['):
+            import json
+            return parse_v_threshold_setting(json.loads(text))
+        parts = [part for part in re.split(r'[\s,]+', text) if part]
+    else:
+        parts = list(value) if isinstance(value, (list, tuple)) else [value]
+    if not parts:
+        return False, 1.0
+    if len(parts) == 1:
+        return False, float(parts[0])
+    if len(parts) != 2:
+        raise ValueError('v_th must be ["fixed"|"train", initial_value].')
+    mode = str(parts[0]).strip().lower()
+    if mode not in {'fixed', 'train'}:
+        raise ValueError('v_th[0] must be "fixed" or "train".')
+    init = float(parts[1])
+    if init <= 0.0:
+        raise ValueError('v_th initial value must be positive.')
+    return mode == 'train', init
+
+
+def parse_filter_setting(value: Any = None) -> tuple[str, float | None]:
+    """Parse config-level filter setting.
+
+    ``"train"`` leaves the neuron filter parameter trainable. A numeric string
+    fixes the filter parameter to that value and disables its gradient. Dense/CNN
+    LIF interpret this as alpha; RF interprets it as center frequency.
+    """
+
+    if value is None or value == '':
+        return 'train', None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return 'fixed', float(value)
+    token = str(value).strip().lower()
+    if token in {'train', 'learn', 'learnable', 'parameter', 'param'}:
+        return 'train', None
+    if token in {'none', 'null'}:
+        return 'train', None
+    try:
+        return 'fixed', float(token)
+    except ValueError as exc:
+        raise ValueError('filter must be "train" or a numeric string for a fixed non-trainable filter parameter.') from exc
+
+
+def _reset_suffix_from_field(reset: Any, *, neuron_type: str) -> str:
+    if reset is None or reset == '':
+        if neuron_type in {'rf', 'cnn_rf'}:
+            return 'none'
+        return 'soft'
+    token = str(reset).strip().lower().replace('-', '_')
+    aliases = {
+        'soft': 'soft', 'soft_reset': 'soft',
+        'hard': 'hard', 'hard_reset': 'hard',
+        'none': 'none', 'no': 'none', 'no_reset': 'none', 'off': 'none',
+    }
+    if token not in aliases:
+        raise ValueError(f'Unsupported reset setting: {reset!r}.')
+    return aliases[token]
+
+
+def _extract_branch_from_neuron_type(token: str, *, base: str, default: int = 4) -> int:
+    if token == base:
+        return int(default)
+    match = re.fullmatch(rf'{re.escape(base)}_(\d+)', token)
+    if match is None:
+        return int(default)
+    value = int(match.group(1))
+    if value <= 0:
+        raise ValueError(f'{base} branch must be positive.')
+    return value
+
+
+def model_token_from_config_fields(
+    *,
+    neuron_type: Any,
+    recurrent: Any = False,
+    reset: Any = None,
+    v_th: Any = None,
+    branch: Any = None,
+) -> tuple[str, bool, float]:
+    """Build the canonical legacy token from the new explicit model fields."""
+
+    if neuron_type is None or str(neuron_type).strip() == '':
+        raise ValueError('Either model or neuron_type must be provided.')
+    nt = str(neuron_type).strip().lower().replace('-', '_')
+    rec = _parse_boolish(recurrent, default=False)
+    trainable_threshold, threshold_value = parse_v_threshold_setting(v_th)
+    threshold_suffix = 'train' if trainable_threshold else 'fixed'
+    reset_suffix = _reset_suffix_from_field(reset, neuron_type=nt)
+
+    if nt in {'if', 'lif', 'rf'}:
+        token = nt
+        if rec:
+            token += '_R'
+        token += f'_{reset_suffix}_{threshold_suffix}'
+        return token, trainable_threshold, threshold_value
+
+    if nt in {'tc', 'tc_lif', 'tclif'}:
+        return 'tc_lif' + ('_R' if rec else ''), trainable_threshold, threshold_value
+    if nt in {'ts', 'ts_lif', 'tslif'}:
+        return 'ts_lif' + ('_R' if rec else ''), trainable_threshold, threshold_value
+
+    if nt in {'dh', 'dh_snn'} or nt.startswith('dh_snn_'):
+        b = int(branch) if branch not in (None, '') else _extract_branch_from_neuron_type(nt, base='dh_snn', default=4)
+        return f"dh_snn{'_R' if rec else ''}_{b}", trainable_threshold, threshold_value
+    if nt in {'d_rf', 'drf'} or nt.startswith('d_rf_'):
+        if rec:
+            raise ValueError('d_rf does not support recurrent=true.')
+        b = int(branch) if branch not in (None, '') else _extract_branch_from_neuron_type(nt, base='d_rf', default=4)
+        return f'd_rf_{b}', trainable_threshold, threshold_value
+
+    if nt in {'spikformer', 'spikeformer'}:
+        return 'spikformer', trainable_threshold, threshold_value
+    if nt == 'spikegru':
+        return 'spikegru', trainable_threshold, threshold_value
+    if nt in {'spikingssm', 'spiking_ssm'}:
+        return 'spikingssm', trainable_threshold, threshold_value
+
+    # Fixed CNN backbones. The neuron suffix is kept explicit so configs do not
+    # need the old monolithic model token.
+    cnn_aliases = {
+        'vgg': ('vgg11', 'lif'),
+        'vgg11': ('vgg11', 'lif'),
+        'vgg11_lif': ('vgg11', 'lif'),
+        'vgg11_rf': ('vgg11', 'rf'),
+        'resnet': ('resnet18', 'lif'),
+        'resnet18': ('resnet18', 'lif'),
+        'resnet18_lif': ('resnet18', 'lif'),
+        'resnet18_rf': ('resnet18', 'rf'),
+    }
+    if nt in cnn_aliases:
+        if rec:
+            raise ValueError(f'CNN backbone neuron_type={neuron_type!r} does not support recurrent=true.')
+        backbone, neuron = cnn_aliases[nt]
+        return f'{backbone}_{neuron}_{reset_suffix}_{threshold_suffix}', trainable_threshold, threshold_value
+
+    raise ValueError(f'Unsupported neuron_type: {neuron_type!r}.')
+
+
+def model_spec_from_config_fields(
+    *,
+    model: Any = None,
+    neuron_type: Any = None,
+    recurrent: Any = False,
+    reset: Any = None,
+    v_th: Any = None,
+    filter: Any = None,
+    branch: Any = None,
+) -> ModelSpec:
+    """Resolve either the new explicit fields or one legacy token into ModelSpec."""
+
+    if model not in (None, ''):
+        trainable_threshold, threshold_value = parse_v_threshold_setting(v_th)
+        spec = canonicalize_model_token(str(model))
+        # A legacy token already encodes train/fixed. Only the initial value comes
+        # from v_th when supplied as a scalar or pair.
+        if v_th is not None:
+            spec = replace(spec, trainable_threshold=bool(trainable_threshold), threshold_value=float(threshold_value))
+        else:
+            spec = replace(spec, threshold_value=float(threshold_value))
+    else:
+        token, trainable_threshold, threshold_value = model_token_from_config_fields(
+            neuron_type=neuron_type,
+            recurrent=recurrent,
+            reset=reset,
+            v_th=v_th,
+            branch=branch,
+        )
+        spec = canonicalize_model_token(token)
+        spec = replace(spec, trainable_threshold=bool(trainable_threshold), threshold_value=float(threshold_value))
+    filter_mode, filter_value = parse_filter_setting(filter)
+    return replace(spec, filter_mode=filter_mode, filter_value=filter_value)
+
+
+def model_spec_from_namespace(args: Any) -> ModelSpec:
+    return model_spec_from_config_fields(
+        model=getattr(args, 'model', None),
+        neuron_type=getattr(args, 'neuron_type', None),
+        recurrent=getattr(args, 'recurrent', False),
+        reset=getattr(args, 'reset', None),
+        v_th=getattr(args, 'v_th', None),
+        filter=getattr(args, 'filter', None),
+        branch=getattr(args, 'branch', None),
+    )
+
 def canonicalize_model_token(token: str) -> ModelSpec:
     """Parse one CLI model token into the official canonical representation."""
 
@@ -221,7 +440,7 @@ def canonicalize_model_token(token: str) -> ModelSpec:
 
     if normalized == 'spikingssm':
         return ModelSpec(raw_token=raw, canonical_token='spikingssm', family='spikingssm')
-    if normalized == 'spikformer':
+    if normalized in {'spikformer', 'spikeformer'}:
         return ModelSpec(raw_token=raw, canonical_token='spikformer', family='spikformer', backbone='spikformer')
     if normalized == 'spikegru':
         return ModelSpec(raw_token=raw, canonical_token='spikegru', family='spikegru', recurrent=True, backbone='spikegru')
@@ -265,4 +484,4 @@ def canonicalize_model_tokens(tokens: list[str] | tuple[str, ...]) -> list[Model
     return [canonicalize_model_token(token) for token in tokens]
 
 
-__all__ = ['ModelSpec', 'canonicalize_model_token', 'canonicalize_model_tokens']
+__all__ = ['ModelSpec', 'canonicalize_model_token', 'canonicalize_model_tokens', 'model_token_from_config_fields', 'model_spec_from_config_fields', 'model_spec_from_namespace', 'parse_v_threshold_setting', 'parse_filter_setting']

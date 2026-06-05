@@ -3,7 +3,7 @@ from pathlib import Path
 import datetime
 import copy
 import time
-import json
+import csv
 import numpy as np
 import pandas as pd
 import torch
@@ -373,8 +373,15 @@ class BaseRunner(nn.Module):
             testset.freeup()
         torch.save(self.best_params, f"{self.checkpoint_dir}/model_best.pkl")
         torch.save(self.best_network_params, f"{self.checkpoint_dir}/network_best.pkl")
-        with open(f"{self.checkpoint_dir}/res.json", "w") as f:
-            json.dump(best_res, f, indent=4, sort_keys=True)
+        with open(f"{self.checkpoint_dir}/res.csv", "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["section", "metric", "value"])
+            writer.writeheader()
+            for section, metrics in best_res.items():
+                if isinstance(metrics, dict):
+                    for metric, value in metrics.items():
+                        writer.writerow({"section": section, "metric": metric, "value": value})
+                else:
+                    writer.writerow({"section": "", "metric": section, "value": metrics})
         print(best_res)
         keys = list(self.hyper_paras.keys())
         for k in keys:

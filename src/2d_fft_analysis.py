@@ -21,8 +21,9 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
-from src.util.csv_schema import common_row, write_common_csv
+from src.util.csv_schema import common_row, write_common_csv, write_manifest_yaml
 from src.util.config_cli import parse_args_with_config
+from src.util.paths import timestamped_output_root
 
 
 SOURCE_PROGRAM = '2d_fft_analysis'
@@ -66,14 +67,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description='Checkpoint-only 2-D FFT analysis for MLP probe output maps.')
     parser.add_argument('--checkpoint', required=True, help='Single .pt checkpoint file or strict .pt-only checkpoint directory.')
     parser.add_argument('--dataset', required=True, help='Canonical dataset token stored in checkpoint metadata.')
-    parser.add_argument('--prep_root', required=True, help='Prepared data root containing <dataset>/manifest.json.')
+    parser.add_argument('--prep_root', required=True, help='Prepared data root containing <dataset>/manifest.yaml.')
     parser.add_argument('--output_root', required=True, help='Root directory for 2-D FFT CSV outputs.')
     parser.add_argument('--anal_batch', required=True, type=int, help='Maximum samples per analysis forward pass.')
     parser.add_argument('--gpu_index', required=True, type=int, help='CUDA device index for analysis.')
     parser.add_argument('--seed', type=int, default=None, help='Analysis seed. Defaults to checkpoint seed when omitted.')
     parser.add_argument('--num_workers', type=int, default=0, help='Probe loading DataLoader worker count.')
     parser.add_argument('--low_vram', type=int, default=0, help='Use CPU trace staging to reduce VRAM use: 0 or 1.')
-    parser.add_argument('--config', default=None, help='JSON 설정 파일 경로(.json)')
+    parser.add_argument('--config', default=None, help='YAML 설정 파일 경로(.yaml)')
+    parser.add_argument('--run_timestamp', default=None, help='결과 output_root 아래에 생성할 실행시각 폴더명 suffix. 생략 시 Asia/Seoul 현재시각을 사용한다.')
+    parser.add_argument('--timestamped_output', default='true', help='true이면 output_root 아래 실행시각 폴더를 자동 생성한다. false이면 기존 경로에 직접 저장한다.')
     return parser
 
 
@@ -217,7 +220,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     _load_runtime_dependencies()
     psd_common.LOW_VRAM = bool(int(args.low_vram))
 
-    output_root = Path(args.output_root).expanduser().resolve()
+    output_root = timestamped_output_root(args.output_root, run_timestamp=getattr(args, 'run_timestamp', None), prefix=SOURCE_PROGRAM, enabled=getattr(args, 'timestamped_output', True))
     output_root.mkdir(parents=True, exist_ok=True)
     checkpoint_input = Path(args.checkpoint).expanduser().resolve()
     input_is_single_file = checkpoint_input.is_file()
@@ -288,7 +291,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     manifest_base = first_manifest_base or {'source_program': SOURCE_PROGRAM, 'dataset': str(args.dataset), 'run_id': '2d_fft_analysis'}
     for warning in ordering_warnings:
         manifest_rows.append(manifest_row(base=dict(manifest_base), artifact_name='checkpoint_ordering', path=Path(args.checkpoint), status='ok', message=warning))
-    write_common_csv(output_root / 'analysis_manifest.csv', manifest_rows)
+    write_manifest_yaml(output_root / 'analysis_manifest.yaml', manifest_rows)
     print(json.dumps({'status': 'ok', 'source_program': SOURCE_PROGRAM, 'output_root': str(output_root), 'checkpoints': [str(p) for p in checkpoint_files]}, sort_keys=True))
     return 0
 

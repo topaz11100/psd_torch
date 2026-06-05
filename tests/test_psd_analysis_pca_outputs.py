@@ -1,4 +1,6 @@
 from pathlib import Path
+
+from src.util.config import save_yaml
 import csv
 import json
 import sys
@@ -14,9 +16,10 @@ def _write_cfg(path: Path, out: Path, pca_1d=True, pca_mimo=True):
         'psd_analysis': {
             'checkpoint': 'x', 'dataset': 'd', 'prep_root': '/p', 'output_root': str(out), 'anal_batch': 1, 'gpu_index': 0,
             'enable_pca_1d': pca_1d, 'enable_pca_mimo': pca_mimo, 'pca_ref_epoch': 1, 'pca_min_train_accuracy': 0.0,
+            'run_timestamp': 'TEST_PSD_ANALYSIS',
         }
     }
-    path.write_text(json.dumps(payload), encoding='utf-8')
+    save_yaml(path, payload)
 
 
 class _DummyModel:
@@ -34,7 +37,7 @@ class _DummyBundle:
     train_dataset = object()
     test_dataset = object()
     training_view_name = 'train'
-    manifest_path = Path('/tmp/x.json')
+    manifest_path = Path('/tmp/x.yaml')
     psd_axis_kind = 'temporal'
 
 
@@ -88,13 +91,14 @@ def _read_csv_rows(path: Path):
 
 def test_pca_reference_schema_and_basis_payload(monkeypatch, tmp_path: Path):
     _patch_common(monkeypatch)
-    cfg = tmp_path / 'cfg.json'
+    cfg = tmp_path / 'cfg.yaml'
     out = tmp_path / 'out'
     _write_cfg(cfg, out, pca_1d=True, pca_mimo=True)
     rc = pa.main(['--config', str(cfg)])
     assert rc == 0
 
-    basis_dir = out / 'pca_reference' / 'basis'
+    result_root = out / 'psd_analysis_TEST_PSD_ANALYSIS'
+    basis_dir = result_root / 'pca_reference' / 'basis'
     basis_files = list(basis_dir.glob('*.pt'))
     assert basis_files
     payload = torch.load(basis_files[0], map_location='cpu')
@@ -104,7 +108,7 @@ def test_pca_reference_schema_and_basis_payload(monkeypatch, tmp_path: Path):
     assert payload['centroid'].requires_grad is False
 
     all_rows = []
-    for csv_path in (out / 'checkpoint_epoch_000001').rglob('*.csv'):
+    for csv_path in (result_root / 'checkpoint_epoch_000001').rglob('*.csv'):
         all_rows.extend(_read_csv_rows(csv_path))
     cross_rows = [r for r in all_rows if str(r.get('series', '')).startswith('pca_cross_')]
     assert cross_rows
@@ -118,12 +122,12 @@ def test_pca_reference_schema_and_basis_payload(monkeypatch, tmp_path: Path):
 
 def test_pca_disabled_skips_pca_artifacts(monkeypatch, tmp_path: Path):
     _patch_common(monkeypatch)
-    cfg = tmp_path / 'cfg.json'
+    cfg = tmp_path / 'cfg.yaml'
     out = tmp_path / 'out'
     _write_cfg(cfg, out, pca_1d=False, pca_mimo=False)
     rc = pa.main(['--config', str(cfg)])
     assert rc == 0
-    ckpt_dir = out / 'checkpoint_epoch_000001'
+    ckpt_dir = out / 'psd_analysis_TEST_PSD_ANALYSIS' / 'checkpoint_epoch_000001'
     assert not (ckpt_dir / 'pca_mode_traces').exists()
     assert not (ckpt_dir / 'pca_mimo_traces').exists()
     assert not (ckpt_dir / 'pca_cross_traces').exists()

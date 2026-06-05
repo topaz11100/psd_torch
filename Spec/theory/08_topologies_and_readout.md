@@ -1,3 +1,9 @@
+# 08 Topologies And Readout
+
+## 2026 개정 해설
+
+Topology와 readout은 trace가 loss로 연결되는 방식을 결정한다. Temporal membrane readout은 전체 시간 궤적을 사용하고, final membrane은 마지막 상태를, first spike는 최초 firing time을, rate 계열은 spike count 또는 max firing evidence를 사용한다.
+
 # Topology와 readout
 
 ## dense SNN

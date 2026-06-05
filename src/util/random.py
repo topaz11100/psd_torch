@@ -54,10 +54,10 @@ def seed_everything(seed: int) -> int:
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = True
-    try:
-        torch.use_deterministic_algorithms(False)
-    except Exception:
-        pass
+    # Avoid calling torch.use_deterministic_algorithms(False) here.  That no-op
+    # can trigger extra compiler/runtime imports on recent PyTorch builds during
+    # compile=false cold starts.  Deterministic mode is already off by default;
+    # callers that need strict determinism should opt in explicitly.
     return seed
 
 

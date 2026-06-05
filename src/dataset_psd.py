@@ -22,8 +22,12 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
-from src.util.csv_schema import common_row, write_common_csv
+from src.util.csv_schema import common_row, write_common_csv, write_manifest_yaml
+from src.util.config import compact_yaml, load_structured
+from src.util.config import load_structured
 from src.util.config_cli import parse_args_with_config
+from src.util.paths import timestamped_output_root
+from src.signal.psd_utils import normalize_signal_window
 
 
 SOURCE_PROGRAM = 'dataset_psd'
@@ -35,7 +39,7 @@ def _load_runtime_dependencies() -> None:
     global np, torch, tqdm, seed_everything
     global dataset_for_view, make_loader, resolve_dataset_bundle
     global curve_axis_from_summary
-    global apply_centering, exact_periodogram_from_maps, power_to_db, tensor_to_channel_major_maps_explicit
+    global apply_centering, exact_periodogram_from_maps, power_to_db, apply_power_value_scale, tensor_to_channel_major_maps_explicit
     global build_probe_index_bundle, build_probe_scopes, dataset_targets, subset_from_indices
 
     import numpy as _np
@@ -49,6 +53,7 @@ def _load_runtime_dependencies() -> None:
     from src.signal.psd_utils import apply_centering as _apply_centering
     from src.signal.psd_utils import exact_periodogram_from_maps as _exact_periodogram_from_maps
     from src.signal.psd_utils import power_to_db as _power_to_db
+    from src.signal.psd_utils import apply_power_value_scale as _apply_power_value_scale
     from src.signal.psd_utils import tensor_to_channel_major_maps_explicit as _tensor_to_channel_major_maps_explicit
     from src.stat.probe_selection import build_probe_index_bundle as _build_probe_index_bundle, build_probe_scopes as _build_probe_scopes
     from src.stat.probe_selection import dataset_targets as _dataset_targets
@@ -65,6 +70,7 @@ def _load_runtime_dependencies() -> None:
     apply_centering = _apply_centering
     exact_periodogram_from_maps = _exact_periodogram_from_maps
     power_to_db = _power_to_db
+    apply_power_value_scale = _apply_power_value_scale
     tensor_to_channel_major_maps_explicit = _tensor_to_channel_major_maps_explicit
     build_probe_index_bundle = _build_probe_index_bundle; build_probe_scopes = _build_probe_scopes
     dataset_targets = _dataset_targets
@@ -72,26 +78,32 @@ def _load_runtime_dependencies() -> None:
     seed_everything = _seed_everything
 
 
-def _load_json_light(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
+def _load_structured_light(path: Path) -> dict[str, Any]:
+    payload = load_structured(path)
+    if not isinstance(payload, dict):
+        raise ValueError(f'구조화 파일 루트는 mapping이어야 합니다: {path}')
+    return dict(payload)
 ALL_CURVE_EXTRACTORS = ('psd_exact',)
-ALL_VALUE_SCALES = ('raw', 'db')
+ALL_VALUE_SCALES = ('raw', 'db', 'area')
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description='Dataset-level input PSD baseline producer.')
     parser.add_argument('--dataset', required=True, help='Canonical dataset token.')
-    parser.add_argument('--prep_root', required=True, help='Prepared data root containing <dataset>/manifest.json.')
+    parser.add_argument('--prep_root', required=True, help='Prepared data root containing <dataset>/manifest.yaml.')
     parser.add_argument('--output_root', required=True, help='Output directory for category CSV files.')
     parser.add_argument('--batch_size', required=True, type=int)
     parser.add_argument('--gpu_index', required=True, type=int)
     parser.add_argument('--seed', required=True, type=int)
-    parser.add_argument('--config', default=None, help='JSON 설정 파일 경로(.json)')
+    parser.add_argument('--config', default=None, help='YAML 설정 파일 경로(.yaml)')
+    parser.add_argument('--run_timestamp', default=None, help='결과 output_root 아래에 생성할 실행시각 폴더명 suffix. 생략 시 Asia/Seoul 현재시각을 사용한다.')
+    parser.add_argument('--timestamped_output', default='true', help='true이면 output_root 아래 실행시각 폴더를 자동 생성한다. false이면 기존 경로에 직접 저장한다.')
     parser.add_argument('--num_workers', type=int, default=0)
-    parser.add_argument('--userbin_edges', nargs='*', default=None)
-    parser.add_argument('--userbin_width', type=float, default=None)
-    parser.add_argument('--userbin_count', type=int, default=None)
-    parser.add_argument('--userbin_reducer', default=None)
+    parser.add_argument('--signal_window', default='hann', choices=('hann','none'), help='PSD signal-processing taper: hann or none. none disables the Hann window.')
+    parser.add_argument('--signal_curve_space', default='exact', choices=('exact','userbin'))
+    parser.add_argument('--signal_curve_scale', default='raw', choices=('raw','db','area'))
+    parser.add_argument('--signal_curve_userbin_edges', nargs='*', default=None)
+    parser.add_argument('--signal_curve_userbin_reducer', default='mean', choices=('mean','median','sum'))
     return parser
 
 
@@ -119,9 +131,9 @@ def _axis_metadata_columns(manifest: Mapping[str, Any], *, psd_axis_kind: str) -
         'prep_profile': str(manifest.get('prep_profile', manifest.get('psd_axis_kind', psd_axis_kind))),
         'psd_axis_kind': str(manifest.get('psd_axis_kind', psd_axis_kind)),
         'psd_time_axis': manifest.get('psd_time_axis', ''),
-        'psd_row_axes': json.dumps(manifest.get('psd_row_axes', []), ensure_ascii=False),
+        'psd_row_axes': compact_yaml(manifest.get('psd_row_axes', [])),
         'psd_flatten_rule': str(manifest.get('psd_flatten_rule', '')),
-        'psd_logical_shape': json.dumps(logical_shape if logical_shape is not None else [], ensure_ascii=False),
+        'psd_logical_shape': compact_yaml(logical_shape if logical_shape is not None else []),
         'static_repeat_T': '' if static_repeat_t in (None, '') else int(static_repeat_t),
     }
 
@@ -167,12 +179,20 @@ def _probe_subsets(dataset: Any, *, split_name: str, seed: int):
 
 
 def _value_unit_for_power_scale(scale: str) -> str:
-    return 'dB' if str(scale) == 'db' else 'power'
+    token = str(scale or 'raw').strip().lower().replace('-', '_')
+    if token == 'db':
+        return 'dB'
+    if token in {'area', 'area_norm', 'area_normalized', 'normalized'}:
+        return 'area_normalized_power_fraction'
+    return 'power'
 
 
 def _value_unit_for_dispersion(metric: str, scale: str) -> str:
-    if str(scale) == 'db':
+    token = str(scale or 'raw').strip().lower().replace('-', '_')
+    if token == 'db':
         return 'dB'
+    if token in {'area', 'area_norm', 'area_normalized', 'normalized'}:
+        return 'area_normalized_power_fraction'
     return 'power^2' if str(metric) == 'variance' else 'power'
 
 
@@ -292,6 +312,7 @@ def _streaming_summary(
     device: torch.device,
     manifest: Mapping[str, Any],
     psd_axis_kind: str,
+    signal_window: str | bool | None = 'hann',
 ) -> dict[str, Any]:
     loader = make_loader(
         dataset,
@@ -337,7 +358,7 @@ def _streaming_summary(
 
         for centering in ('raw', 'cen'):
             variant_maps = maps if centering == 'raw' else apply_centering(maps)
-            freqs, exact_psd = exact_periodogram_from_maps(variant_maps)
+            freqs, exact_psd = exact_periodogram_from_maps(variant_maps, signal_window=signal_window)
             if freq_ref is None:
                 freq_ref = freqs.detach().clone()
             elif int(freq_ref.numel()) != int(freqs.numel()):
@@ -385,7 +406,7 @@ def _streaming_summary(
                     total_samples,
                 )
                 for scale in ALL_VALUE_SCALES:
-                    value = raw_curve if scale == 'raw' else power_to_db(raw_curve)
+                    value = apply_power_value_scale(raw_curve, scale, axis=-1)
                     summary['representative'].setdefault(reducer, {}).setdefault(extractor, {}).setdefault(scale, {})[centering] = value
     for extractor in ALL_CURVE_EXTRACTORS:
         for metric in ('variance', 'mad'):
@@ -396,7 +417,7 @@ def _streaming_summary(
                     total_samples,
                 )
                 for scale in ALL_VALUE_SCALES:
-                    value = raw_dispersion if scale == 'raw' else power_to_db(raw_dispersion)
+                    value = apply_power_value_scale(raw_dispersion, scale, axis=-1)
                     summary['dispersion'].setdefault(extractor, {}).setdefault(metric, {}).setdefault(scale, {})[centering] = value
     return summary
 
@@ -447,23 +468,35 @@ def _write_grouped(root_dir: Path, rows: list[dict[str, str]], *, manifest_rows:
         manifest_rows.append(_manifest_row(base=manifest_base, path=out_path, artifact_name=artifact_name, scope=scope))
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = build_arg_parser()
-    args = parse_args_with_config(parser, argv=argv, stage_key='dataset_psd')
-    if int(args.batch_size) < 1:
-        parser.error('--batch_size must be >= 1.')
-    if int(args.num_workers) < 0:
-        parser.error('--num_workers must be >= 0.')
+def _dataset_tokens(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple)):
+        tokens = [str(v).strip() for v in value if str(v).strip()]
+    else:
+        tokens = [str(value).strip()]
+    if not tokens:
+        raise ValueError('dataset 배열은 비어 있을 수 없습니다.')
+    return tokens
 
-    _load_runtime_dependencies()
+
+def _dataset_output_root(base_output_root: str | Path, dataset_token: str, *, multi_dataset: bool) -> Path:
+    root = Path(base_output_root).expanduser().resolve()
+    return root / str(dataset_token) if multi_dataset else root
+
+
+def _run_dataset_psd(args: argparse.Namespace) -> dict[str, Any]:
+    if int(args.batch_size) < 1:
+        raise ValueError('--batch_size must be >= 1.')
+    if int(args.num_workers) < 0:
+        raise ValueError('--num_workers must be >= 0.')
+
     _seed_everything(int(args.seed))
     device = _require_cuda_device(int(args.gpu_index))
     dataset_token = str(args.dataset)
     prep_root = Path(args.prep_root).expanduser().resolve()
     bundle = resolve_dataset_bundle(dataset_token, prep_root=prep_root)
-    manifest = _load_json_light(bundle.manifest_path)
+    manifest = _load_structured_light(bundle.manifest_path)
     if not isinstance(manifest, Mapping):
-        raise ValueError(f'Prepared manifest must be a JSON object: {bundle.manifest_path}')
+        raise ValueError(f'Prepared manifest must be a mapping: {bundle.manifest_path}')
     _validate_axis_metadata(manifest)
 
     output_root = Path(args.output_root).expanduser().resolve()
@@ -474,15 +507,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         'source_program': SOURCE_PROGRAM,
         'run_id': run_id,
         'dataset': dataset_token,
+        'signal_window': str(args.signal_window),
         **_axis_metadata_columns(manifest, psd_axis_kind=bundle.psd_axis_kind),
     }
     manifest_rows: list[dict[str, str]] = []
     split_items = (('train', bundle.train_dataset), ('test', bundle.test_dataset))
-    for split_name, split_dataset in tqdm(split_items, desc='dataset_psd split', leave=False):
+    for split_name, split_dataset in tqdm(split_items, desc=f'dataset_psd {dataset_token} split', leave=False):
         psd_dataset = dataset_for_view(split_dataset, bundle.psd_view_name)
         views: list[tuple[str, str, int | None, Any]] = [(f'{split_name}_full', 'full_dataset', None, psd_dataset)]
         views.extend((f'{split_name}_{family_id}', family, label, subset) for family_id, family, label, subset in _probe_subsets(psd_dataset, split_name=split_name, seed=int(args.seed)))
-        for scope, family, label, subset in tqdm(views, desc=f'dataset_psd {split_name} scope', leave=False):
+        for scope, family, label, subset in tqdm(views, desc=f'dataset_psd {dataset_token} {split_name} scope', leave=False):
             summary = _streaming_summary(
                 subset,
                 batch_size=int(args.batch_size),
@@ -491,15 +525,34 @@ def main(argv: Sequence[str] | None = None) -> int:
                 device=device,
                 manifest=manifest,
                 psd_axis_kind=bundle.psd_axis_kind,
+                signal_window=str(args.signal_window),
             )
             base = dict(common_base)
             base.update(scope=scope, probe_family=family, label='' if label is None else int(label), signal_kind='input')
             curve_rows, dispersion_rows = _curve_rows(summary=summary, base=base)
             _write_grouped(output_root, curve_rows, manifest_rows=manifest_rows, manifest_base=common_base, artifact_name='dataset_curve')
             _write_grouped(output_root, dispersion_rows, manifest_rows=manifest_rows, manifest_base=common_base, artifact_name='dataset_dispersion')
-    manifest_path = output_root / 'dataset_psd_manifest.csv'
-    write_common_csv(manifest_path, manifest_rows)
-    print(json.dumps({'status': 'ok', 'source_program': SOURCE_PROGRAM, 'output_root': str(output_root), 'manifest': str(manifest_path)}, sort_keys=True))
+    manifest_path = output_root / 'dataset_psd_manifest.yaml'
+    write_manifest_yaml(manifest_path, manifest_rows)
+    return {'dataset': dataset_token, 'output_root': str(output_root), 'manifest': str(manifest_path)}
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_arg_parser()
+    args = parse_args_with_config(parser, argv=argv, stage_key='dataset_psd')
+    _load_runtime_dependencies()
+    args.signal_window = normalize_signal_window(getattr(args, 'signal_window', 'hann'))
+    dataset_tokens = _dataset_tokens(args.dataset)
+    base_output_root = timestamped_output_root(args.output_root, run_timestamp=getattr(args, 'run_timestamp', None), prefix=SOURCE_PROGRAM, enabled=getattr(args, 'timestamped_output', True))
+    results: list[dict[str, Any]] = []
+    for index, dataset_token in enumerate(dataset_tokens, start=1):
+        print(f'[dataset_psd] 시작 {index}/{len(dataset_tokens)} dataset={dataset_token}', flush=True)
+        run_args = argparse.Namespace(**vars(args))
+        run_args.dataset = dataset_token
+        run_args.output_root = str(_dataset_output_root(base_output_root, dataset_token, multi_dataset=len(dataset_tokens) > 1))
+        results.append(_run_dataset_psd(run_args))
+        print(f'[dataset_psd] 완료 {index}/{len(dataset_tokens)} dataset={dataset_token}', flush=True)
+    print(json.dumps({'status': 'ok', 'source_program': SOURCE_PROGRAM, 'outputs': results}, sort_keys=True))
     return 0
 
 

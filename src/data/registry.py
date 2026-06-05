@@ -21,7 +21,7 @@ from src.data.specs import available_dataset_tokens as _available_dataset_tokens
 from src.data.specs import canonicalize_dataset_name as _canonicalize_dataset_name
 from src.data.specs import get_dataset_spec
 from src.data.storage import SINGLE_STRUCTURED_NPY_STORAGE_FORMAT, load_single_structured_split
-from src.util.config import load_json
+from src.util.config import load_manifest, resolve_manifest_path
 from src.util.random import build_torch_generator, seed_dataloader_worker
 
 
@@ -137,38 +137,57 @@ def dataset_for_view(dataset: PreparedDatasetProtocol, view_name: str) -> Prepar
     return ViewDataset(dataset, view_name)
 
 
-def _select_static_image_training_view(manifest: Mapping[str, Any], *, model_family: str, default_view: str) -> str:
-    """Select the runtime training view for static-image CNN vs dense model families."""
+def _select_image_training_view(manifest: Mapping[str, Any], *, model_family: str, default_view: str) -> str:
+    """Select frame-shaped vs flattened training views for image-like datasets.
+
+    Static image datasets store a repeated-frame CNN view and a flattened
+    time-major view. Event/temporal image datasets store native frame views and
+    flattened sequence views. CNN and Spikformer families keep frame-shaped
+    inputs; dense MLP/SNN/SpikeGRU families use flattened sequence views so
+    every image dataset can be trained as an MLP-style sequence model.
+    """
 
     psd_axis_kind = str(manifest.get('psd_axis_kind', ''))
     available = tuple(str(v) for v in manifest.get('available_views', ()))
-    if psd_axis_kind != 'static_repeat':
+    image_like = psd_axis_kind in {'static_repeat', 'image_temporal', 'raster_spatial'} or bool(manifest.get('cnn_input_shape'))
+    if not image_like:
         return str(default_view)
     family = str(model_family)
-    if family in {'cnn_lif', 'cnn_rf', 'cnn'}:
-        for candidate in (manifest.get('cnn_training_view_name'), 'model_input_cnn', 'cnn_input', 'model_input'):
+    frame_families = {'cnn_lif', 'cnn_rf', 'cnn', 'spikformer'}
+
+    def _first_available(candidates: tuple[Any, ...]) -> str | None:
+        for candidate in candidates:
             if isinstance(candidate, str) and (not available or candidate in available):
                 return candidate
-        return str(default_view)
-    for candidate in (manifest.get('flatten_training_view_name'), 'model_input_flatten', 'sequence_input', 'flatten_input'):
-        if isinstance(candidate, str) and (not available or candidate in available):
-            return candidate
-    return str(default_view)
+        return None
+
+    if family in frame_families:
+        if psd_axis_kind == 'static_repeat':
+            selected = _first_available((manifest.get('cnn_training_view_name'), 'model_input_cnn', 'cnn_input', 'model_input'))
+        else:
+            selected = _first_available((manifest.get('cnn_training_view_name'), 'model_input', 'cnn_input', 'original_input'))
+        return selected if selected is not None else str(default_view)
+
+    if psd_axis_kind == 'static_repeat':
+        selected = _first_available((manifest.get('flatten_training_view_name'), 'model_input_flatten', 'sequence_input', 'flatten_input'))
+    else:
+        selected = _first_available((manifest.get('flatten_training_view_name'), 'model_input_flatten', 'sequence_input', 'flatten_input', 'model_input'))
+    return selected if selected is not None else str(default_view)
 
 
 def select_training_view_for_model(bundle: DatasetBundle, *, model_family: str) -> DatasetBundle:
     """Return a bundle whose primary split view matches the model family.
 
-    Static image datasets may physically store both CNN-shaped and flattened
-    split payloads. CNN families consume the CNN view; dense LIF/RF families
+    Image datasets may physically store or reconstruct both CNN-shaped and flattened
+    split payloads. CNN families consume the CNN view; dense/MLP-style families
     consume the flattened time-major view. Other datasets keep the manifest
     default training view unchanged.
     """
 
-    manifest = load_json(bundle.manifest_path)
+    manifest = load_manifest(bundle.manifest_path)
     if not isinstance(manifest, dict):
-        raise ValueError(f'Prepared manifest must be a JSON object: {bundle.manifest_path}')
-    selected = _select_static_image_training_view(manifest, model_family=str(model_family), default_view=bundle.training_view_name)
+        raise ValueError(f'Prepared manifest must be a mapping object: {bundle.manifest_path}')
+    selected = _select_image_training_view(manifest, model_family=str(model_family), default_view=bundle.training_view_name)
     if selected == bundle.training_view_name:
         return bundle
     return replace(
@@ -191,15 +210,15 @@ def resolve_dataset_bundle(
     spec = get_dataset_spec(canonical)
     prep_root = Path(prep_root).expanduser().resolve()
     dataset_root = _dataset_root(prep_root, canonical)
-    manifest_path = dataset_root / 'manifest.json'
+    manifest_path = resolve_manifest_path(dataset_root)
     if not manifest_path.exists():
         raise FileNotFoundError(
             f'Prepared dataset manifest is missing: {manifest_path}. Run python -m src.data_prep first.'
         )
 
-    manifest = load_json(manifest_path)
+    manifest = load_manifest(manifest_path)
     if not isinstance(manifest, dict):
-        raise ValueError(f'manifest.json must contain a JSON object: {manifest_path}')
+        raise ValueError(f'manifest.yaml must contain a mapping: {manifest_path}')
     if str(manifest.get('dataset_name', canonical)) != canonical:
         raise ValueError(f'Manifest dataset_name mismatch for {canonical}: {manifest.get("dataset_name")!r}')
     if manifest.get('split_internal_order_preserved') is not True:
@@ -215,7 +234,7 @@ def resolve_dataset_bundle(
         )
     files_entry = manifest.get('files', {'train': 'train.npy', 'test': 'test.npy'})
     if not isinstance(files_entry, dict):
-        raise ValueError('Prepared manifest files entry must be a JSON object.')
+        raise ValueError('Prepared manifest files entry must be a mapping.')
 
     resolved_paths: dict[str, Path] = {}
     for split_name in ('train', 'test'):

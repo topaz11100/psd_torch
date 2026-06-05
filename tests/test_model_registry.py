@@ -29,6 +29,9 @@ from src.model.model_registry import canonicalize_model_token
         ('d_rf', 'd_rf_4', 'd_rf', False, 4),
         ('d_rf_4', 'd_rf_4', 'd_rf', False, 4),
         ('d_rf_8', 'd_rf_8', 'd_rf', False, 8),
+        ('spikformer', 'spikformer', 'spikformer', False, None),
+        ('spikeformer', 'spikformer', 'spikformer', False, None),
+        ('spikegru', 'spikegru', 'spikegru', True, None),
     ],
 )
 def test_new_token_valid_cases(token, canonical, family, recurrent, branch):

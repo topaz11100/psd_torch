@@ -1,0 +1,36 @@
+psd_analysis:
+  dataset: s-mnist
+  prep_root: /home/yongokhan/workspace/data/prep_data
+  checkpoint: /home/yongokhan/workspace/result/neuron_motivation_scenario/00_window_lif_hann/checkpoints
+  output_root: /home/yongokhan/workspace/result/neuron_motivation_scenario/00_window_lif_hann/psd_analysis
+  num_workers: 2
+  seed: 0
+  gpu_index: 0
+  signal_curve_userbin_edges: null
+  signal_curve_userbin_reducer:
+  - mean
+  signal_window: hann
+  pca_dim_per_layer:
+  - 1
+  psd_curve_tokens:
+  - exact_mean_centered_db
+  - exact_std_centered_db
+  analysis_distance_metric:
+  - centered_l2
+  - diff_l2
+  parameter_alpha_bin_edges: null
+  parameter_alpha_bin_count: 10
+  parameter_center_frequency_bin_edges: null
+  parameter_center_frequency_bin_count: 10
+  parameter_damping_bin_edges: null
+  parameter_damping_bin_count: 10
+  anal_batch: 256
+  enable_pairwise_dependency_appendix: true
+  enable_pca_1d: true
+  enable_pca_mimo: false
+  low_vram: 0
+  pca_min_train_accuracy: 0.0
+  pca_ref_epoch: 30
+  signal_curve_space: exact
+  parameter_threshold_bin_edges: null
+  parameter_threshold_bin_count: 10

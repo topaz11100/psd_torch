@@ -12,7 +12,8 @@ import torch
 import src.psd_analysis as psd_common
 from src.data.registry import make_loader
 from src.model.training import EpochMetrics, evaluate_one_epoch
-from src.util.csv_schema import common_row, write_common_csv
+from src.util.csv_schema import common_row, write_common_csv, write_manifest_yaml
+from src.util.paths import timestamped_output_root
 
 SOURCE_PROGRAM = 'checkpoint_accuracy_analysis'
 
@@ -21,13 +22,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description='Checkpoint-only train/test accuracy analysis entrypoint.')
     parser.add_argument('--checkpoint', required=True, help='Single .pt checkpoint file or strict .pt-only checkpoint directory.')
     parser.add_argument('--dataset', required=True, help='Canonical dataset token stored in the checkpoint metadata.')
-    parser.add_argument('--prep_root', required=True, help='Prepared data root containing <dataset>/manifest.json.')
+    parser.add_argument('--prep_root', required=True, help='Prepared data root containing <dataset>/manifest.yaml.')
     parser.add_argument('--output_root', required=True, help='Root directory for checkpoint accuracy CSV outputs.')
     parser.add_argument('--anal_batch', required=True, type=int, help='Maximum samples per evaluation forward pass.')
     parser.add_argument('--gpu_index', required=True, type=int, help='CUDA device index for accuracy evaluation.')
     parser.add_argument('--seed', type=int, default=None, help='Evaluation seed. Defaults to checkpoint seed when omitted.')
     parser.add_argument('--num_workers', type=int, default=0, help='DataLoader worker count.')
     parser.add_argument('--splits', nargs='+', choices=('train', 'test'), default=('train', 'test'), help='Dataset splits to evaluate. Default: train test.')
+    parser.add_argument('--run_timestamp', default=None, help='Execution timestamp suffix for the output run directory. Defaults to Asia/Seoul current time.')
+    parser.add_argument('--timestamped_output', default='true', help='true이면 output_root 아래 실행시각 폴더를 자동 생성한다. false이면 기존 경로에 직접 저장한다.')
     return parser
 
 
@@ -119,7 +122,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if int(args.num_workers) < 0:
         parser.error('--num_workers must be >= 0.')
 
-    output_root = Path(args.output_root).expanduser().resolve()
+    output_root = timestamped_output_root(args.output_root, run_timestamp=getattr(args, 'run_timestamp', None), prefix=SOURCE_PROGRAM, enabled=getattr(args, 'timestamped_output', True))
     output_root.mkdir(parents=True, exist_ok=True)
     checkpoint_input = Path(args.checkpoint).expanduser().resolve()
     checkpoint_files, ordering_warnings = psd_common._resolve_checkpoint_files(checkpoint_input)
@@ -192,7 +195,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     manifest_rows.append(psd_common._manifest_row(base=dict(manifest_base), artifact_name='checkpoint_accuracy', path=csv_path))
     for warning in ordering_warnings:
         manifest_rows.append(psd_common._manifest_row(base=dict(manifest_base), artifact_name='checkpoint_ordering', path=Path(args.checkpoint), status='ok', message=warning))
-    write_common_csv(output_root / 'analysis_manifest.csv', manifest_rows)
+    write_manifest_yaml(output_root / 'analysis_manifest.yaml', manifest_rows)
 
     print(json.dumps({
         'status': 'ok',

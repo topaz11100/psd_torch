@@ -1,3 +1,9 @@
+# 07 Constraints Clip Structure Clipstructure
+
+## 2026 개정 해설
+
+Constraint는 뉴런 파라미터 공간을 실험 설계에 맞게 제한한다. Clip은 각 파라미터의 admissible interval을 보장하고, structure는 layer/group별 주파수 배치를 강제하며, clipstructure는 두 조건을 결합한다.
+
 # clip, structure, clipstructure
 
 ## 공통 schema

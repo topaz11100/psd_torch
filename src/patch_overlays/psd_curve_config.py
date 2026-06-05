@@ -10,7 +10,7 @@ import numpy as np
 EXTRACTOR_ALIASES = {'exact': 'psd_exact', 'psd_exact': 'psd_exact', 'userbin': 'psd_userbin', 'psd_userbin': 'psd_userbin'}
 REDUCERS = ('mean', 'median')
 CENTERING_ALIASES = {'raw': 'raw', 'centered': 'centered', 'cen': 'centered'}
-SCALES = ('raw', 'db')
+SCALES = ('raw', 'db', 'area')
 USERBIN_REDUCERS = ('mean', 'median', 'sum')
 DEFAULT_PSD_TOKEN = 'exact_mean_raw_raw'
 ALL_DATASET_PSD_TOKENS = tuple(
@@ -60,7 +60,7 @@ def parse_psd_curve_token(token: str) -> PSDCurveSpec:
         parts = ['userbin'] + parts[2:]
     if len(parts) != 4:
         raise ValueError(
-            f'Invalid PSD curve token {token!r}. Expected <exact|userbin>_<mean|median>_<raw|centered>_<raw|db>.'
+            f'Invalid PSD curve token {token!r}. Expected <exact|userbin>_<mean|median>_<raw|centered>_<raw|db|area>.'
         )
     extractor_raw, reducer, centering_raw, scale = parts
     extractor = EXTRACTOR_ALIASES.get(extractor_raw)
@@ -144,7 +144,7 @@ def resolve_userbin_edges(
             raise ValueError('userbin count must be >= 1.')
         resolved = np.linspace(0.0, 0.5, n + 1, dtype=np.float64).tolist()
     elif required:
-        raise ValueError('userbin edges are required for userbin PSD tokens. Provide explicit analysis_userbin_edges or a single bin width.')
+        raise ValueError('signal_curve_userbin_edges is required when signal_curve_space/userbin PSD tokens request userbin curves.')
     else:
         return None
     if len(resolved) < 2:

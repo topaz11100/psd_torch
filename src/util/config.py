@@ -1,13 +1,22 @@
-"""Small filesystem and serialization helpers shared across the project."""
+"""Filesystem and serialization helpers shared across the project.
+
+Project output-format convention:
+- user-authored configs and manifests are YAML;
+- tabular experiment/analysis artifacts are CSV;
+- checkpoint metadata stays JSON-serializable inside ``.pt`` checkpoint payloads.
+"""
 
 from __future__ import annotations
 
 import csv
-import json
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
+
+YAML_SUFFIXES = {'.yaml', '.yml'}
+STRUCTURED_SUFFIXES = YAML_SUFFIXES
+MANIFEST_FILENAMES = ('manifest.yaml', 'manifest.yml')
 
 
 def ensure_dir(path: Path | str) -> Path:
@@ -18,45 +27,170 @@ def ensure_dir(path: Path | str) -> Path:
     return directory
 
 
-class _NumpyJSONEncoder(json.JSONEncoder):
-    """JSON encoder that gracefully handles NumPy, Torch, and ``Path`` objects."""
+def _require_yaml():
+    """Import PyYAML with one clear project-level error message."""
 
-    def default(self, obj: Any) -> Any:
-        """Handle ``default`` for the ``config`` module."""
-        try:
-            if isinstance(obj, np.ndarray):
-                return obj.tolist()
-            if isinstance(obj, (np.floating, np.integer)):
-                return obj.item()
-        except Exception:
-            pass
-        try:
-            import torch
-
-            if isinstance(obj, torch.Tensor):
-                return obj.detach().cpu().tolist()
-        except Exception:
-            pass
-        if isinstance(obj, Path):
-            return str(obj)
-        return super().default(obj)
+    try:
+        import yaml
+    except ModuleNotFoundError as exc:  # pragma: no cover - environment-specific
+        raise RuntimeError('YAML config/manifest support requires PyYAML. Install with: pip install pyyaml') from exc
+    return yaml
 
 
-def save_json(path: Path | str, payload: dict[str, Any] | list[Any], *, indent: int = 2) -> None:
-    """Save one JSON payload using UTF-8."""
+def to_jsonable(value: Any, *, _raise_on_unknown: bool = True) -> Any:
+    """Convert common scientific Python objects into JSON/YAML-safe values."""
 
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {str(k): to_jsonable(v, _raise_on_unknown=_raise_on_unknown) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [to_jsonable(v, _raise_on_unknown=_raise_on_unknown) for v in value]
+    try:
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, (np.floating, np.integer, np.bool_)):
+            return value.item()
+    except Exception:
+        pass
+    try:
+        import torch
+
+        if isinstance(value, torch.Tensor):
+            return value.detach().cpu().tolist()
+    except Exception:
+        pass
+    if _raise_on_unknown:
+        raise TypeError(f'Object is not JSON/YAML serializable: {type(value).__name__}')
+    return value
+
+
+def _yaml_dumper():
+    yaml = _require_yaml()
+
+    class NoAliasSafeDumper(yaml.SafeDumper):
+        def ignore_aliases(self, data: Any) -> bool:  # noqa: D401 - PyYAML hook
+            return True
+
+    return NoAliasSafeDumper
+
+
+def save_yaml(path: Path | str, payload: dict[str, Any] | list[Any] | Mapping[str, Any]) -> None:
+    """Save one YAML payload using UTF-8."""
+
+    yaml = _require_yaml()
     path = Path(path)
     ensure_dir(path.parent)
     with path.open('w', encoding='utf-8') as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=indent, cls=_NumpyJSONEncoder)
-        handle.write('\n')
+        yaml.dump(
+            to_jsonable(payload),
+            handle,
+            Dumper=_yaml_dumper(),
+            allow_unicode=True,
+            sort_keys=False,
+            default_flow_style=False,
+        )
 
 
-def load_json(path: Path | str) -> Any:
-    """Load one JSON payload."""
+def load_yaml(path: Path | str) -> Any:
+    """Load one YAML payload."""
 
+    yaml = _require_yaml()
     with Path(path).open('r', encoding='utf-8') as handle:
-        return json.load(handle)
+        payload = yaml.safe_load(handle)
+    return {} if payload is None else payload
+
+
+def resolve_structured_path(path: Path | str) -> Path:
+    """Return an existing structured YAML file.
+
+    If the supplied path exists it is returned as-is. Otherwise the same stem is
+    probed with YAML suffix alternatives. Official config/manifest files use
+    ``.yaml``.
+    """
+
+    resolved = Path(path).expanduser()
+    if resolved.exists():
+        return resolved
+    suffix = resolved.suffix.lower()
+    base = resolved.with_suffix('') if suffix in STRUCTURED_SUFFIXES else resolved
+    for candidate in (base.with_suffix('.yaml'), base.with_suffix('.yml')):
+        if candidate.exists():
+            return candidate
+    return resolved
+
+
+def load_structured(path: Path | str) -> Any:
+    """Load a structured config/manifest file from YAML."""
+
+    resolved = resolve_structured_path(path)
+    suffix = resolved.suffix.lower()
+    if suffix in YAML_SUFFIXES:
+        return load_yaml(resolved)
+    raise ValueError(f'Unsupported structured file extension {suffix!r}: {resolved}')
+
+
+def save_structured(path: Path | str, payload: dict[str, Any] | list[Any]) -> None:
+    """Save a structured config/manifest file as YAML."""
+
+    resolved = Path(path)
+    suffix = resolved.suffix.lower()
+    if suffix in YAML_SUFFIXES:
+        save_yaml(resolved, payload)
+        return
+    raise ValueError(f'Unsupported structured file extension {suffix!r}: {resolved}')
+
+
+def manifest_path_for_dir(directory: Path | str) -> Path:
+    """Resolve the prepared-data manifest path under one dataset directory."""
+
+    root = Path(directory)
+    for filename in MANIFEST_FILENAMES:
+        candidate = root / filename
+        if candidate.exists():
+            return candidate
+    return root / 'manifest.yaml'
+
+
+def resolve_manifest_path(directory: Path | str) -> Path:
+    """Resolve ``manifest.yaml`` under a prepared dataset directory."""
+
+    return manifest_path_for_dir(directory)
+
+
+def load_manifest(path: Path | str) -> dict[str, Any]:
+    """Load a YAML manifest."""
+
+    payload = load_structured(path)
+    if not isinstance(payload, dict):
+        raise ValueError(f'Manifest root must be a mapping: {path}')
+    return dict(payload)
+
+
+def save_manifest(path: Path | str, payload: dict[str, Any] | list[Any]) -> None:
+    """Save a manifest as YAML."""
+
+    save_yaml(path, payload)
+
+
+def compact_yaml(value: Any) -> str:
+    """Serialize a scalar/list/dict compactly for embedding inside CSV cells."""
+
+    if value in (None, ''):
+        return ''
+    if isinstance(value, str):
+        return value
+    yaml = _require_yaml()
+    text = yaml.dump(
+        to_jsonable(value),
+        Dumper=_yaml_dumper(),
+        allow_unicode=True,
+        sort_keys=True,
+        default_flow_style=True,
+    ).strip()
+    return text[:-4].strip() if text.endswith('\n...') else text
 
 
 def save_text(path: Path | str, text: str) -> None:
@@ -92,6 +226,19 @@ def save_csv(path: Path | str, fieldnames: Sequence[str], rows: Iterable[dict[st
             writer.writerow(row)
 
 
+def save_mapping_csv(path: Path | str, payload: Mapping[str, Any], *, key_name: str = 'key', value_name: str = 'value') -> None:
+    """Save a small mapping as two-column CSV with compact YAML-encoded nested values."""
+
+    rows = [{key_name: str(key), value_name: compact_yaml(value)} for key, value in payload.items()]
+    save_csv(path, [key_name, value_name], rows)
+
+
+def save_key_value_csv(path: Path | str, payload: Mapping[str, Any], *, key_name: str = 'key', value_name: str = 'value') -> None:
+    """Alias for two-column metadata CSV output."""
+
+    save_mapping_csv(path, payload, key_name=key_name, value_name=value_name)
+
+
 def read_csv_rows(path: Path | str) -> list[dict[str, str]]:
     """Read one CSV file into memory."""
 
@@ -101,11 +248,25 @@ def read_csv_rows(path: Path | str) -> list[dict[str, str]]:
 
 
 __all__ = [
+    'MANIFEST_FILENAMES',
+    'STRUCTURED_SUFFIXES',
+    'YAML_SUFFIXES',
     'append_csv_row',
+    'compact_yaml',
     'ensure_dir',
-    'load_json',
+    'load_manifest',
+    'load_structured',
+    'load_yaml',
+    'manifest_path_for_dir',
     'read_csv_rows',
+    'resolve_manifest_path',
+    'resolve_structured_path',
     'save_csv',
-    'save_json',
+    'save_key_value_csv',
+    'save_manifest',
+    'save_mapping_csv',
+    'save_structured',
     'save_text',
+    'save_yaml',
+    'to_jsonable',
 ]

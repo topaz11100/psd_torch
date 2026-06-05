@@ -1,8 +1,7 @@
-"""GPU-first exact Hann-windowed spectral primitives and analysis helpers."""
+"""GPU-first exact spectral primitives and analysis helpers."""
 
 from __future__ import annotations
 
-import json
 import os
 from typing import Any, Iterable, Sequence
 
@@ -10,9 +9,58 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from src.util.config import compact_yaml
+
 
 DB_EPSILON = 1.0e-12
 PSD_VARIANTS = ('raw', 'centered')
+SIGNAL_WINDOWS = ('hann', 'none')
+_SIGNAL_WINDOW_ALIASES = {
+    'hann': 'hann',
+    'hanning': 'hann',
+    'none': 'none',
+    'rect': 'none',
+    'rectangular': 'none',
+    'boxcar': 'none',
+    'off': 'none',
+    'false': 'none',
+    '0': 'none',
+    'no': 'none',
+}
+
+
+def normalize_signal_window(value: str | bool | None) -> str:
+    """Return the canonical temporal taper used by PSD/FFT signal paths.
+
+    ``hann`` preserves the historical behavior. ``none`` uses a rectangular
+    window, i.e. the raw signal is transformed without a taper. Boolean false
+    and common rectangular/off aliases are accepted for config ergonomics.
+    """
+
+    if isinstance(value, bool):
+        return 'hann' if value else 'none'
+    if value is None:
+        return 'hann'
+    token = str(value).strip().lower().replace('-', '_')
+    if token in _SIGNAL_WINDOW_ALIASES:
+        return _SIGNAL_WINDOW_ALIASES[token]
+    allowed = ', '.join(SIGNAL_WINDOWS)
+    raise ValueError(f'Unsupported signal_window {value!r}. Allowed values: {allowed}.')
+
+
+def _regularizer_no_host_checks() -> bool:
+    """Return whether training regularizers requested no CPU-sync finite checks."""
+
+    return str(os.environ.get('PSD_REGULARIZER_EAGER_GPU_NO_HOST_CHECKS', '')).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _assert_finite_if_enabled(tensor: torch.Tensor, message: str) -> None:
+    """Keep analysis-time finite guards but avoid host sync in GPU regularizers."""
+
+    if _regularizer_no_host_checks():
+        return
+    if not torch.isfinite(tensor).all():
+        raise ValueError(message)
 
 
 def _analysis_real_dtype(*, device: torch.device | None = None, like: torch.Tensor | None = None) -> torch.dtype:
@@ -185,7 +233,7 @@ def apply_centering(signal_maps: torch.Tensor) -> torch.Tensor:
 
 
 def hann_window(length: int, *, device: torch.device | None = None, dtype: torch.dtype | None = None) -> torch.Tensor:
-    """Handle ``hann window`` for the ``psd_utils`` module."""
+    """Return a symmetric Hann taper of ``length`` samples."""
     length = int(length)
     if length <= 0:
         raise ValueError('Signal length must be positive.')
@@ -195,6 +243,38 @@ def hann_window(length: int, *, device: torch.device | None = None, dtype: torch
         return torch.ones(1, device=device, dtype=dtype)
     t = torch.arange(length, device=device, dtype=dtype)
     return 0.5 - 0.5 * torch.cos(2.0 * torch.pi * t / float(length - 1))
+
+
+def temporal_window(
+    length: int,
+    *,
+    signal_window: str | bool | None = 'hann',
+    device: torch.device | None = None,
+    dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    """Return the configured temporal taper.
+
+    ``signal_window='none'`` intentionally returns ones, so the downstream
+    periodogram normalization becomes the standard rectangular-window power
+    normalization.
+    """
+
+    token = normalize_signal_window(signal_window)
+    length = int(length)
+    if length <= 0:
+        raise ValueError('Signal length must be positive.')
+    if dtype is None:
+        dtype = _analysis_real_dtype(device=device)
+    if token == 'hann':
+        return hann_window(length, device=device, dtype=dtype)
+    return torch.ones(length, device=device, dtype=dtype)
+
+
+def signal_window_metadata(signal_window: str | bool | None) -> dict[str, Any]:
+    """Return serializable metadata for a PSD temporal taper choice."""
+
+    token = normalize_signal_window(signal_window)
+    return {'taper_window_applied': bool(token == 'hann'), 'taper_window_name': token}
 
 
 def exact_one_sided_freqs(length: int, *, device: torch.device | None = None, dtype: torch.dtype | None = None) -> torch.Tensor:
@@ -223,8 +303,16 @@ def one_sided_scaling(length: int, *, device: torch.device | None = None, dtype:
     return scale
 
 
-def exact_hann_rfft(signal_maps: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Return one-sided frequency grid, complex spectrum, one-sided scale, and Hann power constant."""
+def exact_hann_rfft(
+    signal_maps: torch.Tensor,
+    *,
+    signal_window: str | bool | None = 'hann',
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return one-sided frequency grid, complex spectrum, scale, and window power.
+
+    The function name is retained for backward compatibility.  The actual taper
+    is controlled by ``signal_window``; use ``'none'`` for an untapered RFFT.
+    """
 
     if signal_maps.ndim != 3:
         raise ValueError(f'Expected shape (samples, rows, time), got {tuple(signal_maps.shape)}')
@@ -233,28 +321,37 @@ def exact_hann_rfft(signal_maps: torch.Tensor) -> tuple[torch.Tensor, torch.Tens
     device = signal_maps.device
     dtype = signal_maps.dtype
     freqs = exact_one_sided_freqs(length, device=device, dtype=dtype)
-    window = hann_window(length, device=device, dtype=dtype)
+    window = temporal_window(length, signal_window=signal_window, device=device, dtype=dtype)
     window_power = window.square().sum() / float(length)
     spectrum = torch.fft.rfft(signal_maps * window.view(1, 1, -1), dim=-1)
     scale = one_sided_scaling(length, device=device, dtype=dtype)
     return freqs, spectrum, scale, window_power
 
 
-def exact_periodogram_from_maps(signal_maps: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Exact full-length Hann-windowed one-sided periodogram."""
+def exact_periodogram_from_maps(
+    signal_maps: torch.Tensor,
+    *,
+    signal_window: str | bool | None = 'hann',
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Exact full-length one-sided periodogram with configurable temporal taper."""
 
-    freqs, spectrum, scale, window_power = exact_hann_rfft(signal_maps)
+    freqs, spectrum, scale, window_power = exact_hann_rfft(signal_maps, signal_window=signal_window)
     length = int(signal_maps.shape[-1])
     power = scale.view(1, 1, -1) * spectrum.abs().square() / (float(length) * window_power)
     return freqs, power.real
 
 
-def exact_cross_periodogram_from_maps(x_maps: torch.Tensor, y_maps: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Handle ``exact cross periodogram from maps`` for the ``psd_utils`` module."""
+def exact_cross_periodogram_from_maps(
+    x_maps: torch.Tensor,
+    y_maps: torch.Tensor,
+    *,
+    signal_window: str | bool | None = 'hann',
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return one-sided cross periodogram with configurable temporal taper."""
     if x_maps.shape != y_maps.shape:
         raise ValueError(f'x_maps and y_maps shape mismatch: {tuple(x_maps.shape)} vs {tuple(y_maps.shape)}.')
-    freqs, x_spec, scale, window_power = exact_hann_rfft(x_maps)
-    _freqs_y, y_spec, _scale_y, _window_power_y = exact_hann_rfft(y_maps)
+    freqs, x_spec, scale, window_power = exact_hann_rfft(x_maps, signal_window=signal_window)
+    _freqs_y, y_spec, _scale_y, _window_power_y = exact_hann_rfft(y_maps, signal_window=signal_window)
     length = int(x_maps.shape[-1])
     cross = scale.view(1, 1, -1) * (y_spec * x_spec.conj()) / (float(length) * window_power)
     return freqs, cross
@@ -291,20 +388,26 @@ def _gather_frames(signal_maps: torch.Tensor, *, starts: Sequence[int], window: 
     return torch.gather(expanded, dim=-1, index=gather_index)
 
 
-def exact_spectrogram_from_maps(signal_maps: torch.Tensor, *, window: int | None, overlap: int | None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Return the full-length Hann spectrogram unless an internal caller supplies a window."""
+def exact_spectrogram_from_maps(
+    signal_maps: torch.Tensor,
+    *,
+    window: int | None,
+    overlap: int | None,
+    signal_window: str | bool | None = 'hann',
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return a spectrogram with configurable temporal taper."""
     if signal_maps.ndim != 3:
         raise ValueError(f'Expected shape (samples, rows, time), got {tuple(signal_maps.shape)}')
     signal_maps = _as_float_tensor(signal_maps)
     _samples, _rows, length = [int(v) for v in signal_maps.shape]
     window, overlap, starts = _resolve_spectrogram_params(length, window, overlap)
     if window == length and len(starts) == 1:
-        freqs, power = exact_periodogram_from_maps(signal_maps)
+        freqs, power = exact_periodogram_from_maps(signal_maps, signal_window=signal_window)
         centers = torch.tensor([(length - 1) / 2.0], device=signal_maps.device, dtype=signal_maps.dtype)
         return freqs, centers, power.unsqueeze(-1)
     framed = _gather_frames(signal_maps, starts=starts, window=window)  # (samples, rows, frames, window)
     freq_grid = exact_one_sided_freqs(window, device=signal_maps.device, dtype=signal_maps.dtype)
-    taper = hann_window(window, device=signal_maps.device, dtype=signal_maps.dtype)
+    taper = temporal_window(window, signal_window=signal_window, device=signal_maps.device, dtype=signal_maps.dtype)
     window_power = taper.square().sum() / float(window)
     scale = one_sided_scaling(window, device=signal_maps.device, dtype=signal_maps.dtype)
     spectrum = torch.fft.rfft(framed * taper.view(1, 1, 1, -1), dim=-1)
@@ -324,31 +427,57 @@ def aggregate_userbins_torch(
     userbin_edges: Sequence[float],
     *,
     axis: int = -1,
+    reducer: str = 'mean',
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Aggregate frequency bins on-device without per-bin host synchronizations."""
+    """Aggregate normalized-frequency bins on-device.
+
+    ``reducer`` controls how native FFT bins inside each user bin are collapsed.
+    Supported values are ``mean``, ``median``, and ``sum``.
+    """
 
     values = _as_float_tensor(values)
     freqs = _as_float_tensor(freqs, device=values.device, dtype=values.dtype)
     axis = int(axis)
     moved = values.movedim(axis, -1)
     edges = _as_float_tensor([float(v) for v in userbin_edges], device=values.device, dtype=values.dtype)
+    token = str(reducer or 'mean').strip().lower()
+    if token not in {'mean', 'median', 'sum'}:
+        raise ValueError(f'Unsupported userbin reducer: {reducer!r}.')
     if edges.ndim != 1 or edges.numel() < 2:
         raise ValueError('userbin_edges must be a one-dimensional sequence with at least two values.')
 
     num_bins = int(edges.numel() - 1)
-    interior = edges[1:-1]
-    bin_ids = torch.bucketize(freqs, interior, right=False)
-    valid = (freqs >= edges[0]) & (freqs <= edges[-1])
+    if token == 'mean':
+        interior = edges[1:-1]
+        bin_ids = torch.bucketize(freqs, interior, right=False)
+        valid = (freqs >= edges[0]) & (freqs <= edges[-1])
 
-    assignment = F.one_hot(bin_ids.clamp(min=0, max=num_bins - 1), num_classes=num_bins).to(dtype=values.dtype)
-    assignment = assignment * valid.to(dtype=values.dtype).unsqueeze(-1)
-    counts = assignment.sum(dim=0)
-    safe_counts = torch.where(counts > 0, counts, torch.ones_like(counts))
-    weights = assignment / safe_counts.unsqueeze(0)
+        assignment = F.one_hot(bin_ids.clamp(min=0, max=num_bins - 1), num_classes=num_bins).to(dtype=values.dtype)
+        assignment = assignment * valid.to(dtype=values.dtype).unsqueeze(-1)
+        counts = assignment.sum(dim=0)
+        safe_counts = torch.where(counts > 0, counts, torch.ones_like(counts))
+        weights = assignment / safe_counts.unsqueeze(0)
 
-    flat = moved.reshape(-1, moved.shape[-1])
-    aggregated = flat @ weights
-    aggregated = aggregated.reshape(*moved.shape[:-1], num_bins)
+        flat = moved.reshape(-1, moved.shape[-1])
+        aggregated = flat @ weights
+        aggregated = aggregated.reshape(*moved.shape[:-1], num_bins)
+    else:
+        chunks = []
+        for i in range(num_bins):
+            left = edges[i]
+            right = edges[i + 1]
+            if i == num_bins - 1:
+                mask = (freqs >= left) & (freqs <= right)
+            else:
+                mask = (freqs >= left) & (freqs < right)
+            if int(mask.sum().item()) < 1:
+                raise ValueError(f'userbin [{float(left):.8g}, {float(right):.8g}] contains no native normalized frequency bin.')
+            chunk = moved[..., mask]
+            if token == 'median':
+                chunks.append(chunk.median(dim=-1).values)
+            else:
+                chunks.append(chunk.sum(dim=-1))
+        aggregated = torch.stack(chunks, dim=-1)
     centers = 0.5 * (edges[:-1] + edges[1:])
     return aggregated.movedim(-1, axis), edges, centers
 
@@ -367,6 +496,37 @@ def power_to_db(values: torch.Tensor | np.ndarray, *, epsilon: float = DB_EPSILO
         return 10.0 * torch.log10(torch.clamp(values, min=0.0) + float(epsilon))
     array = np.asarray(values, dtype=np.float64)
     return 10.0 * np.log10(np.clip(array, a_min=0.0, a_max=None) + float(epsilon))
+
+
+def area_normalize_power(values: torch.Tensor | np.ndarray, *, axis: int = -1, epsilon: float = DB_EPSILON) -> torch.Tensor | np.ndarray:
+    """Normalize linear power/PSD values so the selected frequency axis sums to one.
+
+    This keeps spectral-energy allocation and removes absolute activation scale.
+    The function must be applied before any dB/log transform.
+    """
+
+    axis = int(axis)
+    if isinstance(values, torch.Tensor):
+        denom = torch.clamp(values.sum(dim=axis, keepdim=True), min=float(epsilon))
+        return values / denom
+    array = np.asarray(values, dtype=np.float64)
+    denom = np.clip(np.sum(array, axis=axis, keepdims=True), a_min=float(epsilon), a_max=None)
+    return array / denom
+
+
+def apply_power_value_scale(values: torch.Tensor | np.ndarray, scale: str, *, axis: int = -1, epsilon: float = DB_EPSILON) -> torch.Tensor | np.ndarray:
+    """Apply public PSD value-scale token: raw, db, or area."""
+
+    token = str(scale or 'raw').strip().lower().replace('-', '_')
+    aliases = {'linear': 'raw', 'lin': 'raw', 'power': 'raw', 'log': 'db', 'area_norm': 'area', 'area_normalized': 'area', 'normalized': 'area'}
+    token = aliases.get(token, token)
+    if token == 'raw':
+        return values
+    if token == 'db':
+        return power_to_db(values, epsilon=epsilon)
+    if token == 'area':
+        return area_normalize_power(values, axis=axis, epsilon=epsilon)
+    raise ValueError(f'Unsupported PSD value scale: {scale!r}. Allowed values are raw, db, area.')
 
 
 def centered_pointwise_l2(u: torch.Tensor | np.ndarray, v: torch.Tensor | np.ndarray) -> float:
@@ -474,12 +634,12 @@ def compute_fixed_pca_basis(reference_maps: torch.Tensor, target_dim: int) -> tu
     """Compute fixed PCA basis and centroid from ``(samples, rows, time)`` maps."""
     if reference_maps.ndim != 3:
         raise ValueError(f'Expected shape (samples, rows, time), got {tuple(reference_maps.shape)}')
-    maps = _as_float_tensor(reference_maps)
+    input_dtype = reference_maps.dtype if isinstance(reference_maps, torch.Tensor) and reference_maps.is_floating_point() else None
+    maps = _as_float_tensor(reference_maps, dtype=input_dtype)
     samples, rows, time_steps = [int(v) for v in maps.shape]
     if rows <= 0 or time_steps <= 0:
         raise ValueError('reference_maps rows/time dimensions must be positive.')
-    if not torch.isfinite(maps).all():
-        raise ValueError('reference_maps must be finite.')
+    _assert_finite_if_enabled(maps, 'reference_maps must be finite.')
     observations = max(1, samples * time_steps)
     dim = max(1, min(int(target_dim), rows, observations))
     obs = maps.permute(0, 2, 1).reshape(observations, rows)
@@ -500,9 +660,9 @@ def apply_fixed_pca_basis(signal_maps: torch.Tensor, basis: torch.Tensor, centro
     """Apply a fixed PCA basis to ``(samples, rows, time)`` maps -> ``(samples, dim, time)``."""
     if signal_maps.ndim != 3:
         raise ValueError(f'Expected shape (samples, rows, time), got {tuple(signal_maps.shape)}')
-    maps = _as_float_tensor(signal_maps)
-    if not torch.isfinite(maps).all():
-        raise ValueError('signal_maps must be finite.')
+    input_dtype = signal_maps.dtype if isinstance(signal_maps, torch.Tensor) and signal_maps.is_floating_point() else None
+    maps = _as_float_tensor(signal_maps, dtype=input_dtype)
+    _assert_finite_if_enabled(maps, 'signal_maps must be finite.')
     rows = int(maps.shape[1])
     basis_local = basis.detach().to(device=maps.device, dtype=maps.dtype) if isinstance(basis, torch.Tensor) else torch.as_tensor(basis, device=maps.device, dtype=maps.dtype)
     centroid_local = centroid.detach().to(device=maps.device, dtype=maps.dtype).reshape(-1) if isinstance(centroid, torch.Tensor) else torch.as_tensor(centroid, device=maps.device, dtype=maps.dtype).reshape(-1)
@@ -530,7 +690,13 @@ def row_variance_mad_summary(signal_maps: torch.Tensor) -> dict[str, float]:
     }
 
 
-def scalar_io_spectral_objects(x_maps: torch.Tensor, y_maps: torch.Tensor, *, epsilon: float = DB_EPSILON) -> dict[str, Any]:
+def scalar_io_spectral_objects(
+    x_maps: torch.Tensor,
+    y_maps: torch.Tensor,
+    *,
+    epsilon: float = DB_EPSILON,
+    signal_window: str | bool | None = 'hann',
+) -> dict[str, Any]:
     """Handle ``scalar io spectral objects`` for the ``psd_utils`` module."""
     x_maps = tensor_to_channel_major_maps(x_maps) if x_maps.ndim == 2 else x_maps
     y_maps = tensor_to_channel_major_maps(y_maps) if y_maps.ndim == 2 else y_maps
@@ -542,9 +708,9 @@ def scalar_io_spectral_objects(x_maps: torch.Tensor, y_maps: torch.Tensor, *, ep
     for variant in PSD_VARIANTS:
         x_variant = x_maps if variant == 'raw' else apply_centering(x_maps)
         y_variant = y_maps if variant == 'raw' else apply_centering(y_maps)
-        freqs, s_xx_each = exact_periodogram_from_maps(x_variant)
-        _freqs_y, s_yy_each = exact_periodogram_from_maps(y_variant)
-        _freqs_xy, s_yx_each = exact_cross_periodogram_from_maps(x_variant, y_variant)
+        freqs, s_xx_each = exact_periodogram_from_maps(x_variant, signal_window=signal_window)
+        _freqs_y, s_yy_each = exact_periodogram_from_maps(y_variant, signal_window=signal_window)
+        _freqs_xy, s_yx_each = exact_cross_periodogram_from_maps(x_variant, y_variant, signal_window=signal_window)
         s_xx = s_xx_each.mean(dim=(0, 1)).real
         s_yy = s_yy_each.mean(dim=(0, 1)).real
         s_yx = s_yx_each.mean(dim=(0, 1))
@@ -588,6 +754,7 @@ def combined_exact_psd_payload_from_maps_torch(
     overlap: int | None,
     userbin_edges: Sequence[float],
     include_spectrogram: bool = True,
+    signal_window: str | bool | None = 'hann',
 ) -> dict[str, Any]:
     """Compute the official raw/centered dataset-input spectral payload on GPU when available."""
 
@@ -597,8 +764,7 @@ def combined_exact_psd_payload_from_maps_torch(
     num_samples, num_rows, sequence_length = [int(v) for v in maps.shape]
     payload: dict[str, Any] = {
         'variants_saved': list(PSD_VARIANTS),
-        'taper_window_applied': True,
-        'taper_window_name': 'hann',
+        **signal_window_metadata(signal_window),
         'db_plots_saved': True,
         'db_plot_scale': '10log10_power_plus_epsilon',
         'db_plot_epsilon': DB_EPSILON,
@@ -611,7 +777,7 @@ def combined_exact_psd_payload_from_maps_torch(
 
     for variant in PSD_VARIANTS:
         variant_maps = _variant_maps(maps, variant)
-        freq_exact, exact_psd = exact_periodogram_from_maps(variant_maps)
+        freq_exact, exact_psd = exact_periodogram_from_maps(variant_maps, signal_window=signal_window)
         userbin_psd, edges, centers = aggregate_userbins_torch(exact_psd, freq_exact, userbin_edges, axis=2)
 
         mean_waveform_exact = _sample_reduce_rows(exact_psd.real, 'mean').mean(dim=0)
@@ -632,18 +798,21 @@ def combined_exact_psd_payload_from_maps_torch(
         payload[f'median_psd_waveform_exact_{variant}_db'] = power_to_db(median_waveform_exact).detach().cpu().numpy()
         payload[f'mean_psd_waveform_userbin_{variant}_db'] = power_to_db(mean_waveform_userbin).detach().cpu().numpy()
         payload[f'median_psd_waveform_userbin_{variant}_db'] = power_to_db(median_waveform_userbin).detach().cpu().numpy()
-        payload[f'scalar_summary_{variant}'] = json.dumps(
+        payload[f'mean_psd_waveform_exact_{variant}_area'] = area_normalize_power(mean_waveform_exact, axis=-1).detach().cpu().numpy()
+        payload[f'median_psd_waveform_exact_{variant}_area'] = area_normalize_power(median_waveform_exact, axis=-1).detach().cpu().numpy()
+        payload[f'mean_psd_waveform_userbin_{variant}_area'] = area_normalize_power(mean_waveform_userbin, axis=-1).detach().cpu().numpy()
+        payload[f'median_psd_waveform_userbin_{variant}_area'] = area_normalize_power(median_waveform_userbin, axis=-1).detach().cpu().numpy()
+        payload[f'scalar_summary_{variant}'] = compact_yaml(
             {
                 'mean_psd_waveform_mean': float(mean_waveform_exact.mean().item()),
                 'mean_psd_waveform_std': float(mean_waveform_exact.std(unbiased=False).item()),
                 'median_psd_waveform_mean': float(median_waveform_exact.mean().item()),
                 'median_psd_waveform_std': float(median_waveform_exact.std(unbiased=False).item()),
-            },
-            ensure_ascii=False,
+            }
         )
 
         if include_spectrogram:
-            spec_freqs, frame_centers, spectrogram = exact_spectrogram_from_maps(variant_maps, window=window, overlap=overlap)
+            spec_freqs, frame_centers, spectrogram = exact_spectrogram_from_maps(variant_maps, window=window, overlap=overlap, signal_window=signal_window)
             userbin_spec, _spec_edges, spec_centers = aggregate_userbins_torch(spectrogram, spec_freqs, userbin_edges, axis=2)
 
             mean_spectrogram_exact = _sample_reduce_rows(spectrogram.real, 'mean').mean(dim=0)
@@ -662,6 +831,10 @@ def combined_exact_psd_payload_from_maps_torch(
             payload[f'median_spectrogram_exact_{variant}_db'] = power_to_db(median_spectrogram_exact).detach().cpu().numpy()
             payload[f'mean_spectrogram_userbin_{variant}_db'] = power_to_db(mean_spectrogram_userbin).detach().cpu().numpy()
             payload[f'median_spectrogram_userbin_{variant}_db'] = power_to_db(median_spectrogram_userbin).detach().cpu().numpy()
+            payload[f'mean_spectrogram_exact_{variant}_area'] = area_normalize_power(mean_spectrogram_exact, axis=0).detach().cpu().numpy()
+            payload[f'median_spectrogram_exact_{variant}_area'] = area_normalize_power(median_spectrogram_exact, axis=0).detach().cpu().numpy()
+            payload[f'mean_spectrogram_userbin_{variant}_area'] = area_normalize_power(mean_spectrogram_userbin, axis=0).detach().cpu().numpy()
+            payload[f'median_spectrogram_userbin_{variant}_area'] = area_normalize_power(median_spectrogram_userbin, axis=0).detach().cpu().numpy()
     return payload
 
 
@@ -672,6 +845,7 @@ def combined_exact_psd_payload_from_map_batches_torch(
     overlap: int | None,
     userbin_edges: Sequence[float],
     include_spectrogram: bool = True,
+    signal_window: str | bool | None = 'hann',
 ) -> dict[str, Any]:
     """Compute the official dataset-input PSD bundle exactly from channel-major batches."""
 
@@ -716,7 +890,7 @@ def combined_exact_psd_payload_from_map_batches_torch(
 
         for variant in PSD_VARIANTS:
             variant_maps = _variant_maps(maps, variant)
-            freq_exact, exact_psd = exact_periodogram_from_maps(variant_maps)
+            freq_exact, exact_psd = exact_periodogram_from_maps(variant_maps, signal_window=signal_window)
             userbin_psd, edges, centers = aggregate_userbins_torch(exact_psd, freq_exact, userbin_edges, axis=2)
             row_psd_exact_batch = exact_psd.real.sum(dim=0).detach().cpu()
             row_psd_exact_sums[variant] = row_psd_exact_batch if row_psd_exact_sums[variant] is None else row_psd_exact_sums[variant] + row_psd_exact_batch
@@ -731,7 +905,7 @@ def combined_exact_psd_payload_from_map_batches_torch(
                 userbin_center_refs[variant] = centers.detach().cpu()
 
             if include_spectrogram:
-                spec_freqs, frame_centers, spectrogram = exact_spectrogram_from_maps(variant_maps, window=window, overlap=overlap)
+                spec_freqs, frame_centers, spectrogram = exact_spectrogram_from_maps(variant_maps, window=window, overlap=overlap, signal_window=signal_window)
                 userbin_spec, _spec_edges, spec_centers = aggregate_userbins_torch(spectrogram, spec_freqs, userbin_edges, axis=2)
                 for reducer in ('mean', 'median'):
                     rep_spec_exact_batch = _sample_reduce_rows(spectrogram.real, reducer).sum(dim=0).detach().cpu()
@@ -753,8 +927,7 @@ def combined_exact_psd_payload_from_map_batches_torch(
 
     payload: dict[str, Any] = {
         'variants_saved': list(PSD_VARIANTS),
-        'taper_window_applied': True,
-        'taper_window_name': 'hann',
+        **signal_window_metadata(signal_window),
         'db_plots_saved': True,
         'db_plot_scale': '10log10_power_plus_epsilon',
         'db_plot_epsilon': DB_EPSILON,
@@ -789,14 +962,17 @@ def combined_exact_psd_payload_from_map_batches_torch(
         payload[f'median_psd_waveform_exact_{variant}_db'] = power_to_db(median_waveform_exact).detach().cpu().numpy()
         payload[f'mean_psd_waveform_userbin_{variant}_db'] = power_to_db(mean_waveform_userbin).detach().cpu().numpy()
         payload[f'median_psd_waveform_userbin_{variant}_db'] = power_to_db(median_waveform_userbin).detach().cpu().numpy()
-        payload[f'scalar_summary_{variant}'] = json.dumps(
+        payload[f'mean_psd_waveform_exact_{variant}_area'] = area_normalize_power(mean_waveform_exact, axis=-1).detach().cpu().numpy()
+        payload[f'median_psd_waveform_exact_{variant}_area'] = area_normalize_power(median_waveform_exact, axis=-1).detach().cpu().numpy()
+        payload[f'mean_psd_waveform_userbin_{variant}_area'] = area_normalize_power(mean_waveform_userbin, axis=-1).detach().cpu().numpy()
+        payload[f'median_psd_waveform_userbin_{variant}_area'] = area_normalize_power(median_waveform_userbin, axis=-1).detach().cpu().numpy()
+        payload[f'scalar_summary_{variant}'] = compact_yaml(
             {
                 'mean_psd_waveform_mean': float(mean_waveform_exact.mean().item()),
                 'mean_psd_waveform_std': float(mean_waveform_exact.std(unbiased=False).item()),
                 'median_psd_waveform_mean': float(median_waveform_exact.mean().item()),
                 'median_psd_waveform_std': float(median_waveform_exact.std(unbiased=False).item()),
-            },
-            ensure_ascii=False,
+            }
         )
 
         if include_spectrogram:
@@ -818,6 +994,10 @@ def combined_exact_psd_payload_from_map_batches_torch(
             payload[f'median_spectrogram_exact_{variant}_db'] = power_to_db(median_spectrogram_exact).detach().cpu().numpy()
             payload[f'mean_spectrogram_userbin_{variant}_db'] = power_to_db(mean_spectrogram_userbin).detach().cpu().numpy()
             payload[f'median_spectrogram_userbin_{variant}_db'] = power_to_db(median_spectrogram_userbin).detach().cpu().numpy()
+            payload[f'mean_spectrogram_exact_{variant}_area'] = area_normalize_power(mean_spectrogram_exact, axis=0).detach().cpu().numpy()
+            payload[f'median_spectrogram_exact_{variant}_area'] = area_normalize_power(median_spectrogram_exact, axis=0).detach().cpu().numpy()
+            payload[f'mean_spectrogram_userbin_{variant}_area'] = area_normalize_power(mean_spectrogram_userbin, axis=0).detach().cpu().numpy()
+            payload[f'median_spectrogram_userbin_{variant}_area'] = area_normalize_power(median_spectrogram_userbin, axis=0).detach().cpu().numpy()
     return payload
 
 
@@ -940,15 +1120,20 @@ def build_scalar_waveform_bundle_from_maps(
     window: int | None,
     overlap: int | None,
     userbin_edges: Sequence[float],
+    signal_window: str | bool | None = 'hann',
 ) -> dict[str, Any]:
     """Build scalar waveform bundle from maps."""
     maps = signal_maps if signal_maps.ndim == 3 else tensor_to_channel_major_maps(signal_maps)
     if maps.ndim != 3:
         raise ValueError(f'Expected rank-3 scalar maps, got {tuple(maps.shape)}.')
-    return combined_exact_psd_payload_from_maps_torch(maps, window=window, overlap=overlap, userbin_edges=userbin_edges, include_spectrogram=True)
+    return combined_exact_psd_payload_from_maps_torch(maps, window=window, overlap=overlap, userbin_edges=userbin_edges, include_spectrogram=True, signal_window=signal_window)
 
 
-def auto_spectral_matrix_from_mode_maps(mode_maps: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def auto_spectral_matrix_from_mode_maps(
+    mode_maps: torch.Tensor,
+    *,
+    signal_window: str | bool | None = 'hann',
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Handle ``auto spectral matrix from mode maps`` for the ``psd_utils`` module."""
     if mode_maps.ndim != 3:
         raise ValueError(f'Expected shape (samples, modes, time), got {tuple(mode_maps.shape)}')
@@ -956,23 +1141,27 @@ def auto_spectral_matrix_from_mode_maps(mode_maps: torch.Tensor) -> tuple[torch.
         raise ValueError('mode_maps must have at least one mode.')
     if int(mode_maps.shape[2]) < 2:
         raise ValueError('mode_maps must have time dimension >= 2.')
-    if not torch.isfinite(mode_maps).all():
-        raise ValueError('mode_maps must be finite.')
-    freqs, spectrum, scale, window_power = exact_hann_rfft(mode_maps)
+    _assert_finite_if_enabled(mode_maps, 'mode_maps must be finite.')
+    freqs, spectrum, scale, window_power = exact_hann_rfft(mode_maps, signal_window=signal_window)
     length = int(mode_maps.shape[-1])
     matrix = torch.einsum('nmf,nkf->fmk', spectrum, spectrum.conj()) / max(1, int(mode_maps.shape[0]))
     matrix = scale.view(-1, 1, 1) * matrix / (float(length) * window_power)
     return freqs, matrix
 
 
-def cross_spectral_matrix_from_mode_maps(x_mode_maps: torch.Tensor, y_mode_maps: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def cross_spectral_matrix_from_mode_maps(
+    x_mode_maps: torch.Tensor,
+    y_mode_maps: torch.Tensor,
+    *,
+    signal_window: str | bool | None = 'hann',
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Handle ``cross spectral matrix from mode maps`` for the ``psd_utils`` module."""
     if x_mode_maps.ndim != 3 or y_mode_maps.ndim != 3:
         raise ValueError('cross_spectral_matrix_from_mode_maps expects rank-3 mode maps.')
     if x_mode_maps.shape[0] != y_mode_maps.shape[0] or x_mode_maps.shape[-1] != y_mode_maps.shape[-1]:
         raise ValueError('x_mode_maps and y_mode_maps must agree in sample count and time length.')
-    freqs, x_spec, scale, window_power = exact_hann_rfft(x_mode_maps)
-    _freqs_y, y_spec, _scale_y, _window_power_y = exact_hann_rfft(y_mode_maps)
+    freqs, x_spec, scale, window_power = exact_hann_rfft(x_mode_maps, signal_window=signal_window)
+    _freqs_y, y_spec, _scale_y, _window_power_y = exact_hann_rfft(y_mode_maps, signal_window=signal_window)
     length = int(x_mode_maps.shape[-1])
     matrix = torch.einsum('nyf,nxf->fyx', y_spec, x_spec.conj()) / max(1, int(x_mode_maps.shape[0]))
     matrix = scale.view(-1, 1, 1) * matrix / (float(length) * window_power)
@@ -982,6 +1171,7 @@ def cross_spectral_matrix_from_mode_maps(x_mode_maps: torch.Tensor, y_mode_maps:
 __all__ = [
     'DB_EPSILON',
     'PSD_VARIANTS',
+    'SIGNAL_WINDOWS',
     'aggregate_userbins_numpy',
     'aggregate_userbins_torch',
     'apply_centering',
@@ -1001,9 +1191,14 @@ __all__ = [
     'exact_spectrogram_from_maps',
     'first_difference_l2',
     'hann_window',
+    'normalize_signal_window',
+    'signal_window_metadata',
+    'temporal_window',
     'mean_spatial_psd_2d_from_original_inputs',
     'one_sided_scaling',
     'power_to_db',
+    'area_normalize_power',
+    'apply_power_value_scale',
     'pca_dim_from_cli_vector',
     'compute_fixed_pca_basis',
     'apply_fixed_pca_basis',

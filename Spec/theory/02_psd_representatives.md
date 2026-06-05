@@ -1,51 +1,59 @@
-# PSD 대표화
+# PSD Representatives
 
-## 기본 PSD
+## Periodogram
 
-SignalMap $X \in \mathbb{R}^{S	imes R	imes T}$에서 sample $s$, row $r$의 time signal은 $x_{s,r}[t]$다. one-sided frequency bin은
+각 row 신호 \(m_{n,r}(t)\)의 one-sided FFT를
 
-$$
-f_k = rac{k}{T}, \quad k=0,\ldots,\lfloor T/2floor
-$$
+\[
+\hat{m}_{n,r}(\omega_k)=\sum_{t=0}^{T-1}m_{n,r}(t)e^{-i2\pi kt/T}
+\]
 
-이다. centered variant는 time 평균을 제거한 뒤 PSD를 계산한다.
+라고 할 때 PSD는
 
-## 대표 curve
+\[
+P_{n,r}(\omega_k)=\frac{1}{T}|\hat{m}_{n,r}(\omega_k)|^2.
+\]
 
-row별 PSD $P_{s,r,k}$를 먼저 계산한 뒤 row/sample 축을 요약한다.
+프로젝트의 `exact` curve space는 이 periodogram을 직접 사용한다.
 
-Mean representative:
+## Representative curve
 
-$$
-C^{mean}_k = rac{1}{S}\sum_s rac{1}{R}\sum_r P_{s,r,k}
-$$
+Layer-level curve는 sample과 row 축을 reducer \(\rho\)로 줄인다.
 
-Median representative:
+\[
+R^{(\ell)}(\omega_k)=\rho_{n,r}\big(P^{(\ell)}_{n,r}(\omega_k)\big).
+\]
 
-$$
-C^{median}_k = rac{1}{S}\sum_s \operatorname{median}_r P_{s,r,k}
-$$
+기본 reducer는 mean이다.
 
-## dispersion
+\[
+R^{(\ell)}(\omega_k)=\frac{1}{NR}\sum_{n=1}^{N}\sum_{r=1}^{R}P^{(\ell)}_{n,r}(\omega_k).
+\]
 
-분산과 MAD는 같은 frequency bin 안에서 row 축 분산성을 기록한다.
+Median reducer는 outlier neuron이나 class imbalance가 강할 때 안정적인 대안이다.
 
-$$
-V_k = rac{1}{S}\sum_s \operatorname{Var}_r(P_{s,r,k})
-$$
+## dB scale
 
-MAD는 row median 기준 절대편차의 median이다.
+Power scale의 dynamic range가 크므로 dB 변환을 지원한다.
 
-## element PSD
+\[
+R_{\mathrm{dB}}(\omega)=10\log_{10}(R(\omega)+\epsilon).
+\]
 
-Element PSD는 row 축을 보존한다.
+\(\epsilon\)은 numerical floor다. dB scale에서 L2 distance를 해석할 때는 절대 power 차이가 아니라 상대적인 spectral shape 차이에 가깝다.
 
-$$
-M_{r,k}=rac{1}{S}\sum_s P_{s,r,k}
-$$
+## Distance
 
-모델 element PSD는 hidden/output row에 대해서만 생성한다. input row에 대한 element PSD가 필요하면 dataset 분석 stage를 사용한다.
+두 curve \(a,b\)의 centered L2는
 
-## scale
+\[
+d_{\mathrm{centered}}(a,b)=\left\|\left(a-\bar{a}\right)-\left(b-\bar{b}\right)\right\|_2.
+\]
 
-`raw`는 power 값을 그대로 저장한다. `db`는 raw power 집계가 끝난 뒤 dB로 변환한다. batch별 dB를 평균하지 않는다.
+`diff_l2`는 단순 차분
+
+\[
+d_{\mathrm{diff}}(a,b)=\|a-b\|_2
+\]
+
+을 사용한다. Centered distance는 전체 energy offset보다 shape 차이를 더 강조한다.

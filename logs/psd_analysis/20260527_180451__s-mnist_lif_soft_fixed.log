@@ -1,376 +1,0 @@
-/home/yongokhan/바탕화면/psd/src/psd_analysis.py:139: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
-  payload = torch.load(path, map_location=map_location)
-psd_analysis:checkpoints:   0%|          | 0/30 [00:00<?, ?it/s]
-psd_analysis:train_train_balanced_global:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_balanced_global: 100%|██████████| 1/1 [00:00<00:00,  2.01it/s][A
-                                                                                       [A
-psd_analysis:train_train_distribution_global:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_distribution_global: 100%|██████████| 1/1 [00:00<00:00,  2.84it/s][A
-                                                                                           [A
-psd_analysis:train_train_same_label_label_0:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_0: 100%|██████████| 1/1 [00:00<00:00,  3.55it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_1:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_1: 100%|██████████| 1/1 [00:00<00:00,  3.59it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_2:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_2: 100%|██████████| 1/1 [00:00<00:00,  3.51it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_3:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_3: 100%|██████████| 1/1 [00:00<00:00,  3.60it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_4:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_4: 100%|██████████| 1/1 [00:00<00:00,  3.60it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_5:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_5: 100%|██████████| 1/1 [00:00<00:00,  3.57it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_6:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_6: 100%|██████████| 1/1 [00:00<00:00,  3.59it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_7:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_7: 100%|██████████| 1/1 [00:00<00:00,  3.60it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_8:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_8: 100%|██████████| 1/1 [00:00<00:00,  3.52it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_9:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_9: 100%|██████████| 1/1 [00:00<00:00,  3.58it/s][A
-                                                                                          [A
-psd_analysis:test_test_balanced_global:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_balanced_global: 100%|██████████| 1/1 [00:00<00:00,  2.95it/s][A
-                                                                                     [A
-psd_analysis:test_test_distribution_global:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_distribution_global: 100%|██████████| 1/1 [00:00<00:00,  2.87it/s][A
-                                                                                         [A
-psd_analysis:test_test_same_label_label_0:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_0: 100%|██████████| 1/1 [00:00<00:00,  3.64it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_1:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_1: 100%|██████████| 1/1 [00:00<00:00,  3.64it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_2:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_2: 100%|██████████| 1/1 [00:00<00:00,  3.65it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_3:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_3: 100%|██████████| 1/1 [00:00<00:00,  3.62it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_4:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_4: 100%|██████████| 1/1 [00:00<00:00,  3.59it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_5:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_5: 100%|██████████| 1/1 [00:00<00:00,  3.61it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_6:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_6: 100%|██████████| 1/1 [00:00<00:00,  3.60it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_7:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_7: 100%|██████████| 1/1 [00:00<00:00,  2.87it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_8:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_8: 100%|██████████| 1/1 [00:00<00:00,  3.58it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_9:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_9: 100%|██████████| 1/1 [00:00<00:00,  3.58it/s][A
-                                                                                        [Apsd_analysis:checkpoints:   3%|▎         | 1/30 [01:20<38:51, 80.40s/it]
-psd_analysis:train_train_balanced_global:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_balanced_global: 100%|██████████| 1/1 [00:00<00:00,  2.78it/s][A
-                                                                                       [A
-psd_analysis:train_train_distribution_global:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_distribution_global: 100%|██████████| 1/1 [00:00<00:00,  2.80it/s][A
-                                                                                           [A
-psd_analysis:train_train_same_label_label_0:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_0: 100%|██████████| 1/1 [00:00<00:00,  3.55it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_1:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_1: 100%|██████████| 1/1 [00:00<00:00,  3.55it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_2:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_2: 100%|██████████| 1/1 [00:00<00:00,  3.52it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_3:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_3: 100%|██████████| 1/1 [00:00<00:00,  3.52it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_4:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_4: 100%|██████████| 1/1 [00:00<00:00,  3.51it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_5:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_5: 100%|██████████| 1/1 [00:00<00:00,  3.52it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_6:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_6: 100%|██████████| 1/1 [00:00<00:00,  3.51it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_7:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_7: 100%|██████████| 1/1 [00:00<00:00,  3.51it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_8:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_8: 100%|██████████| 1/1 [00:00<00:00,  3.51it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_9:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_9: 100%|██████████| 1/1 [00:00<00:00,  3.50it/s][A
-                                                                                          [A
-psd_analysis:test_test_balanced_global:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_balanced_global: 100%|██████████| 1/1 [00:00<00:00,  3.29it/s][A
-                                                                                     [A
-psd_analysis:test_test_distribution_global:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_distribution_global: 100%|██████████| 1/1 [00:00<00:00,  3.22it/s][A
-                                                                                         [A
-psd_analysis:test_test_same_label_label_0:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_0: 100%|██████████| 1/1 [00:00<00:00,  3.58it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_1:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_1: 100%|██████████| 1/1 [00:00<00:00,  3.59it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_2:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_2: 100%|██████████| 1/1 [00:00<00:00,  3.58it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_3:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_3: 100%|██████████| 1/1 [00:00<00:00,  3.57it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_4:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_4: 100%|██████████| 1/1 [00:00<00:00,  3.57it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_5:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_5: 100%|██████████| 1/1 [00:00<00:00,  3.54it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_6:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_6: 100%|██████████| 1/1 [00:00<00:00,  3.59it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_7:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_7: 100%|██████████| 1/1 [00:00<00:00,  3.58it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_8:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_8: 100%|██████████| 1/1 [00:00<00:00,  3.58it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_9:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_9: 100%|██████████| 1/1 [00:00<00:00,  2.54it/s][A
-                                                                                        [Apsd_analysis:checkpoints:   7%|▋         | 2/30 [02:39<37:13, 79.78s/it]
-psd_analysis:train_train_balanced_global:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_balanced_global: 100%|██████████| 1/1 [00:00<00:00,  3.05it/s][A
-                                                                                       [A
-psd_analysis:train_train_distribution_global:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_distribution_global: 100%|██████████| 1/1 [00:00<00:00,  3.08it/s][A
-                                                                                           [A
-psd_analysis:train_train_same_label_label_0:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_0: 100%|██████████| 1/1 [00:00<00:00,  3.57it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_1:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_1: 100%|██████████| 1/1 [00:00<00:00,  3.55it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_2:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_2: 100%|██████████| 1/1 [00:00<00:00,  3.55it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_3:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_3: 100%|██████████| 1/1 [00:00<00:00,  3.54it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_4:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_4: 100%|██████████| 1/1 [00:00<00:00,  3.56it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_5:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_5: 100%|██████████| 1/1 [00:00<00:00,  3.51it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_6:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_6: 100%|██████████| 1/1 [00:00<00:00,  3.56it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_7:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_7: 100%|██████████| 1/1 [00:00<00:00,  3.55it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_8:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_8: 100%|██████████| 1/1 [00:00<00:00,  3.55it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_9:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_9: 100%|██████████| 1/1 [00:00<00:00,  3.55it/s][A
-                                                                                          [A
-psd_analysis:test_test_balanced_global:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_balanced_global: 100%|██████████| 1/1 [00:00<00:00,  2.89it/s][A
-                                                                                     [A
-psd_analysis:test_test_distribution_global:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_distribution_global: 100%|██████████| 1/1 [00:00<00:00,  3.25it/s][A
-                                                                                         [A
-psd_analysis:test_test_same_label_label_0:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_0: 100%|██████████| 1/1 [00:00<00:00,  3.54it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_1:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_1: 100%|██████████| 1/1 [00:00<00:00,  3.57it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_2:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_2: 100%|██████████| 1/1 [00:00<00:00,  3.57it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_3:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_3: 100%|██████████| 1/1 [00:00<00:00,  3.57it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_4:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_4: 100%|██████████| 1/1 [00:00<00:00,  2.47it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_5:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_5: 100%|██████████| 1/1 [00:00<00:00,  3.57it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_6:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_6: 100%|██████████| 1/1 [00:00<00:00,  3.58it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_7:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_7: 100%|██████████| 1/1 [00:00<00:00,  3.57it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_8:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_8: 100%|██████████| 1/1 [00:00<00:00,  3.55it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_9:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_9: 100%|██████████| 1/1 [00:00<00:00,  3.58it/s][A
-                                                                                        [Apsd_analysis:checkpoints:  10%|█         | 3/30 [03:59<35:48, 79.57s/it]
-psd_analysis:train_train_balanced_global:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_balanced_global: 100%|██████████| 1/1 [00:00<00:00,  2.74it/s][A
-                                                                                       [A
-psd_analysis:train_train_distribution_global:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_distribution_global: 100%|██████████| 1/1 [00:00<00:00,  3.02it/s][A
-                                                                                           [A
-psd_analysis:train_train_same_label_label_0:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_0: 100%|██████████| 1/1 [00:00<00:00,  3.53it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_1:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_1: 100%|██████████| 1/1 [00:00<00:00,  3.54it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_2:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_2: 100%|██████████| 1/1 [00:00<00:00,  3.54it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_3:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_3: 100%|██████████| 1/1 [00:00<00:00,  3.54it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_4:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_4: 100%|██████████| 1/1 [00:00<00:00,  3.55it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_5:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_5: 100%|██████████| 1/1 [00:00<00:00,  3.51it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_6:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_6: 100%|██████████| 1/1 [00:00<00:00,  3.52it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_7:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_7: 100%|██████████| 1/1 [00:00<00:00,  3.53it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_8:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_8: 100%|██████████| 1/1 [00:00<00:00,  3.52it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_9:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_9: 100%|██████████| 1/1 [00:00<00:00,  3.45it/s][A
-                                                                                          [A
-psd_analysis:test_test_balanced_global:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_balanced_global: 100%|██████████| 1/1 [00:00<00:00,  3.28it/s][A
-                                                                                     [A
-psd_analysis:test_test_distribution_global:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_distribution_global: 100%|██████████| 1/1 [00:00<00:00,  3.18it/s][A
-                                                                                         [A
-psd_analysis:test_test_same_label_label_0:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_0: 100%|██████████| 1/1 [00:00<00:00,  3.57it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_1:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_1: 100%|██████████| 1/1 [00:00<00:00,  3.53it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_2:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_2: 100%|██████████| 1/1 [00:00<00:00,  2.57it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_3:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_3: 100%|██████████| 1/1 [00:00<00:00,  3.57it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_4:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_4: 100%|██████████| 1/1 [00:00<00:00,  3.55it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_5:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_5: 100%|██████████| 1/1 [00:00<00:00,  3.57it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_6:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_6: 100%|██████████| 1/1 [00:00<00:00,  3.57it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_7:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_7: 100%|██████████| 1/1 [00:00<00:00,  3.58it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_8:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_8: 100%|██████████| 1/1 [00:00<00:00,  3.57it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_9:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_9: 100%|██████████| 1/1 [00:00<00:00,  3.53it/s][A
-                                                                                        [Apsd_analysis:checkpoints:  13%|█▎        | 4/30 [05:18<34:23, 79.38s/it]
-psd_analysis:train_train_balanced_global:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_balanced_global: 100%|██████████| 1/1 [00:00<00:00,  2.89it/s][A
-                                                                                       [A
-psd_analysis:train_train_distribution_global:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_distribution_global: 100%|██████████| 1/1 [00:00<00:00,  3.04it/s][A
-                                                                                           [A
-psd_analysis:train_train_same_label_label_0:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_0: 100%|██████████| 1/1 [00:00<00:00,  3.51it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_1:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_1: 100%|██████████| 1/1 [00:00<00:00,  3.51it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_2:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_2: 100%|██████████| 1/1 [00:00<00:00,  3.54it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_3:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_3: 100%|██████████| 1/1 [00:00<00:00,  3.55it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_4:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_4: 100%|██████████| 1/1 [00:00<00:00,  3.55it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_5:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_5: 100%|██████████| 1/1 [00:00<00:00,  3.55it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_6:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_6: 100%|██████████| 1/1 [00:00<00:00,  3.54it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_7:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_7: 100%|██████████| 1/1 [00:00<00:00,  3.55it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_8:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_8: 100%|██████████| 1/1 [00:00<00:00,  3.55it/s][A
-                                                                                          [A
-psd_analysis:train_train_same_label_label_9:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:train_train_same_label_label_9: 100%|██████████| 1/1 [00:00<00:00,  3.50it/s][A
-                                                                                          [A
-psd_analysis:test_test_balanced_global:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_balanced_global: 100%|██████████| 1/1 [00:00<00:00,  2.83it/s][A
-                                                                                     [A
-psd_analysis:test_test_distribution_global:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_distribution_global: 100%|██████████| 1/1 [00:00<00:00,  3.17it/s][A
-                                                                                         [A
-psd_analysis:test_test_same_label_label_0:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_0: 100%|██████████| 1/1 [00:00<00:00,  2.53it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_1:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_1: 100%|██████████| 1/1 [00:00<00:00,  3.55it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_2:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_2: 100%|██████████| 1/1 [00:00<00:00,  3.54it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_3:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_3: 100%|██████████| 1/1 [00:00<00:00,  3.49it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_4:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_4: 100%|██████████| 1/1 [00:00<00:00,  3.58it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_5:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_5: 100%|██████████| 1/1 [00:00<00:00,  3.54it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_6:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_6: 100%|██████████| 1/1 [00:00<00:00,  3.59it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_7:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_7: 100%|██████████| 1/1 [00:00<00:00,  3.59it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_8:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_8: 100%|██████████| 1/1 [00:00<00:00,  3.58it/s][A
-                                                                                        [A
-psd_analysis:test_test_same_label_label_9:   0%|          | 0/1 [00:00<?, ?it/s][A
-psd_analysis:test_test_same_label_label_9: 100%|██████████| 1/1 [00:00<00:00,  3.58it/s][A
-                                                                                        [A                                                                        Traceback (most recent call last):
-  File "/home/yongokhan/바탕화면/psd/src/psd_analysis.py", line 1689, in <module>
-    raise SystemExit(main())
-  File "/home/yongokhan/바탕화면/psd/src/patch_overlays/runtime_patch.py", line 566, in main_patched
-    g['_write_layer_rows'](checkpoint_dir, family_rows, manifest_rows=manifest_rows, manifest_base=checkpoint_base, artifact_name='analysis_curve')
-  File "/home/yongokhan/바탕화면/psd/src/psd_analysis.py", line 1012, in _write_layer_rows
-    _write_rows_to_dir(root_dir, group_rows, manifest_rows=manifest_rows, manifest_base=manifest_base, artifact_name=artifact_name)
-  File "/home/yongokhan/바탕화면/psd/src/psd_analysis.py", line 994, in _write_rows_to_dir
-    write_common_csv(out_path, group_rows)
-  File "/home/yongokhan/바탕화면/psd/src/util/csv_schema.py", line 179, in write_common_csv
-    with path.open('w', newline='', encoding='utf-8') as handle:
-  File "/home/yongokhan/miniconda3/envs/snn/lib/python3.10/pathlib.py", line 1119, in open
-    return self._accessor.open(self, mode, buffering, encoding, errors,
-FileNotFoundError: [Errno 2] No such file or directory: '/home/yongokhan/바탕화면/psd/result/ddp_train_scenario/00_soft_fixed/s-mnist_lif_soft_fixed/psd_analysis/checkpoint_epoch_000005/layers/layer_003__layer_03/analysis_curve/analysis_curve__epoch_5__layer_3__test_test_same_label_label_3__hidden__spike__psd_exact__median__centered__db.csv'

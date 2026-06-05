@@ -84,10 +84,23 @@ def _ensure_snntorch_stub() -> None:
     sys.modules['snntorch.surrogate'] = surrogate_module
 
 
+def _first_existing_dir(*candidates: Path) -> Path:
+    """Return the first existing origin directory among canonical/fallback paths."""
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    joined = ', '.join(str(path) for path in candidates)
+    raise FileNotFoundError(f'Could not locate any supported origin directory: {joined}')
+
+
 def load_dh_snn_modules() -> tuple[types.ModuleType, types.ModuleType, types.ModuleType]:
     """Load DH-SNN origin modules from the released s-MNIST implementation."""
 
-    smnist_root = _ORIGIN_NEURON_ROOT / 'Temporal dendritic heterogeneity incorporated with spiking neural networks for learning multi-timescale dynamics' / 's-mnist'
+    smnist_root = _first_existing_dir(
+        _ORIGIN_NEURON_ROOT / 'DH-SNN' / 's-mnist',
+        _ORIGIN_NEURON_ROOT / 'Temporal dendritic heterogeneity incorporated with spiking neural networks for learning multi-timescale dynamics' / 's-mnist',
+    )
     extra = [smnist_root]
     neuron = _load_module('origin_dh_snn_spike_neuron', smnist_root / 'SNN_layers' / 'spike_neuron.py', extra_sys_paths=extra)
     dense = _load_module('origin_dh_snn_spike_dense', smnist_root / 'SNN_layers' / 'spike_dense.py', extra_sys_paths=extra)
@@ -96,15 +109,23 @@ def load_dh_snn_modules() -> tuple[types.ModuleType, types.ModuleType, types.Mod
 
 
 def load_tc_lif_module() -> types.ModuleType:
-    """Load tc lif module."""
-    smnist_root = _ORIGIN_NEURON_ROOT / 'TC-LIF A Two-Compartment Spiking Neuron Model for Long-Term Sequential Modelling' / 'MNIST'
+    """Load the TC-LIF author module from the checked-in origin tree."""
+
+    smnist_root = _first_existing_dir(
+        _ORIGIN_NEURON_ROOT / 'TC-LIF' / 'MNIST',
+        _ORIGIN_NEURON_ROOT / 'TC-LIF A Two-Compartment Spiking Neuron Model for Long-Term Sequential Modelling' / 'MNIST',
+    )
     return _load_module('origin_tc_lif', smnist_root / 'spiking_neuron' / 'TCLIF.py', extra_sys_paths=[smnist_root])
 
 
 def load_ts_lif_module() -> types.ModuleType:
-    """Load ts lif module."""
+    """Load the TS-LIF author module from the checked-in origin tree."""
+
     _ensure_snntorch_stub()
-    ts_root = _ORIGIN_NEURON_ROOT / 'TS-LIF A TEMPORAL SEGMENT SPIKING NEURON NETWORK FOR TIME SERIES FORECASTING'
+    ts_root = _first_existing_dir(
+        _ORIGIN_NEURON_ROOT / 'TS-LIF',
+        _ORIGIN_NEURON_ROOT / 'TS-LIF A TEMPORAL SEGMENT SPIKING NEURON NETWORK FOR TIME SERIES FORECASTING',
+    )
     seq_root = ts_root / 'SeqSNN'
     network_root = seq_root / 'network'
     snn_root = network_root / 'snn'
@@ -122,8 +143,12 @@ def load_ts_lif_module() -> types.ModuleType:
 
 
 def load_d_rf_module() -> types.ModuleType:
-    """Load d rf module."""
-    drf_root = _ORIGIN_NEURON_ROOT / 'Dendritic Resonate-and-Fire Neuron for Effective and Efficient Long Sequence Modeling'
+    """Load the D-RF author module from the checked-in origin tree."""
+
+    drf_root = _first_existing_dir(
+        _ORIGIN_NEURON_ROOT / 'D-RF',
+        _ORIGIN_NEURON_ROOT / 'Dendritic Resonate-and-Fire Neuron for Effective and Efficient Long Sequence Modeling',
+    )
     return _load_module('origin_d_rf_layers', drf_root / 'models' / 'layers.py', extra_sys_paths=[drf_root])
 
 

@@ -15,13 +15,15 @@ from src.signal.psd_utils import (
     exact_periodogram_from_maps,
     exact_spectrogram_from_maps,
     power_to_db,
+    area_normalize_power,
+    apply_power_value_scale,
 )
 
 
 _REDUCERS = ('mean', 'median')
 _CENTERINGS = ('raw', 'cen')
 _CENTERING_ALIASES = {'raw': 'raw', 'cen': 'cen', 'centered': 'cen'}
-_SCALES = ('raw', 'db')
+_SCALES = ('raw', 'db', 'area')
 _CURVE_EXTRACTORS = ('psd_exact',)
 _CURVE_SPACES = ('exact', 'userbin')
 _CURVE_DISTANCE_METRICS = ('centered_l2', 'diff_l2')
@@ -77,10 +79,12 @@ def _variant_maps(signal_maps: torch.Tensor, centering: str) -> torch.Tensor:
 
 
 def _apply_curve_scale(curves: torch.Tensor, scale: str) -> torch.Tensor:
-    token = str(scale).strip().lower()
+    token = str(scale).strip().lower().replace('-', '_')
+    aliases = {'linear': 'raw', 'log': 'db', 'area_norm': 'area', 'area_normalized': 'area', 'normalized': 'area'}
+    token = aliases.get(token, token)
     if token not in _SCALES:
-        raise ValueError(f'Unsupported curve scale: {scale!r}.')
-    return curves if token == 'raw' else power_to_db(curves)
+        raise ValueError(f'Unsupported curve scale: {scale!r}. Allowed values: raw, db, area.')
+    return apply_power_value_scale(curves, token, axis=-1)
 
 
 def _normalize_curve_distance_metric(metric: str) -> str:
@@ -161,17 +165,19 @@ def _representative_psd_values_from_maps(
     centering: str,
     curve_space: str,
     userbin_edges: Sequence[float] | None,
+    userbin_reducer: str = 'mean',
+    signal_window: str | bool | None = 'hann',
 ) -> torch.Tensor:
     maps = _ensure_maps(signal_maps)
     variant_maps = _variant_maps(maps, centering)
-    freqs, exact_psd = exact_periodogram_from_maps(variant_maps)
+    freqs, exact_psd = exact_periodogram_from_maps(variant_maps, signal_window=signal_window)
     curve_space_token = str(curve_space).strip().lower()
     if curve_space_token == 'exact':
         return exact_psd.real
     if curve_space_token == 'userbin':
         if userbin_edges is None:
             raise ValueError('userbin_edges must be provided when curve_space=userbin.')
-        userbin_psd, _edges, _centers = aggregate_userbins_torch(exact_psd, freqs, userbin_edges, axis=2)
+        userbin_psd, _edges, _centers = aggregate_userbins_torch(exact_psd, freqs, userbin_edges, axis=2, reducer=userbin_reducer)
         return userbin_psd.real
     raise ValueError(f'Unsupported curve_space: {curve_space!r}. Allowed values: {", ".join(_CURVE_SPACES)}.')
 
@@ -184,6 +190,8 @@ def representative_psd_curve_stack_from_maps_torch(
     scale: str = 'raw',
     curve_space: str = 'exact',
     userbin_edges: Sequence[float] | None = None,
+    userbin_reducer: str = 'mean',
+    signal_window: str | bool | None = 'hann',
 ) -> torch.Tensor:
     """Return one sample-wise representative PSD-curve stack.
 
@@ -196,6 +204,8 @@ def representative_psd_curve_stack_from_maps_torch(
         centering=centering,
         curve_space=curve_space,
         userbin_edges=userbin_edges,
+        userbin_reducer=userbin_reducer,
+        signal_window=signal_window,
     )
     curves = representative_curve_stack_from_values_torch(values, reducer=reducer)
     return _apply_curve_scale(curves, scale)
@@ -209,6 +219,8 @@ def representative_psd_curve_from_maps_torch(
     scale: str = 'raw',
     curve_space: str = 'exact',
     userbin_edges: Sequence[float] | None = None,
+    userbin_reducer: str = 'mean',
+    signal_window: str | bool | None = 'hann',
 ) -> torch.Tensor:
     """Return one batch-mean representative PSD curve from row signals."""
 
@@ -217,6 +229,8 @@ def representative_psd_curve_from_maps_torch(
         centering=centering,
         curve_space=curve_space,
         userbin_edges=userbin_edges,
+        userbin_reducer=userbin_reducer,
+        signal_window=signal_window,
     )
     batch_curve = representative_curve_stack_from_values_torch(values, reducer=reducer).mean(dim=0)
     return _apply_curve_scale(batch_curve, scale)
@@ -230,6 +244,8 @@ def representative_psd_minibatch_curve_from_maps_torch(
     scale: str = 'raw',
     curve_space: str = 'exact',
     userbin_edges: Sequence[float] | None = None,
+    userbin_reducer: str = 'mean',
+    signal_window: str | bool | None = 'hann',
 ) -> torch.Tensor:
     """Return the minibatch-level PSD curve used by training regularization.
 
@@ -242,6 +258,8 @@ def representative_psd_minibatch_curve_from_maps_torch(
         centering=centering,
         curve_space=curve_space,
         userbin_edges=userbin_edges,
+        userbin_reducer=userbin_reducer,
+        signal_window=signal_window,
     )
     batch_curve = representative_curve_stack_from_values_torch(values, reducer=reducer).mean(dim=0)
     return _apply_curve_scale(batch_curve, scale)
@@ -255,6 +273,7 @@ def representative_psd_curves_from_maps_torch(
     scale: str = 'raw',
     curve_space: str = 'exact',
     userbin_edges: Sequence[float] | None = None,
+    signal_window: str | bool | None = 'hann',
 ) -> dict[str, torch.Tensor]:
     """Return one reducer->curve mapping for PSD-first representative curves."""
 
@@ -266,6 +285,7 @@ def representative_psd_curves_from_maps_torch(
             scale=scale,
             curve_space=curve_space,
             userbin_edges=userbin_edges,
+            signal_window=signal_window,
         )
         for reducer in reducers
     }
@@ -292,6 +312,7 @@ def compute_family_spectral_summary(
     userbin_edges: Sequence[float] | None = None,
     include_spectrogram: bool = True,
     include_userbin: bool = False,
+    signal_window: str | bool | None = 'hann',
 ) -> dict[str, Any]:
     """Compute the core PSD-first family summary on the active device."""
 
@@ -307,6 +328,7 @@ def compute_family_spectral_summary(
         'representative_reducers': list(_REDUCERS),
         'curve_extractors': ['psd_exact'],
         'spectrogram_saved': bool(include_spectrogram),
+        'signal_window': str(signal_window),
         'representative': {reducer: {} for reducer in _REDUCERS},
         'dispersion': {},
     }
@@ -316,7 +338,7 @@ def compute_family_spectral_summary(
 
     for centering in _CENTERINGS:
         variant_maps = _variant_maps(maps, centering)
-        freqs, exact_psd = exact_periodogram_from_maps(variant_maps)
+        freqs, exact_psd = exact_periodogram_from_maps(variant_maps, signal_window=signal_window)
         if freq_ref is None:
             freq_ref = freqs
 
@@ -333,7 +355,7 @@ def compute_family_spectral_summary(
             summary['dispersion'].setdefault('psd_exact', {}).setdefault('variance', {}).setdefault(scale, {})[centering] = _to_numpy(_apply_curve_scale(var_exact_raw, scale))
             summary['dispersion'].setdefault('psd_exact', {}).setdefault('mad', {}).setdefault(scale, {})[centering] = _to_numpy(_apply_curve_scale(mad_exact_raw, scale))
         if include_spectrogram:
-            spec_freqs, frame_centers, exact_spec = exact_spectrogram_from_maps(variant_maps, window=window, overlap=overlap)
+            spec_freqs, frame_centers, exact_spec = exact_spectrogram_from_maps(variant_maps, window=window, overlap=overlap, signal_window=signal_window)
             if frame_axis_ref is None:
                 frame_axis_ref = frame_centers
             for reducer in _REDUCERS:

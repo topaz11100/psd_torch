@@ -22,8 +22,11 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
-from src.util.csv_schema import common_row, write_common_csv
+from src.util.csv_schema import common_row, write_common_csv, write_manifest_yaml
+from src.util.config import compact_yaml, load_structured
+from src.util.config import load_structured
 from src.util.config_cli import parse_args_with_config
+from src.util.paths import timestamped_output_root
 
 
 SOURCE_PROGRAM = 'dataset_fft'
@@ -65,8 +68,11 @@ def _load_runtime_dependencies() -> None:
     seed_everything = _seed_everything
 
 
-def _load_json_light(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
+def _load_structured_light(path: Path) -> dict[str, Any]:
+    payload = load_structured(path)
+    if not isinstance(payload, dict):
+        raise ValueError(f'구조화 파일 루트는 mapping이어야 합니다: {path}')
+    return dict(payload)
 CATEGORY = 'dataset_fft'
 VARIANTS = ('raw', 'centered')
 SCALES = ('raw', 'db')
@@ -81,7 +87,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--gpu_index', required=True, type=int)
     parser.add_argument('--seed', required=True, type=int)
     parser.add_argument('--num_workers', type=int, default=0)
-    parser.add_argument('--config', default=None, help='JSON 설정 파일 경로(.json)')
+    parser.add_argument('--config', default=None, help='YAML 설정 파일 경로(.yaml)')
+    parser.add_argument('--run_timestamp', default=None, help='결과 output_root 아래에 생성할 실행시각 폴더명 suffix. 생략 시 Asia/Seoul 현재시각을 사용한다.')
+    parser.add_argument('--timestamped_output', default='true', help='true이면 output_root 아래 실행시각 폴더를 자동 생성한다. false이면 기존 경로에 직접 저장한다.')
     return parser
 
 
@@ -108,9 +116,9 @@ def _axis_metadata_columns(manifest: Mapping[str, Any], *, psd_axis_kind: str) -
         'prep_profile': str(manifest.get('prep_profile', manifest.get('psd_axis_kind', psd_axis_kind))),
         'psd_axis_kind': str(manifest.get('psd_axis_kind', psd_axis_kind)),
         'psd_time_axis': manifest.get('psd_time_axis', ''),
-        'psd_row_axes': json.dumps(manifest.get('psd_row_axes', []), ensure_ascii=False),
+        'psd_row_axes': compact_yaml(manifest.get('psd_row_axes', [])),
         'psd_flatten_rule': str(manifest.get('psd_flatten_rule', '')),
-        'psd_logical_shape': json.dumps(logical_shape if logical_shape is not None else [], ensure_ascii=False),
+        'psd_logical_shape': compact_yaml(logical_shape if logical_shape is not None else []),
         'static_repeat_T': '' if static_repeat_t in (None, '') else int(static_repeat_t),
     }
 
@@ -225,10 +233,22 @@ def _fft_rows(*, base: Mapping[str, Any], fft_values: torch.Tensor, variant: str
     return rows
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = build_arg_parser()
-    args = parse_args_with_config(parser, argv=argv, stage_key='dataset_fft')
-    _load_runtime_dependencies()
+def _dataset_tokens(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple)):
+        tokens = [str(v).strip() for v in value if str(v).strip()]
+    else:
+        tokens = [str(value).strip()]
+    if not tokens:
+        raise ValueError('dataset 배열은 비어 있을 수 없습니다.')
+    return tokens
+
+
+def _dataset_output_root(base_output_root: str | Path, dataset_token: str, *, multi_dataset: bool) -> Path:
+    root = Path(base_output_root).expanduser().resolve()
+    return root / str(dataset_token) if multi_dataset else root
+
+
+def _run_dataset_fft(args: argparse.Namespace) -> dict[str, Any]:
     if int(args.batch_size) < 1:
         raise ValueError('--batch_size는 1 이상이어야 합니다.')
     if int(args.num_workers) < 0:
@@ -238,7 +258,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     device = _require_cuda_device(int(args.gpu_index))
     bundle = resolve_dataset_bundle(str(args.dataset), prep_root=str(args.prep_root))
 
-    manifest = _load_json_light(Path(bundle.manifest_path))
+    manifest = _load_structured_light(Path(bundle.manifest_path))
     if not isinstance(manifest, dict):
         raise ValueError(f'Prepared manifest 형식이 올바르지 않습니다: {bundle.manifest_path}')
     _validate_axis_metadata(manifest)
@@ -258,9 +278,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     fft_rows: list[dict[str, Any]] = []
     manifest_rows: list[dict[str, Any]] = []
 
-    for split_name, split_dataset in tqdm((('train', bundle.train_dataset), ('test', bundle.test_dataset)), desc='dataset_fft split', leave=False):
+    for split_name, split_dataset in tqdm((('train', bundle.train_dataset), ('test', bundle.test_dataset)), desc=f'dataset_fft {bundle.dataset_name} split', leave=False):
         analysis_dataset = dataset_for_view(split_dataset, bundle.psd_view_name)
-        for scope, probe_family, label, subset in tqdm(list(_probe_subsets(analysis_dataset, split_name=split_name, seed=seed)), desc=f'dataset_fft {split_name} scope', leave=False):
+        for scope, probe_family, label, subset in tqdm(list(_probe_subsets(analysis_dataset, split_name=split_name, seed=seed)), desc=f'dataset_fft {bundle.dataset_name} {split_name} scope', leave=False):
             accumulators: dict[str, torch.Tensor | None] = {v: None for v in VARIANTS}
             sample_count = 0
             loader = make_loader(
@@ -302,7 +322,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                     fft_rows.extend(_fft_rows(base=base, fft_values=_scaled(mean_power, scale), variant=variant, scale=scale))
 
     _write_grouped(output_root, fft_rows, manifest_rows=manifest_rows, manifest_base=common_base, artifact_name=CATEGORY)
-    write_common_csv(output_root / 'dataset_fft_manifest.csv', manifest_rows)
+    manifest_path = output_root / 'dataset_fft_manifest.yaml'
+    write_manifest_yaml(manifest_path, manifest_rows)
+    return {'dataset': str(bundle.dataset_name), 'output_root': str(output_root), 'manifest': str(manifest_path)}
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_arg_parser()
+    args = parse_args_with_config(parser, argv=argv, stage_key='dataset_fft')
+    _load_runtime_dependencies()
+    dataset_tokens = _dataset_tokens(args.dataset)
+    base_output_root = timestamped_output_root(args.output_root, run_timestamp=getattr(args, 'run_timestamp', None), prefix=SOURCE_PROGRAM, enabled=getattr(args, 'timestamped_output', True))
+    results: list[dict[str, Any]] = []
+    for index, dataset_token in enumerate(dataset_tokens, start=1):
+        print(f'[dataset_fft] 시작 {index}/{len(dataset_tokens)} dataset={dataset_token}', flush=True)
+        run_args = argparse.Namespace(**vars(args))
+        run_args.dataset = dataset_token
+        run_args.output_root = str(_dataset_output_root(base_output_root, dataset_token, multi_dataset=len(dataset_tokens) > 1))
+        results.append(_run_dataset_fft(run_args))
+        print(f'[dataset_fft] 완료 {index}/{len(dataset_tokens)} dataset={dataset_token}', flush=True)
+    print(json.dumps({'status': 'ok', 'source_program': SOURCE_PROGRAM, 'outputs': results}, sort_keys=True))
     return 0
 
 

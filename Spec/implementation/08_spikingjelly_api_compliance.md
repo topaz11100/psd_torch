@@ -60,11 +60,12 @@ current source contract. The allowed values are:
 
 `alpha_clip_edges` and `w_clip_edges` use a three-dimensional schema:
 
-```json
-"alpha_clip_edges": [
-  [[0.10, 0.30], [0.30, 0.70]],
-  [[0.05, 0.25], [0.25, 0.50]]
-]
+```yaml
+alpha_clip_edges:
+  - - [0.10, 0.30]
+    - [0.30, 0.70]
+  - - [0.05, 0.25]
+    - [0.25, 0.50]
 ```
 
 The semantic index is `clip_edges[layer][group] = [lower, upper]`. The bounds are

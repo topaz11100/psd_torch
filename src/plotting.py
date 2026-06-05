@@ -31,8 +31,8 @@ External output
 
 Example
 python plot_psd_batch_recursive.py \
-  --input /home/yongokhan/바탕화면/psd_outputs/psd_analysis/run1/batch_0001 \
-  --output /home/yongokhan/바탕화면/psd_outputs/plots/run1/batch_0001 \
+  --input /home/yongokhan/workspace/result/psd_analysis/run1/batch_0001 \
+  --output /home/yongokhan/workspace/result/plots/run1/batch_0001 \
   --overwrite
 """
 
@@ -63,7 +63,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
+from src.util.config import save_yaml
 from src.util.config_cli import parse_args_with_config
+from src.util.paths import timestamped_output_root
 
 
 FIGSIZE = (14, 4)          # 3.5:1, matching the requested/existing style
@@ -72,6 +74,7 @@ TITLE_SIZE = 26
 LABEL_SIZE = 21
 TICK_SIZE = 19
 DPI = 300
+SOURCE_PROGRAM = 'plotting'
 
 PSD_CATEGORIES = {
     "analysis_curve",
@@ -173,11 +176,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Overwrite existing figure files.",
     )
-    parser.add_argument('--config', default=None, help='JSON 설정 파일 경로(.json)')
+    parser.add_argument('--config', default=None, help='YAML 설정 파일 경로(.yaml)')
+    parser.add_argument('--run_timestamp', default=None, help='결과 output_root 아래에 생성할 실행시각 폴더명 suffix. 생략 시 Asia/Seoul 현재시각을 사용한다.')
+    parser.add_argument('--timestamped_output', default='true', help='true이면 output_root 아래 실행시각 폴더를 자동 생성한다. false이면 기존 경로에 직접 저장한다.')
     parser.add_argument(
         "--manifest_name",
-        default="recursive_plot_manifest.csv",
-        help="Manifest CSV filename to write under output_root.",
+        default="recursive_plot_manifest.yaml",
+        help="Manifest YAML filename to write under output_root.",
     )
     parser.add_argument(
         "--include_filter_count",
@@ -986,22 +991,18 @@ def _render_layer_dispersion_artifact(
 
 
 def _write_manifest(path: Path, rows: Sequence[ManifestRow]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        fieldnames = ["input_csv_path", "output_figure_path", "category", "status", "message", "render_seconds"]
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(
-                {
-                    "input_csv_path": row.input_csv_path,
-                    "output_figure_path": row.output_figure_path,
-                    "category": row.category,
-                    "status": row.status,
-                    "message": row.message,
-                    "render_seconds": row.render_seconds,
-                }
-            )
+    payload_rows = [
+        {
+            "input_csv_path": row.input_csv_path,
+            "output_figure_path": row.output_figure_path,
+            "category": row.category,
+            "status": row.status,
+            "message": row.message,
+            "render_seconds": row.render_seconds,
+        }
+        for row in rows
+    ]
+    save_yaml(path, {"source_program": "plotting", "rows": payload_rows})
 
 
 def _load_artifacts(csv_files: Sequence[Path]) -> tuple[list[CsvArtifact], list[ManifestRow]]:
@@ -1040,10 +1041,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.output and args.output_root:
         parser.error("use only one of --output or --output_root, not both.")
     output_arg = args.output if args.output is not None else args.output_root
-    output_root = Path(output_arg).expanduser().resolve() if output_arg else _default_output_root(input_path)
+    output_base = Path(output_arg).expanduser().resolve() if output_arg else _default_output_root(input_path)
+    output_root = timestamped_output_root(output_base, run_timestamp=getattr(args, 'run_timestamp', None), prefix='plotting', enabled=getattr(args, 'timestamped_output', True))
     manifest_name = str(args.manifest_name).strip()
-    if not manifest_name or Path(manifest_name).name != manifest_name or not manifest_name.endswith(".csv"):
-        parser.error("--manifest_name must be a CSV filename without directory separators.")
+    if not manifest_name or Path(manifest_name).name != manifest_name or not manifest_name.endswith((".yaml", ".yml")):
+        parser.error("--manifest_name must be a YAML filename without directory separators.")
 
     output_root.mkdir(parents=True, exist_ok=True)
     csv_files = _discover_csv_files(input_path, output_root, manifest_name)

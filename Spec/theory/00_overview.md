@@ -1,25 +1,38 @@
-# 전체 이론 개요
+# Theory Overview
 
-## 목적
+이 프로젝트의 과학적 질문은 다음과 같다.
 
-프로젝트는 입력 데이터와 SNN 내부 신호의 시간 구조를 분리해 분석한다. 입력 데이터는 데이터셋 자체의 성질이고, hidden/output trace는 모델이 학습 과정에서 만든 동역학이다. 따라서 두 분석은 같은 FFT/PSD 연산을 쓰더라도 같은 stage에서 섞지 않는다.
+> SNN의 시간 동역학은 입력 데이터의 주파수 구조를 어떤 방식으로 보존, 증폭, 변형 또는 소거하는가?
 
-## 단계 분리
+이를 위해 각 layer의 membrane/spike trace를 시간 신호로 보고, PSD와 2D FFT를 통해 신호의 spectral profile을 비교한다. 모델은 단순한 classifier가 아니라 시간-주파수 변환기를 내재한 동역학 시스템으로 취급한다.
 
-```text
-raw data -> prepared bundle -> dataset signal analysis -> training -> model signal analysis -> plotting
-```
+## 기본 notation
 
-- `data_prep`: 원본 데이터를 학습/분석 가능한 prepared bundle로 변환한다.
-- `dataset_psd`, `dataset_fft`: 입력 데이터 자체의 신호 구조를 분석한다.
-- `model_training`: 모델을 학습하고 checkpoint를 저장한다.
-- `psd_analysis`, `element_psd`, `2d_fft_analysis`: checkpoint를 복원해 hidden/output trace만 분석한다.
-- `plotting`: 이미 저장된 CSV를 그림으로 변환한다.
+입력 batch를 \(X\), layer \(\ell\)의 trace를 \(Y^{(\ell)}\)라 둔다.
 
-## input 분석 정책
+\[
+X \in \mathbb{R}^{B\times T\times D}, \qquad
+Y^{(\ell)} \in \mathbb{R}^{B\times T\times C_\ell}.
+\]
 
-모델 분석에서 input 레이어를 분석하면 입력 데이터의 성질과 모델 내부 표현의 성질이 같은 artifact 공간에 섞인다. 따라서 모델 분석 stage는 input을 수집하지 않는다. 입력 데이터 신호가 필요하면 dataset 분석 stage를 실행한다.
+각 neuron/channel \(c\)의 시간 신호는
 
-## 비교 가능성
+\[
+y^{(\ell)}_{b,c}(t), \qquad t=0,1,\ldots,T-1.
+\]
 
-모든 거리는 같은 dataset, 같은 probe scope, 같은 layer/series 의미, 같은 frequency axis, 같은 scale/centering 정책을 공유할 때만 해석 가능하다. 단순히 CSV column 수가 같다는 이유로 비교하지 않는다.
+PSD는 다음 one-sided periodogram으로 정의한다.
+
+\[
+P^{(\ell)}_{b,c}(\omega_k)=\frac{1}{T}\left|\sum_{t=0}^{T-1} y^{(\ell)}_{b,c}(t)e^{-i2\pi kt/T}\right|^2.
+\]
+
+대표곡선은 sample과 channel 축을 줄여 layer-level spectral signature를 만든다.
+
+## 해석 목표
+
+- 입력과 hidden layer의 PSD shape distance를 측정한다.
+- 인접 layer 사이의 spectral drift를 측정한다.
+- fixed PCA basis로 epoch별 곡선 변화를 같은 좌표계에서 비교한다.
+- `dataset_fft`로 데이터 자체의 spectral baseline을 따로 산출한다.
+- `element_psd`, `element_fft`, `2d_fft_analysis`로 aggregate PSD가 놓치는 neuron별/공간별 이질성을 확인한다.

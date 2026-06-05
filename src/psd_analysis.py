@@ -24,9 +24,12 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
-from src.util.csv_schema import common_row, write_common_csv
+from src.util.csv_schema import common_row, write_common_csv, write_manifest_yaml
+from src.util.config import compact_yaml, load_structured
 from src.util.config_cli import parse_args_with_config
+from src.util.paths import timestamped_output_root
 from src.util.cli_common import parse_bool_token
+from src.util.checkpoints import checkpoint_state_dict, load_state_dict_compatible, load_torch_checkpoint
 
 
 SOURCE_PROGRAM = 'psd_analysis'
@@ -36,11 +39,18 @@ PCA_ANALYSIS_SCHEMA_VERSION = 1
 def _parse_bool_config_value(value: Any, *, default: bool) -> bool:
     return parse_bool_token(value, default=default)
 
+def _normalize_signal_window_arg(value: Any) -> str:
+    from src.signal.psd_utils import normalize_signal_window
+    return normalize_signal_window(value)
 
-def _load_json_light(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
+
+def _load_structured_light(path: Path) -> dict[str, Any]:
+    payload = load_structured(path)
+    if not isinstance(payload, dict):
+        raise ValueError(f'구조화 파일 루트는 mapping이어야 합니다: {path}')
+    return dict(payload)
 ALL_CURVE_EXTRACTORS = ('psd_exact',)
-ALL_VALUE_SCALES = ('raw', 'db')
+ALL_VALUE_SCALES = ('raw', 'db', 'area')
 LOW_VRAM = False
 
 
@@ -50,7 +60,7 @@ def _load_runtime_dependencies() -> None:
     global np, torch, tqdm, seed_everything
     global canonicalize_model_input_batch
     global dataset_for_view, make_loader, resolve_dataset_bundle, select_training_view_for_model
-    global ModelSpec, canonicalize_model_token, build_snn_classifier, build_readout, canonicalize_readout_mode
+    global ModelSpec, canonicalize_model_token, model_spec_from_config_fields, parse_v_threshold_setting, build_snn_classifier, build_readout, canonicalize_readout_mode
     global compute_family_spectral_summary, curve_axis_from_summary, curve_pointwise_distance
     global pair_distance_from_summaries, representative_curve_from_summary
     global trace_tensor_to_channel_major_maps, pca_dim_from_cli_vector, compute_fixed_pca_basis, apply_fixed_pca_basis
@@ -62,7 +72,7 @@ def _load_runtime_dependencies() -> None:
     from src.util.random import seed_everything as _seed_everything
     from src.data.base import canonicalize_model_input_batch as _canonicalize_model_input_batch
     from src.data.registry import dataset_for_view as _dataset_for_view, make_loader as _make_loader, resolve_dataset_bundle as _resolve_dataset_bundle, select_training_view_for_model as _select_training_view_for_model
-    from src.model.model_registry import ModelSpec as _ModelSpec, canonicalize_model_token as _canonicalize_model_token
+    from src.model.model_registry import ModelSpec as _ModelSpec, canonicalize_model_token as _canonicalize_model_token, model_spec_from_config_fields as _model_spec_from_config_fields, parse_v_threshold_setting as _parse_v_threshold_setting
     from src.model.snn_builder import build_snn_classifier as _build_snn_classifier
     from src.readout.readout import build_readout as _build_readout, canonicalize_readout_mode as _canonicalize_readout_mode
     from src.signal.family_spectral_analysis import compute_family_spectral_summary as _compute_family_spectral_summary, curve_axis_from_summary as _curve_axis_from_summary, curve_pointwise_distance as _curve_pointwise_distance, pair_distance_from_summaries as _pair_distance_from_summaries, representative_curve_from_summary as _representative_curve_from_summary
@@ -86,6 +96,8 @@ def _load_runtime_dependencies() -> None:
     select_training_view_for_model = _select_training_view_for_model
     ModelSpec = _ModelSpec
     canonicalize_model_token = _canonicalize_model_token
+    model_spec_from_config_fields = _model_spec_from_config_fields
+    parse_v_threshold_setting = _parse_v_threshold_setting
     build_snn_classifier = _build_snn_classifier
     build_readout = _build_readout
     canonicalize_readout_mode = _canonicalize_readout_mode
@@ -108,15 +120,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description='Checkpoint-only PSD analysis entrypoint.')
     parser.add_argument('--checkpoint', required=True, help='Single .pt checkpoint file or strict .pt-only checkpoint directory.')
     parser.add_argument('--dataset', required=True, help='Canonical dataset token stored in the checkpoint metadata.')
-    parser.add_argument('--prep_root', required=True, help='Prepared data root containing <dataset>/manifest.json.')
+    parser.add_argument('--prep_root', required=True, help='Prepared data root containing <dataset>/manifest.yaml.')
     parser.add_argument('--output_root', required=True, help='Root directory for analysis CSV outputs.')
     parser.add_argument('--anal_batch', required=True, type=int, help='Maximum samples per analysis forward pass.')
     parser.add_argument('--gpu_index', required=True, type=int, help='CUDA device index for analysis.')
     parser.add_argument('--enable_pairwise_dependency_appendix', action='store_true')
     parser.add_argument('--analysis_distance_metric', nargs='*', default=['centered_l2'], choices=('centered_l2', 'diff_l2'), help='PSD curve distance metrics to sweep for pair/layer shape distances.')
+    parser.add_argument('--signal_window', default='hann', choices=('hann','none'), help='PSD/FFT signal processing taper: hann or none. none disables the Hann window.')
     parser.add_argument('--seed', type=int, default=None)
     parser.add_argument('--num_workers', type=int, default=0)
-    parser.add_argument('--config', default=None, help='JSON 설정 파일 경로(.json)')
+    parser.add_argument('--config', default=None, help='YAML 설정 파일 경로(.yaml)')
+    parser.add_argument('--run_timestamp', default=None, help='결과 output_root 아래에 생성할 실행시각 폴더명 suffix. 생략 시 Asia/Seoul 현재시각을 사용한다.')
+    parser.add_argument('--timestamped_output', default='true', help='true이면 output_root 아래 실행시각 폴더를 자동 생성한다. false이면 기존 경로에 직접 저장한다.')
     parser.add_argument('--low_vram', type=int, default=0)
     parser.add_argument('--enable_pca_1d', default='false')
     parser.add_argument('--enable_pca_mimo', default='false')
@@ -124,22 +139,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--pca_min_train_accuracy', type=float, default=0.0)
     parser.add_argument('--pca_dim_per_layer', nargs='*', default=None)
     parser.add_argument('--psd_curve_tokens', nargs='*', default=None)
-    parser.add_argument('--analysis_userbin_edges', nargs='*', default=None)
-    parser.add_argument('--analysis_userbin_reducer', nargs='*', default=['mean'], choices=('mean', 'median', 'sum'))
-    parser.add_argument('--filter_alpha_userbin_edges', nargs='*', type=float, default=None)
-    parser.add_argument('--filter_alpha_userbin_count', type=int, default=10)
-    parser.add_argument('--filter_frequency_userbin_edges', nargs='*', type=float, default=None)
-    parser.add_argument('--filter_frequency_userbin_count', type=int, default=10)
-    parser.add_argument('--filter_damping_userbin_edges', nargs='*', type=float, default=None)
-    parser.add_argument('--filter_damping_userbin_count', type=int, default=10)
+    parser.add_argument('--signal_curve_space', default='exact', choices=('exact','userbin'))
+    parser.add_argument('--signal_curve_scale', default='raw', choices=('raw','db','area'))
+    parser.add_argument('--signal_curve_userbin_edges', nargs='*', default=None)
+    parser.add_argument('--signal_curve_userbin_reducer', nargs='*', default=['mean'], choices=('mean', 'median', 'sum'))
+    parser.add_argument('--parameter_alpha_bin_edges', nargs='*', type=float, default=None)
+    parser.add_argument('--parameter_alpha_bin_count', type=int, default=10)
+    parser.add_argument('--parameter_center_frequency_bin_edges', nargs='*', type=float, default=None)
+    parser.add_argument('--parameter_center_frequency_bin_count', type=int, default=10)
+    parser.add_argument('--parameter_damping_bin_edges', nargs='*', type=float, default=None)
+    parser.add_argument('--parameter_damping_bin_count', type=int, default=10)
+    parser.add_argument('--parameter_threshold_bin_edges', nargs='*', type=float, default=None)
+    parser.add_argument('--parameter_threshold_bin_count', type=int, default=10)
     return parser
 
 
 def _load_checkpoint(path: Path, *, map_location: str | torch.device = 'cpu') -> dict[str, Any]:
-    payload = torch.load(path, map_location=map_location)
-    if not isinstance(payload, dict):
-        raise ValueError(f'Checkpoint must load to a mapping: {path}')
-    return payload
+    return load_torch_checkpoint(path, map_location=map_location)
 
 
 def _checkpoint_epoch(payload: Mapping[str, Any], path: Path) -> tuple[int | None, str]:
@@ -233,9 +249,9 @@ def _resolve_bundle(
 
 
 def _manifest_dict(path: Path) -> dict[str, Any]:
-    payload = _load_json_light(path)
+    payload = _load_structured_light(path)
     if not isinstance(payload, dict):
-        raise ValueError(f'Prepared manifest must be a JSON object: {path}')
+        raise ValueError(f'Prepared manifest must be a mapping: {path}')
     return payload
 
 
@@ -256,7 +272,7 @@ def _json_metadata(value: Any) -> str:
         return ''
     if isinstance(value, str):
         return value
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return compact_yaml(value)
 
 
 def _axis_metadata_columns(manifest: Mapping[str, Any], *, psd_axis_kind: str) -> dict[str, str]:
@@ -274,17 +290,77 @@ def _axis_metadata_columns(manifest: Mapping[str, Any], *, psd_axis_kind: str) -
         'static_repeat_T': '' if static_repeat_T is None else str(static_repeat_T),
     }
 
-def _build_model_from_checkpoint(payload: Mapping[str, Any], *, device: torch.device):
-    model_token = str(payload.get('model_token') or '')
-    if not model_token:
-        raise ValueError('Checkpoint is missing model_token.')
-    spec = canonicalize_model_token(model_token)
+def _checkpoint_training_args(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    training_args = payload.get('training_args')
+    return training_args if isinstance(training_args, Mapping) else {}
+
+
+def _checkpoint_model_token(payload: Mapping[str, Any]) -> str:
+    training_args = _checkpoint_training_args(payload)
+    token = str(payload.get('model_token') or payload.get('model') or training_args.get('model') or '')
+    if not token:
+        raise ValueError('Checkpoint is missing model_token/model metadata.')
+    return token
+
+
+def _checkpoint_model_config(payload: Mapping[str, Any]) -> Mapping[str, Any]:
     model_config = payload.get('model_config')
+    if isinstance(model_config, Mapping):
+        return model_config
+    training_args = _checkpoint_training_args(payload)
+    nested = training_args.get('model_config')
+    if isinstance(nested, Mapping):
+        return nested
+    legacy = {
+        'input_dim': payload.get('input_dim') or training_args.get('input_dim'),
+        'sequence_length': payload.get('sequence_length') or training_args.get('sequence_length'),
+        'num_classes': payload.get('num_classes') or training_args.get('num_classes'),
+        'input_shape': payload.get('input_shape') or training_args.get('input_shape'),
+        'hidden_spec': payload.get('hidden_spec') or training_args.get('hidden_spec') or payload.get('arch_spec') or training_args.get('arch_spec'),
+        'arch_spec': payload.get('arch_spec') or training_args.get('arch_spec') or payload.get('hidden_spec') or training_args.get('hidden_spec'),
+        'v_th': payload.get('v_th') or training_args.get('v_th') or 1.0,
+    }
+    required = ('input_dim', 'sequence_length', 'num_classes')
+    if all(legacy.get(key) not in (None, '') for key in required):
+        return legacy
+    raise ValueError(
+        'Checkpoint is missing model_config and does not contain enough legacy '
+        'dimension metadata. Re-run model_training or repair the checkpoint with '
+        'input_dim, sequence_length, num_classes, model_token, and readout_mode.'
+    )
+
+
+def _checkpoint_readout_config(payload: Mapping[str, Any]) -> Mapping[str, Any]:
     readout_config = payload.get('readout_config')
-    if not isinstance(model_config, Mapping):
-        raise ValueError('Checkpoint model_config must be a mapping.')
-    if not isinstance(readout_config, Mapping):
-        raise ValueError('Checkpoint readout_config must be a mapping.')
+    if isinstance(readout_config, Mapping):
+        return readout_config
+    training_args = _checkpoint_training_args(payload)
+    mode = payload.get('readout_mode') or training_args.get('readout_mode') or training_args.get('readout')
+    model_config = payload.get('model_config') if isinstance(payload.get('model_config'), Mapping) else {}
+    num_classes = payload.get('num_classes') or training_args.get('num_classes') or model_config.get('num_classes')
+    sequence_length = payload.get('sequence_length') or training_args.get('sequence_length') or model_config.get('sequence_length')
+    if mode:
+        return {'mode': mode, 'readout_mode': mode, 'num_classes': num_classes, 'sequence_length': sequence_length}
+    raise ValueError('Checkpoint readout_config is missing and no legacy readout_mode is available.')
+
+
+def _build_model_from_checkpoint(payload: Mapping[str, Any], *, device: torch.device):
+    model_config = _checkpoint_model_config(payload)
+    training_args = _checkpoint_training_args(payload)
+    try:
+        spec = model_spec_from_config_fields(
+            neuron_type=model_config.get('neuron_type') or training_args.get('neuron_type'),
+            recurrent=model_config.get('recurrent', training_args.get('recurrent', False)),
+            reset=model_config.get('reset', training_args.get('reset')),
+            v_th=model_config.get('v_th', training_args.get('v_th')),
+            filter=model_config.get('filter', training_args.get('filter', 'train')),
+            branch=model_config.get('branch', training_args.get('branch')),
+            model=model_config.get('model') or training_args.get('model') or payload.get('model_token') or payload.get('model'),
+        )
+    except Exception:
+        model_token = _checkpoint_model_token(payload)
+        spec = canonicalize_model_token(model_token)
+    readout_config = _checkpoint_readout_config(payload)
     mode = str(readout_config.get('mode') or readout_config.get('readout_mode') or '')
     if not mode:
         raise ValueError('Checkpoint readout_config is missing mode.')
@@ -299,7 +375,10 @@ def _build_model_from_checkpoint(payload: Mapping[str, Any], *, device: torch.de
         hidden_spec = '-'
     else:
         hidden_spec = str(model_config.get('hidden_spec') or model_config.get('arch_spec') or '')
-    v_th = float(model_config.get('v_th', 1.0))
+    try:
+        _v_trainable, v_th = parse_v_threshold_setting(model_config.get('v_th', 1.0))
+    except Exception:
+        v_th = float(model_config.get('v_th', 1.0))
     readout = build_readout(mode, num_classes=num_classes, sequence_length=sequence_length, device=device)
     model = build_snn_classifier(
         model_token=spec,
@@ -312,15 +391,16 @@ def _build_model_from_checkpoint(payload: Mapping[str, Any], *, device: torch.de
         output_layer_overrides=readout.output_layer_overrides(),
         v_th=v_th,
     ).to(device)
-    state_dict = payload.get('state_dict')
-    if not isinstance(state_dict, Mapping):
-        raise ValueError('Checkpoint is missing state_dict mapping.')
-    model.load_state_dict(state_dict)
+    load_state_dict_compatible(
+        model,
+        checkpoint_state_dict(payload),
+        context='Checkpoint state_dict',
+        strict=True,
+    )
     model.eval()
     readout.to(device)
     readout.eval()
     return model, readout, spec, mode
-
 
 def _prepared_input_for_model(model: torch.nn.Module, inputs: Any, *, device: torch.device) -> torch.Tensor:
     spec_family = getattr(getattr(model, 'spec', None), 'family', None)
@@ -553,12 +633,21 @@ def _axis_values(summary: Mapping[str, Any], extractor: str) -> tuple[np.ndarray
 
 
 def _value_unit_for_power_scale(scale: str) -> str:
-    return 'dB' if str(scale) == 'db' else 'power'
+    
+    token = str(scale)
+    if token == 'db':
+        return 'dB'
+    if token == 'area':
+        return 'area_normalized_power_fraction'
+    return 'power'
 
 
 def _value_unit_for_dispersion(metric: str, scale: str) -> str:
-    if str(scale) == 'db':
+    token = str(scale)
+    if token == 'db':
         return 'dB'
+    if token == 'area':
+        return 'area_normalized_power_fraction'
     return 'power^2' if str(metric) == 'variance' else 'power'
 
 
@@ -639,7 +728,9 @@ def _filter_vectors(model: torch.nn.Module) -> dict[str, dict[str, np.ndarray]]:
                 name = 'damping'
             if name == 'f_cyc_per_sample':
                 name = 'center_frequency'
-            if name in {'alpha', 'damping', 'center_frequency'}:
+            if name in {'v_threshold', 'threshold', 'vth'}:
+                name = 'threshold'
+            if name in {'alpha', 'damping', 'center_frequency', 'threshold'}:
                 arr = value.detach().cpu().numpy() if isinstance(value, torch.Tensor) else np.asarray(value)
                 if arr.size > 0:
                     normalized[name] = np.asarray(arr, dtype=np.float64).reshape(-1)
@@ -652,12 +743,14 @@ _FILTER_DEFAULT_USERBIN_BOUNDS: dict[str, tuple[float, float]] = {
     'alpha': (0.0, 1.0),
     'center_frequency': (0.0, 0.5),
     'damping': (0.1, 1.0),
+    'threshold': (0.0, 2.0),
 }
 
 _FILTER_VALUE_UNITS: dict[str, str] = {
     'alpha': 'parameter_value',
     'damping': 'parameter_value',
     'center_frequency': 'normalized_frequency_cyc_per_sample_nyquist_0p5',
+    'threshold': 'membrane_threshold',
 }
 
 
@@ -688,10 +781,12 @@ def _strict_filter_edges(raw_edges: Any, *, name: str) -> np.ndarray:
     return values
 
 
-def _filter_userbin_edges(parameter: str, values: np.ndarray, args: argparse.Namespace) -> np.ndarray:
+def _parameter_bin_edges(parameter: str, values: np.ndarray, args: argparse.Namespace) -> np.ndarray:
     prefix = _filter_cli_prefix(parameter)
-    edge_attr = f'filter_{prefix}_userbin_edges'
-    count_attr = f'filter_{prefix}_userbin_count'
+    if prefix == 'frequency':
+        prefix = 'center_frequency'
+    edge_attr = f'parameter_{prefix}_bin_edges'
+    count_attr = f'parameter_{prefix}_bin_count'
     raw_edges = getattr(args, edge_attr, None)
     if raw_edges not in (None, '', []):
         return _strict_filter_edges(raw_edges, name=edge_attr)
@@ -749,7 +844,7 @@ def _filter_distribution_rows_for_values(
         )
         rows.append(common_row(**kwargs))
 
-    edges = _filter_userbin_edges(parameter, flat, args)
+    edges = _parameter_bin_edges(parameter, flat, args)
     counts, bin_edges = np.histogram(flat, bins=edges)
     total = int(np.sum(counts))
     for bin_index, count in enumerate(np.asarray(counts, dtype=np.int64).reshape(-1)):
@@ -793,6 +888,44 @@ def _filter_model_vectors(filter_vectors: Mapping[str, Mapping[str, np.ndarray]]
     return {parameter: np.concatenate(chunks, axis=0) for parameter, chunks in grouped.items() if chunks}
 
 
+def _filter_aggregate_scopes(
+    filter_vectors: Mapping[str, Mapping[str, np.ndarray]],
+    layer_index_by_name: Mapping[str, int],
+) -> dict[str, tuple[str, int, dict[str, np.ndarray]]]:
+    """Return model-level parameter aggregation scopes.
+
+    Scopes:
+    - model: every collected layer, including output.
+    - non_output: every collected layer except the output layer.
+    - hidden: hidden layers only, excluding input/projection and output aliases.
+    """
+
+    def _merge(names: list[str]) -> dict[str, np.ndarray]:
+        grouped: dict[str, list[np.ndarray]] = defaultdict(list)
+        for name in names:
+            for parameter, values in filter_vectors.get(name, {}).items():
+                arr = np.asarray(values, dtype=np.float64).reshape(-1)
+                if arr.size > 0:
+                    grouped[str(parameter)].append(arr)
+        return {parameter: np.concatenate(chunks, axis=0) for parameter, chunks in grouped.items() if chunks}
+
+    names = list(filter_vectors.keys())
+    output_names = {name for name in names if str(name).lower() in {'output', 'readout', 'out'}}
+    explicit_output_index = layer_index_by_name.get('output', layer_index_by_name.get('readout', None))
+    if not output_names and explicit_output_index is not None:
+        output_names = {
+            name for name in names
+            if int(layer_index_by_name.get(name, -10_000)) == int(explicit_output_index)
+        }
+    non_output_names = [name for name in names if name not in output_names]
+    hidden_names = [name for name in non_output_names if not str(name).lower().startswith(('input', 'stem', 'projection'))]
+    return {
+        'model': ('model', 0, _merge(names)),
+        'non_output': ('non_output', -2, _merge(non_output_names)),
+        'hidden': ('hidden', -1, _merge(hidden_names)),
+    }
+
+
 def _filter_distribution_rows(*, common_base: dict[str, Any], model: torch.nn.Module, layer_index_by_name: Mapping[str, int], args: argparse.Namespace) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     vectors = _filter_vectors(model)
@@ -810,18 +943,19 @@ def _filter_distribution_rows(*, common_base: dict[str, Any], model: torch.nn.Mo
                     args=args,
                 )
             )
-    for parameter, values in _filter_model_vectors(vectors).items():
-        rows.extend(
-            _filter_distribution_rows_for_values(
-                common_base=common_base,
-                layer_name='model',
-                layer_index=0,
-                distribution_scope='model',
-                parameter=str(parameter),
-                values=np.asarray(values, dtype=np.float64),
-                args=args,
+    for scope, (layer_name, layer_index, scoped_vectors) in _filter_aggregate_scopes(vectors, layer_index_by_name).items():
+        for parameter, values in scoped_vectors.items():
+            rows.extend(
+                _filter_distribution_rows_for_values(
+                    common_base=common_base,
+                    layer_name=str(layer_name),
+                    layer_index=layer_index,
+                    distribution_scope=str(scope),
+                    parameter=str(parameter),
+                    values=np.asarray(values, dtype=np.float64),
+                    args=args,
+                )
             )
-        )
     return rows
 
 
@@ -856,30 +990,32 @@ def _filter_snapshot_rows(*, common_base: dict[str, Any], model: torch.nn.Module
                     category='filter_snapshot',
                     layer=layer_name,
                     layer_index=layer_index_by_name.get(layer_name, ''),
+                    distribution_scope='layer',
                     parameter_name=parameter,
                     statistic=stat_name,
                     value=stat_value,
                     value_unit='count' if stat_name == 'count' else _filter_value_unit(parameter),
                 )
                 rows.append(common_row(**kwargs))
-    model_vectors = _filter_model_vectors(vectors)
-    if model_vectors:
-        trend_source['model'] = {}
-    for parameter, values in model_vectors.items():
-        stats = _summary_stats(values)
-        trend_source['model'][parameter] = dict(stats)
-        for stat_name, stat_value in stats.items():
-            kwargs = dict(common_base)
-            kwargs.update(
-                category='filter_snapshot',
-                layer='model',
-                layer_index=0,
-                parameter_name=parameter,
-                statistic=stat_name,
-                value=stat_value,
-                value_unit='count' if stat_name == 'count' else _filter_value_unit(parameter),
-            )
-            rows.append(common_row(**kwargs))
+    for scope, (layer_name, layer_index, scoped_vectors) in _filter_aggregate_scopes(vectors, layer_index_by_name).items():
+        if scoped_vectors:
+            trend_source[str(layer_name)] = {}
+        for parameter, values in scoped_vectors.items():
+            stats = _summary_stats(values)
+            trend_source[str(layer_name)][parameter] = dict(stats)
+            for stat_name, stat_value in stats.items():
+                kwargs = dict(common_base)
+                kwargs.update(
+                    category='filter_snapshot',
+                    layer=str(layer_name),
+                    layer_index=layer_index,
+                    distribution_scope=str(scope),
+                    parameter_name=parameter,
+                    statistic=stat_name,
+                    value=stat_value,
+                    value_unit='count' if stat_name == 'count' else _filter_value_unit(parameter),
+                )
+                rows.append(common_row(**kwargs))
     return rows, trend_source
 
 
@@ -927,7 +1063,8 @@ def _row_output_name(row: Mapping[str, str]) -> str:
         return f'drift_distance__epoch_{epoch_a}__to__epoch_{epoch_b}__layer_{layer_index}__{scope}__input_{reference_series}__to__{signal}__{series}__{extractor}__{reducer}__{variant}__{scale}__{metric}.csv'
     if category == 'filter_snapshot':
         parameter = _safe_token(row.get('parameter_name', 'parameter'))
-        return f'filter_snapshot__epoch_{epoch}__layer_{layer_index}__{parameter}.csv'
+        scope_token = _safe_token(row.get('distribution_scope', 'layer'))
+        return f'filter_snapshot__epoch_{epoch}__layer_{layer_index}__{scope_token}__{parameter}.csv'
     if category == 'filter_distribution':
         parameter = _safe_token(row.get('parameter_name', 'parameter'))
         scope = _safe_token(row.get('distribution_scope', 'scope'))
@@ -936,7 +1073,8 @@ def _row_output_name(row: Mapping[str, str]) -> str:
     if category == 'filter_trend':
         parameter = _safe_token(row.get('parameter_name', 'parameter'))
         statistic = _safe_token(row.get('statistic', 'statistic'))
-        return f'filter_trend__layer_{layer_index}__{parameter}__{statistic}.csv'
+        scope_token = _safe_token(row.get('distribution_scope', 'layer'))
+        return f'filter_trend__layer_{layer_index}__{scope_token}__{parameter}__{statistic}.csv'
     if category == 'accuracy_loss_join':
         return f'accuracy_loss_join__epoch_{epoch}.csv'
     if category in {'layer_distance_profile', 'layer_distance_trend'}:
@@ -1359,6 +1497,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parse_args_with_config(parser, argv=argv, stage_key='psd_analysis')
     LOW_VRAM = bool(int(args.low_vram))
+    args.signal_window = _normalize_signal_window_arg(getattr(args, 'signal_window', 'hann'))
     if int(args.anal_batch) < 1:
         parser.error('--anal_batch must be >= 1.')
     if int(args.num_workers) < 0:
@@ -1374,7 +1513,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     _load_runtime_dependencies()
 
-    output_root = Path(args.output_root).expanduser().resolve()
+    output_root = timestamped_output_root(args.output_root, run_timestamp=getattr(args, 'run_timestamp', None), prefix=SOURCE_PROGRAM, enabled=getattr(args, 'timestamped_output', True))
     output_root.mkdir(parents=True, exist_ok=True)
     checkpoint_input = Path(args.checkpoint).expanduser().resolve()
     input_is_single_file = checkpoint_input.is_file()
@@ -1467,6 +1606,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     'pca_min_train_accuracy': float(args.pca_min_train_accuracy),
                     'source_dtype': str(maps.dtype),
                     'source_device_after_fit': 'cpu',
+                    'signal_window': str(args.signal_window),
                 }
                 pca_reference_dir.mkdir(parents=True, exist_ok=True)
                 basis_file = _safe_basis_filename(str(meta['basis_id']))
@@ -1483,6 +1623,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     'layer_name': str(meta['layer_name']),
                     'family': str(meta['family']),
                     'signal_kind': str(meta['signal_kind']),
+                    'signal_window': str(meta.get('signal_window', args.signal_window)),
                 }
                 torch.save(basis_payload, basis_path)
                 meta['basis_file'] = str(basis_path.relative_to(output_root))
@@ -1506,10 +1647,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         for key, maps in tqdm(sorted(maps_by_key.items(), key=lambda item: (item[0][1], item[0][0], item[0][2], item[0][3], item[0][4])), desc='psd_analysis:summaries', leave=False):
             layer_name, layer_index, signal_kind, series, scope, family, label = key
-            summary = compute_family_spectral_summary(maps, window=None, overlap=0, userbin_edges=None, include_spectrogram=False, include_userbin=False)
+            summary = compute_family_spectral_summary(maps, window=None, overlap=0, userbin_edges=None, include_spectrogram=False, include_userbin=False, signal_window=str(args.signal_window))
             summaries[key] = summary
             base = dict(checkpoint_base)
-            base.update(layer=layer_name, layer_index=layer_index, scope=scope, probe_family=family, label='' if label is None else int(label), signal_kind=signal_kind, series=series)
+            base.update(layer=layer_name, layer_index=layer_index, scope=scope, probe_family=family, label='' if label is None else int(label), signal_kind=signal_kind, series=series, signal_window=str(args.signal_window))
             common_by_key[key] = base
             curve_rows, disp_rows = _summary_curve_rows(common=base, summary=summary, extractors=selected_extractors)
             family_rows.extend(curve_rows)
@@ -1520,7 +1661,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 pca_maps = apply_fixed_pca_basis(maps, basis, centroid)
                 for mode in range(int(pca_maps.shape[1])):
                     mode_summary = compute_family_spectral_summary(
-                        pca_maps[:, mode : mode + 1, :], window=None, overlap=0, userbin_edges=None, include_spectrogram=False, include_userbin=False
+                        pca_maps[:, mode : mode + 1, :], window=None, overlap=0, userbin_edges=None, include_spectrogram=False, include_userbin=False, signal_window=str(args.signal_window)
                     )
                     if enable_pca_1d:
                         mode_curve = representative_curve_from_summary(dict(mode_summary), reducer='mean', extractor='psd_exact', centering='raw', scale='raw').reshape(-1)
@@ -1530,7 +1671,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                             kwargs.update(category='analysis_curve', extractor='psd_exact', reducer='mean', variant='raw', scale='raw', frequency=float(freq_value), frequency_bin=int(fi), value=float(curve_value), value_unit='power', series=f'pca_mode_{mode:03d}', pca_analysis_schema_version=PCA_ANALYSIS_SCHEMA_VERSION, basis_id=str(meta.get('basis_id', '')), pca_mode=int(mode), reference_epoch=int(meta.get('reference_epoch', -1)), resolved_dim=int(meta.get('resolved_dim', pca_maps.shape[1])))
                             pca_mode_rows.append(common_row(**kwargs))
                 if enable_pca_mimo:
-                    freqs, mimo = auto_spectral_matrix_from_mode_maps(pca_maps)
+                    freqs, mimo = auto_spectral_matrix_from_mode_maps(pca_maps, signal_window=str(args.signal_window))
                     for fi, freq_value in enumerate(freqs.detach().cpu().numpy().reshape(-1)):
                         for mi in range(int(mimo.shape[1])):
                             for mj in range(int(mimo.shape[2])):
@@ -1539,7 +1680,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 kwargs.update(category='analysis_curve', extractor='psd_exact', reducer='mean', variant='raw', scale='raw', frequency=float(freq_value), frequency_bin=int(fi), value=float(entry.abs().detach().cpu().item()), value_real=float(entry.real.detach().cpu().item()), value_imag=float(entry.imag.detach().cpu().item()), value_unit='power', series=f'pca_mimo_{mi:03d}_{mj:03d}', pca_analysis_schema_version=PCA_ANALYSIS_SCHEMA_VERSION, basis_id=str(meta.get('basis_id', '')), source_mode=int(mi), target_mode=int(mj), reference_epoch=int(meta.get('reference_epoch', -1)), resolved_dim=int(meta.get('resolved_dim', pca_maps.shape[1])))
                                 pca_mimo_rows.append(common_row(**kwargs))
                 ref_kwargs = dict(base)
-                ref_kwargs.update(category='analysis_manifest', status='ok', message=json.dumps(meta, ensure_ascii=False), artifact_name='pca_reference', output_csv_path=str(checkpoint_dir / 'pca_reference'), pca_analysis_schema_version=PCA_ANALYSIS_SCHEMA_VERSION, basis_id=str(meta.get('basis_id', '')), reference_epoch=int(meta.get('reference_epoch', -1)), resolved_dim=int(meta.get('resolved_dim', 0)))
+                ref_kwargs.update(category='analysis_manifest', status='ok', message=compact_yaml(meta), artifact_name='pca_reference', output_csv_path=str(checkpoint_dir / 'pca_reference'), pca_analysis_schema_version=PCA_ANALYSIS_SCHEMA_VERSION, basis_id=str(meta.get('basis_id', '')), reference_epoch=int(meta.get('reference_epoch', -1)), resolved_dim=int(meta.get('resolved_dim', 0)))
                 pca_reference_rows.append(common_row(**ref_kwargs))
 
         layer_distance_profile_rows: list[dict[str, str]] = []
@@ -1572,7 +1713,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         filter_rows, filter_snapshot = _filter_snapshot_rows(common_base=checkpoint_base, model=model, layer_index_by_name=layer_index_by_name)
         filter_distribution_rows = _filter_distribution_rows(common_base=checkpoint_base, model=model, layer_index_by_name=layer_index_by_name, args=args)
         for layer_name, param_map in filter_snapshot.items():
-            layer_index = 0 if str(layer_name) == 'model' else int(layer_index_by_name.get(layer_name, 999))
+            layer_index = 0 if str(layer_name) in {'model', 'non_output', 'hidden'} else int(layer_index_by_name.get(layer_name, 999))
             for parameter, stats in param_map.items():
                 for stat_name, stat_value in stats.items():
                     filter_trend_history[(layer_name, layer_index, parameter, stat_name)].append((int(payload.get('epoch', 0)), float(stat_value), dict(checkpoint_base)))
@@ -1589,7 +1730,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         y_basis, y_centroid, y_meta = pca_basis_cache[dst_key]
                         src_modes = apply_fixed_pca_basis(maps_by_key[src_key], x_basis, x_centroid)
                         dst_modes = apply_fixed_pca_basis(maps_by_key[dst_key], y_basis, y_centroid)
-                        freqs, cross = cross_spectral_matrix_from_mode_maps(src_modes, dst_modes)
+                        freqs, cross = cross_spectral_matrix_from_mode_maps(src_modes, dst_modes, signal_window=str(args.signal_window))
                         base = dict(common_by_key[src_key])
                         for fi, freq_value in enumerate(freqs.detach().cpu().numpy().reshape(-1)):
                             for mi in range(int(cross.shape[1])):
@@ -1624,7 +1765,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     y_basis, y_centroid, y_meta = pca_basis_cache[dst_key]
                     src_modes = apply_fixed_pca_basis(maps_by_key[src_key], x_basis, x_centroid)
                     dst_modes = apply_fixed_pca_basis(maps_by_key[dst_key], y_basis, y_centroid)
-                    freqs, cross = cross_spectral_matrix_from_mode_maps(src_modes, dst_modes)
+                    freqs, cross = cross_spectral_matrix_from_mode_maps(src_modes, dst_modes, signal_window=str(args.signal_window))
                     base = dict(common_by_key[src_key])
                     for fi, freq_value in enumerate(freqs.detach().cpu().numpy().reshape(-1)):
                         for mi in range(int(cross.shape[1])):
@@ -1661,7 +1802,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     for (layer_name, layer_index, parameter, stat_name), history in sorted(filter_trend_history.items()):
         for epoch, stat_value, base in sorted(history, key=lambda item: item[0]):
             kwargs = dict(base)
-            kwargs.update(category='filter_trend', layer=layer_name, layer_index=layer_index, checkpoint_epoch=epoch, parameter_name=parameter, statistic=stat_name, value=stat_value, value_unit='count' if stat_name == 'count' else _filter_value_unit(parameter))
+            scope_name = str(layer_name) if str(layer_name) in {'model', 'non_output', 'hidden'} else 'layer'
+            kwargs.update(category='filter_trend', layer=layer_name, layer_index=layer_index, distribution_scope=scope_name, checkpoint_epoch=epoch, parameter_name=parameter, statistic=stat_name, value=stat_value, value_unit='count' if stat_name == 'count' else _filter_value_unit(parameter))
             filter_trend_rows.append(common_row(**kwargs))
     for relation_type in ('adjacent',):
         relation_rows = [row for row in layer_distance_trend_rows if row.get('relation_type') == relation_type]
@@ -1673,8 +1815,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         _write_rows_to_dir(traces_dir / 'filter_trend' / _layer_folder(layer_name, layer_index), list(group_rows), manifest_rows=manifest_rows, manifest_base=manifest_base, artifact_name='filter_trend')
     for warning in ordering_warnings:
         manifest_rows.append(_manifest_row(base=manifest_base, artifact_name='checkpoint_ordering', path=Path(args.checkpoint), status='ok', message=warning))
-    manifest_path = output_root / 'analysis_manifest.csv'
-    write_common_csv(manifest_path, manifest_rows)
+    manifest_path = output_root / 'analysis_manifest.yaml'
+    write_manifest_yaml(manifest_path, manifest_rows)
     print(json.dumps({'status': 'ok', 'source_program': SOURCE_PROGRAM, 'output_root': str(output_root), 'analysis_distance_metrics': list(distance_metrics), 'checkpoints': [str(p) for p in checkpoint_files]}, sort_keys=True))
     return 0
 

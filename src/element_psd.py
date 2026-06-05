@@ -21,8 +21,10 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
-from src.util.csv_schema import common_row, write_common_csv
+from src.util.csv_schema import common_row, write_common_csv, write_manifest_yaml
 from src.util.config_cli import parse_args_with_config
+from src.util.paths import timestamped_output_root
+from src.signal.psd_utils import normalize_signal_window
 
 
 SOURCE_PROGRAM = 'element_psd'
@@ -68,14 +70,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description='Checkpoint-only element-wise PSD analysis for MLP probe output maps.')
     parser.add_argument('--checkpoint', required=True, help='Single .pt checkpoint file or strict .pt-only checkpoint directory.')
     parser.add_argument('--dataset', required=True, help='Canonical dataset token stored in checkpoint metadata.')
-    parser.add_argument('--prep_root', required=True, help='Prepared data root containing <dataset>/manifest.json.')
+    parser.add_argument('--prep_root', required=True, help='Prepared data root containing <dataset>/manifest.yaml.')
     parser.add_argument('--output_root', required=True, help='Root directory for element-wise PSD CSV outputs.')
     parser.add_argument('--anal_batch', required=True, type=int, help='Maximum samples per analysis forward pass.')
     parser.add_argument('--gpu_index', required=True, type=int, help='CUDA device index for analysis.')
     parser.add_argument('--seed', type=int, default=None, help='Analysis seed. Defaults to checkpoint seed when omitted.')
     parser.add_argument('--num_workers', type=int, default=0, help='Probe loading DataLoader worker count.')
     parser.add_argument('--low_vram', type=int, default=0, help='Use CPU trace staging to reduce VRAM use: 0 or 1.')
-    parser.add_argument('--config', default=None, help='JSON 설정 파일 경로(.json)')
+    parser.add_argument('--signal_window', default='hann', choices=('hann','none'), help='PSD signal-processing taper: hann or none. none disables the Hann window.')
+    parser.add_argument('--config', default=None, help='YAML 설정 파일 경로(.yaml)')
+    parser.add_argument('--run_timestamp', default=None, help='결과 output_root 아래에 생성할 실행시각 폴더명 suffix. 생략 시 Asia/Seoul 현재시각을 사용한다.')
+    parser.add_argument('--timestamped_output', default='true', help='true이면 output_root 아래 실행시각 폴더를 자동 생성한다. false이면 기존 경로에 직접 저장한다.')
     return parser
 
 
@@ -88,11 +93,11 @@ def _variant_maps(maps: torch.Tensor, *, variant: str) -> torch.Tensor:
     raise ValueError(f'Unsupported element PSD variant: {variant!r}.')
 
 
-def _element_psd_matrix(maps: torch.Tensor, *, variant: str) -> tuple[torch.Tensor, torch.Tensor]:
+def _element_psd_matrix(maps: torch.Tensor, *, variant: str, signal_window: str | bool | None = 'hann') -> tuple[torch.Tensor, torch.Tensor]:
     prepared = _variant_maps(maps, variant=variant)
     if prepared.ndim != 3:
         raise ValueError(f'Expected output maps with shape (samples, neurons, time), got {tuple(prepared.shape)}.')
-    freqs, psd = exact_periodogram_from_maps(prepared)
+    freqs, psd = exact_periodogram_from_maps(prepared, signal_window=signal_window)
     return freqs, psd.mean(dim=0).real.contiguous()
 
 
@@ -166,11 +171,13 @@ def _write_element_psd_artifact(
     variant: str,
     scale: str,
     manifest_rows: list[dict[str, str]],
+    signal_window: str | bool | None = 'hann',
 ) -> None:
-    _freqs, raw_matrix = _element_psd_matrix(maps, variant=variant)
+    _freqs, raw_matrix = _element_psd_matrix(maps, variant=variant, signal_window=signal_window)
     scaled_matrix = _scale_power(raw_matrix, scale=scale)
     value_column_names = value_columns('freq', int(scaled_matrix.shape[1]))
     base = common_base_for_key(checkpoint_base=checkpoint_base, key=key)
+    base['signal_window'] = str(signal_window)
     rows = _rows_for_element_matrix(
         base=base,
         matrix=scaled_matrix,
@@ -219,9 +226,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if int(args.num_workers) < 0:
         parser.error('--num_workers must be >= 0.')
     _load_runtime_dependencies()
+    args.signal_window = normalize_signal_window(getattr(args, 'signal_window', 'hann'))
     psd_common.LOW_VRAM = bool(int(args.low_vram))
 
-    output_root = Path(args.output_root).expanduser().resolve()
+    output_root = timestamped_output_root(args.output_root, run_timestamp=getattr(args, 'run_timestamp', None), prefix=SOURCE_PROGRAM, enabled=getattr(args, 'timestamped_output', True))
     output_root.mkdir(parents=True, exist_ok=True)
     checkpoint_input = Path(args.checkpoint).expanduser().resolve()
     input_is_single_file = checkpoint_input.is_file()
@@ -287,12 +295,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                         variant=variant,
                         scale=scale,
                         manifest_rows=manifest_rows,
+                        signal_window=str(args.signal_window),
                     )
 
     manifest_base = first_manifest_base or {'source_program': SOURCE_PROGRAM, 'dataset': str(args.dataset), 'run_id': 'element_psd'}
     for warning in ordering_warnings:
         manifest_rows.append(manifest_row(base=dict(manifest_base), artifact_name='checkpoint_ordering', path=Path(args.checkpoint), status='ok', message=warning))
-    write_common_csv(output_root / 'analysis_manifest.csv', manifest_rows)
+    write_manifest_yaml(output_root / 'analysis_manifest.yaml', manifest_rows)
     print(json.dumps({'status': 'ok', 'source_program': SOURCE_PROGRAM, 'output_root': str(output_root), 'checkpoints': [str(p) for p in checkpoint_files]}, sort_keys=True))
     return 0
 

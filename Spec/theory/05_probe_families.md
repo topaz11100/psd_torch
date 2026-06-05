@@ -1,3 +1,9 @@
+# 05 Probe Families
+
+## 2026 개정 해설
+
+Probe family는 분석 subset의 통계적 의미를 정의한다. Full scope는 데이터 전체의 평균 행동을, balanced scope는 label imbalance를 제거한 행동을, family/class scope는 특정 class 조건부 spectral response를 나타낸다.
+
 # Probe family
 
 Probe는 분석에 사용할 sample subset이다. 학습 전체 데이터와 분석 probe는 목적이 다르므로 명시적으로 분리한다.
