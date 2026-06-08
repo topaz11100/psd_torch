@@ -1,10 +1,16 @@
 element_fft:
-  dataset: mnist
-  prep_root: /home/yongokhan/workspace/data/prep_data
-  checkpoint: /home/yongokhan/workspace/result/base/model_training/checkpoints
-  output_root: /home/yongokhan/workspace/result/element_fft
-  num_workers: 0
-  seed: 0
-  gpu_index: 0
-  anal_batch: 128
-  low_vram: 0
+
+  data:
+    checkpoint: ""           # Single .pt checkpoint or strict .pt-only checkpoint directory.
+    dataset: ""              # Dataset token stored in checkpoint metadata.
+    prep_root: ""            # Prepared data root containing <dataset>/manifest.yaml.
+  output:
+    output_root: ""          # Root directory for analysis CSV/YAML artifacts.
+    run_timestamp: ""        # Optional run_<timestamp> suffix.
+    timestamped_output: ""   # true writes under a timestamped run directory.
+  runtime:
+    anal_batch: ""           # Maximum samples per analysis forward pass.
+    gpu_index: ""            # CUDA device index.
+    seed: ""                 # Analysis seed; blank falls back to checkpoint seed.
+    num_workers: ""          # Probe DataLoader worker count.
+    low_vram: ""             # 1 stages traces through CPU to reduce VRAM.

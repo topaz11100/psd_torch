@@ -186,6 +186,23 @@ def _project_parameters_after_optimizer_step(model: nn.Module) -> None:
     if callable(projector):
         projector()
 
+
+def _branch_regularization_loss(model: nn.Module, *, lambda_ortho: float, lambda_s: float, reference: torch.Tensor) -> torch.Tensor:
+    """Return proposed my_* branch regularization loss, preserving zero when disabled."""
+
+    if float(lambda_ortho) == 0.0 and float(lambda_s) == 0.0:
+        return reference.new_zeros(())
+    base_model = _unwrap_model(model)
+    hook = getattr(base_model, 'proposed_regularization_loss', None)
+    if callable(hook):
+        return hook(lambda_ortho=float(lambda_ortho), lambda_s=float(lambda_s)).to(device=reference.device, dtype=reference.dtype)
+    total = reference.new_zeros(())
+    for module in base_model.modules():
+        regularizer = getattr(module, 'regularization_loss', None)
+        if callable(regularizer):
+            total = total + regularizer(lambda_ortho=float(lambda_ortho), lambda_s=float(lambda_s)).to(device=reference.device, dtype=reference.dtype)
+    return total
+
 def _reset_stateful_model(model: nn.Module) -> None:
     base_model = _unwrap_model(model)
     if reset_spikingjelly_state(base_model):
@@ -493,6 +510,8 @@ def _train_one_batch_tensor_step(
     psd_reg_output_family: str,
     pca_reference_bank: dict[str, Any] | None,
     signal_window: str | bool | None = 'hann',
+    lambda_branch_ortho: float = 0.0,
+    lambda_branch_s: float = 0.0,
     amp_bf16_safe: bool = False,
     device: torch.device | str | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -525,7 +544,14 @@ def _train_one_batch_tensor_step(
         pca_reference_bank=pca_reference_bank,
         signal_window=signal_window,
     )
-    total_loss = task_loss + regularization.total + psd_reg.total
+    branch_reg = _branch_regularization_loss(
+        model,
+        lambda_ortho=float(lambda_branch_ortho),
+        lambda_s=float(lambda_branch_s),
+        reference=task_loss,
+    )
+    combined_regularization_total = regularization.total + branch_reg
+    total_loss = task_loss + combined_regularization_total + psd_reg.total
     total_loss.backward()
     optimizer.step()
     _reset_stateful_model(model)
@@ -535,7 +561,7 @@ def _train_one_batch_tensor_step(
     return (
         total_loss,
         task_loss,
-        regularization.total,
+        combined_regularization_total,
         regularization.global_loss,
         regularization.adjacent_loss,
         psd_reg.total,
@@ -575,6 +601,8 @@ def train_one_batch(
     psd_reg_output_family: str = 'spike',
     pca_reference_bank: dict[str, Any] | None = None,
     signal_window: str | bool | None = 'hann',
+    lambda_branch_ortho: float = 0.0,
+    lambda_branch_s: float = 0.0,
     amp_bf16_safe: bool = False,
 ) -> TrainEpochMetrics:
     model.train()
@@ -618,6 +646,8 @@ def train_one_batch(
         psd_reg_output_family=str(psd_reg_output_family),
         pca_reference_bank=pca_reference_bank,
         signal_window=signal_window,
+        lambda_branch_ortho=float(lambda_branch_ortho),
+        lambda_branch_s=float(lambda_branch_s),
         amp_bf16_safe=bool(amp_bf16_safe),
         device=device,
     )
@@ -701,6 +731,8 @@ def train_one_epoch(
     psd_reg_output_family: str = 'spike',
     pca_reference_bank: dict[str, Any] | None = None,
     signal_window: str | bool | None = 'hann',
+    lambda_branch_ortho: float = 0.0,
+    lambda_branch_s: float = 0.0,
     amp_bf16_safe: bool = False,
 ) -> TrainEpochMetrics:
     total_loss_weighted = 0.0
@@ -743,6 +775,8 @@ def train_one_epoch(
             psd_reg_output_family=psd_reg_output_family,
             pca_reference_bank=pca_reference_bank,
             signal_window=signal_window,
+            lambda_branch_ortho=float(lambda_branch_ortho),
+            lambda_branch_s=float(lambda_branch_s),
             amp_bf16_safe=bool(amp_bf16_safe),
         )
         total_loss_weighted += float(batch.loss) * int(batch.total)
@@ -813,8 +847,3 @@ __all__ = [
     'train_one_epoch',
     'regularizer_compile_metadata',
 ]
-try:
-    from src.patch_overlays.runtime_patch import patch_training as _patch_training
-    _patch_training(globals())
-except Exception:
-    pass

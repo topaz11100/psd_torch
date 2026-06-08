@@ -1,0 +1,20 @@
+dataset_psd:
+  data:
+    dataset: shd
+    prep_root: /home/yongokhan/workspace/data/prep_data
+  output:
+    output_root: /home/yongokhan/workspace/result/rf_scinario/dataset_signal/shd/dataset_psd
+    run_timestamp: ''
+    timestamped_output: false
+  runtime:
+    batch_size: 128
+    gpu_index:
+    - 0
+    seed: 0
+    num_workers: 8
+  signal:
+    signal_window: none
+    signal_curve_space: exact
+    signal_curve_scale: raw
+    signal_curve_userbin_edges: []
+    signal_curve_userbin_reducer: mean

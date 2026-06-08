@@ -1,0 +1,13 @@
+plotting:
+  input_output:
+    input: /home/yongokhan/workspace/result/rf_scinario/analysis/shd/rf_R_none_fixed/element_fft
+    output: /home/yongokhan/workspace/result/rf_scinario/analysis/shd/rf_R_none_fixed/element_fft/plots
+    output_root: ''
+    manifest_name: recursive_plot_manifest.yaml
+  rendering:
+    format: png
+    overwrite: true
+    include_filter_count: false
+  output:
+    run_timestamp: ''
+    timestamped_output: false

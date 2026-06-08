@@ -1,8 +1,0 @@
-plotting:
-  output_root: null
-  format: png
-  include_filter_count: false
-  input: /home/yongokhan/workspace/result/base/psd_analysis
-  manifest_name: recursive_plot_manifest.yaml
-  output: /home/yongokhan/workspace/result/base/plots
-  overwrite: true

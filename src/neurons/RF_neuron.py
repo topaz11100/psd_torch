@@ -103,11 +103,40 @@ def _rf_sequence_with_trace(
 
 
 class RFLayer(nn.Module):
-    """Dense exact-ZOH resonate-and-fire layer with compiled sequence regions."""
+    """Dense discrete-time resonate-and-fire layer.
+
+    The linear subthreshold core is defined directly in the discrete domain as
+
+        z[t+1] = a z[t] + I[t+1],   a = rho * exp(j * phi),
+
+    and implemented with real states ``x = Re(z)`` and ``y = Im(z)``.  ``rho`` is
+    the per-sample pole radius and ``phi`` is the pole angle in radians/sample.
+    ``pole_radius_constrained=True`` constrains ``rho`` to ``[0, pole_radius_max)``;
+    ``False`` makes ``rho`` a positive softplus parameter and allows controlled
+    finite-horizon amplification when the trained radius exceeds one.
+    """
 
     compile_granularity = 'sequence'
 
-    def __init__(self, input_size: int, output_size: int, *, recurrent: bool = False, v_threshold: float = 1.0, trainable_threshold: bool = False, reset_mode: str = 'soft_reset', frequency_bounds: tuple[torch.Tensor, torch.Tensor] | None = None, damping_magnitude_bounds: tuple[float, float] = (0.1, 1.0), input_mask: torch.Tensor | None = None, recurrent_mask: torch.Tensor | None = None, emit_spike: bool = True, reset_enabled: bool = True, filter_value: float | None = None) -> None:
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        *,
+        recurrent: bool = False,
+        v_threshold: float = 1.0,
+        trainable_threshold: bool = False,
+        reset_mode: str = 'soft_reset',
+        frequency_bounds: tuple[torch.Tensor, torch.Tensor] | None = None,
+        damping_magnitude_bounds: tuple[float, float] = (0.1, 1.0),
+        input_mask: torch.Tensor | None = None,
+        recurrent_mask: torch.Tensor | None = None,
+        emit_spike: bool = True,
+        reset_enabled: bool = True,
+        filter_value: float | None = None,
+        pole_radius_constrained: bool = True,
+        pole_radius_max: float = 0.9999,
+    ) -> None:
         super().__init__()
         if reset_mode not in {'soft_reset', 'hard_reset', 'no_reset'}:
             raise ValueError("reset_mode must be 'soft_reset', 'hard_reset', or 'no_reset'.")
@@ -120,11 +149,18 @@ class RFLayer(nn.Module):
         self.trainable_threshold = bool(trainable_threshold)
         self.filter_fixed_value = None if filter_value is None else float(filter_value)
         self.threshold_eps = 1e-6
+        self.pole_radius_constrained = bool(pole_radius_constrained)
+        self.pole_radius_max = float(pole_radius_max)
+        if not math.isfinite(self.pole_radius_max) or self.pole_radius_max <= 0.0:
+            raise ValueError('pole_radius_max must be a positive finite number.')
+        if self.pole_radius_constrained and self.pole_radius_max >= 1.0:
+            raise ValueError('pole_radius_max must be smaller than 1.0 when pole_radius_constrained=True.')
         self._compiled_sequence_no_trace = None
         self._compiled_sequence_with_trace = None
         self._compiled_sequence_policy = 'eager'
         self._sequence_compiled_runtime_disabled = False
         self._sequence_compiled_runtime_error = None
+
         self.input_weight = nn.Parameter(torch.empty(self.output_size, self.input_size))
         if self.recurrent:
             self.recurrent_weight = nn.Parameter(torch.empty(self.output_size, self.output_size))
@@ -136,6 +172,7 @@ class RFLayer(nn.Module):
             recurrent_mask = torch.ones(self.output_size, self.output_size, dtype=torch.float32)
         self.register_buffer('input_mask', input_mask.to(dtype=torch.float32))
         self.register_buffer('recurrent_mask', None if recurrent_mask is None else recurrent_mask.to(dtype=torch.float32))
+
         if frequency_bounds is None:
             lower = torch.zeros(self.output_size, dtype=torch.float32)
             upper = torch.full((self.output_size,), 0.5, dtype=torch.float32)
@@ -149,10 +186,18 @@ class RFLayer(nn.Module):
             fixed = torch.full((self.output_size,), float(self.filter_fixed_value), dtype=torch.float32)
             if torch.any(fixed < lower) or torch.any(fixed > upper):
                 raise ValueError('Fixed RF filter center frequency is outside frequency clip/bound range.')
+
+        # Backward-compatible init knobs.  They no longer denote a continuous-time
+        # damping coefficient; instead they initialize rho via exp(-damping).
         self.damping_lower = float(damping_magnitude_bounds[0])
         self.damping_upper = float(damping_magnitude_bounds[1])
-        self.freq_raw = nn.Parameter(torch.empty(self.output_size))
-        self.damping_raw = nn.Parameter(torch.empty(self.output_size))
+        if not math.isfinite(self.damping_lower) or not math.isfinite(self.damping_upper):
+            raise ValueError('damping_magnitude_bounds must be finite.')
+        if self.damping_upper <= self.damping_lower:
+            raise ValueError('damping_magnitude_bounds must be increasing.')
+
+        self.pole_angle_raw = nn.Parameter(torch.empty(self.output_size))
+        self.pole_radius_raw = nn.Parameter(torch.empty(self.output_size))
         threshold_init = torch.full((self.output_size,), float(v_threshold), dtype=torch.float32)
         if self.trainable_threshold:
             self.v_threshold_param = nn.Parameter(_positive_threshold_init(v_threshold, self.output_size, eps=self.threshold_eps))
@@ -161,25 +206,39 @@ class RFLayer(nn.Module):
             self.register_parameter('v_threshold_param', None)
         self.reset_parameters()
 
+    @staticmethod
+    def _softplus_inverse(value: torch.Tensor) -> torch.Tensor:
+        value = torch.clamp(value, min=1e-6)
+        return torch.log(torch.expm1(value))
+
     def reset_parameters(self) -> None:
         nn.init.kaiming_uniform_(self.input_weight, a=math.sqrt(5.0))
         if self.recurrent_weight is not None:
             nn.init.orthogonal_(self.recurrent_weight)
         with torch.no_grad():
             freq = torch.empty_like(self.freq_lower)
-            damping = torch.empty_like(self.damping_raw)
+            radius = torch.empty_like(self.pole_radius_raw)
+            dleft, dright = trim_open_interval(self.damping_lower, self.damping_upper)
+            radius_left = math.exp(-dright)
+            radius_right = math.exp(-dleft)
+            if self.pole_radius_constrained:
+                radius_right = min(radius_right, self.pole_radius_max - 1e-6)
+            radius_left = max(1e-6, min(radius_left, max(radius_right - 1e-6, 1e-6)))
             for index in range(freq.numel()):
                 left, right = trim_open_interval(float(self.freq_lower[index]), float(self.freq_upper[index]))
                 if self.filter_fixed_value is None:
                     freq[index] = 0.5 * (left + right) if right <= left else float(torch.empty(1).uniform_(left, right).item())
                 else:
                     freq[index] = float(self.filter_fixed_value)
-                dleft, dright = trim_open_interval(self.damping_lower, self.damping_upper)
-                damping[index] = 0.5 * (dleft + dright) if dright <= dleft else float(torch.empty(1).uniform_(dleft, dright).item())
+                radius[index] = 0.5 * (radius_left + radius_right) if radius_right <= radius_left else float(torch.empty(1).uniform_(radius_left, radius_right).item())
             freq_span = torch.clamp(self.freq_upper - self.freq_lower, min=1e-6)
-            self.freq_raw.copy_(logit(torch.clamp((freq - self.freq_lower) / freq_span, min=1e-6, max=1 - 1e-6)))
-            self.damping_raw.copy_(logit(torch.clamp((damping - self.damping_lower) / (self.damping_upper - self.damping_lower), min=1e-6, max=1 - 1e-6)))
-        self.freq_raw.requires_grad_(self.filter_fixed_value is None)
+            self.pole_angle_raw.copy_(logit(torch.clamp((freq - self.freq_lower) / freq_span, min=1e-6, max=1 - 1e-6)))
+            if self.pole_radius_constrained:
+                normalized_radius = torch.clamp(radius / self.pole_radius_max, min=1e-6, max=1 - 1e-6)
+                self.pole_radius_raw.copy_(logit(normalized_radius))
+            else:
+                self.pole_radius_raw.copy_(self._softplus_inverse(radius))
+        self.pole_angle_raw.requires_grad_(self.filter_fixed_value is None)
 
     def enable_compiled_forward(self, **compile_kwargs: Any) -> tuple[bool, str]:
         no_trace, no_applied, no_policy = compile_callable(_rf_sequence_no_trace, compile_kwargs=compile_kwargs, label='rf_sequence_no_trace')
@@ -195,21 +254,31 @@ class RFLayer(nn.Module):
         return bool(no_applied or trace_applied), 'sequence_compile[' + f'no_trace={no_policy};with_trace={trace_policy}' + ']'
 
     def effective_frequency(self) -> torch.Tensor:
-        sigma = torch.sigmoid(self.freq_raw)
+        sigma = torch.sigmoid(self.pole_angle_raw)
         return self.freq_lower + (self.freq_upper - self.freq_lower) * sigma
 
-    def effective_damping_magnitude(self) -> torch.Tensor:
-        sigma = torch.sigmoid(self.damping_raw)
-        return self.damping_lower + (self.damping_upper - self.damping_lower) * sigma
-
-    def effective_b(self) -> torch.Tensor:
-        return -self.effective_damping_magnitude()
-
-    def effective_omega(self) -> torch.Tensor:
+    def effective_pole_angle(self) -> torch.Tensor:
         return 2.0 * math.pi * self.effective_frequency()
 
+    def effective_pole_radius(self) -> torch.Tensor:
+        if self.pole_radius_constrained:
+            return self.pole_radius_max * torch.sigmoid(self.pole_radius_raw)
+        return F.softplus(self.pole_radius_raw)
+
+    def effective_damping_magnitude(self) -> torch.Tensor:
+        """Backward-compatible alias: equivalent per-sample damping ``-log(rho)``."""
+        return -torch.log(torch.clamp(self.effective_pole_radius(), min=1e-12))
+
+    def effective_b(self) -> torch.Tensor:
+        """Backward-compatible alias: ``log(rho)`` in sample units."""
+        return torch.log(torch.clamp(self.effective_pole_radius(), min=1e-12))
+
+    def effective_omega(self) -> torch.Tensor:
+        """Backward-compatible alias: pole angle in radians/sample."""
+        return self.effective_pole_angle()
+
     def rho(self) -> torch.Tensor:
-        return torch.exp(self.effective_b())
+        return self.effective_pole_radius()
 
     def f_cyc_per_sample(self) -> torch.Tensor:
         return self.effective_frequency()
@@ -226,16 +295,6 @@ class RFLayer(nn.Module):
         if self.recurrent_weight is None:
             return None
         return self.recurrent_weight if self.recurrent_mask is None else self.recurrent_weight * self.recurrent_mask
-
-    @staticmethod
-    def _zoh_input_coefficients(b: torch.Tensor, omega: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        exp_b = torch.exp(b)
-        cos_phi = torch.cos(omega)
-        sin_phi = torch.sin(omega)
-        real_num = exp_b * cos_phi - 1.0
-        imag_num = exp_b * sin_phi
-        denom = torch.clamp(b.square() + omega.square(), min=torch.finfo(b.dtype).eps)
-        return (real_num * b + imag_num * omega) / denom, (imag_num * b - real_num * omega) / denom
 
     def _run_sequence(
         self,
@@ -287,22 +346,33 @@ class RFLayer(nn.Module):
         prev_spike = torch.zeros_like(x_post)
         threshold_view = self.effective_threshold().to(device=device, dtype=dtype).unsqueeze(0)
         record_raw = (not self.emit_spike) and (not self.reset_enabled)
-        b = self.effective_b().to(device=device, dtype=dtype)
-        omega = self.effective_omega().to(device=device, dtype=dtype)
-        rho_view = torch.exp(b).unsqueeze(0)
-        cos_view = torch.cos(omega).unsqueeze(0)
-        sin_view = torch.sin(omega).unsqueeze(0)
-        beta_x, beta_y = self._zoh_input_coefficients(b, omega)
-        beta_x_view = beta_x.unsqueeze(0)
-        beta_y_view = beta_y.unsqueeze(0)
+        radius = self.effective_pole_radius().to(device=device, dtype=dtype)
+        angle = self.effective_pole_angle().to(device=device, dtype=dtype)
+        rho_view = radius.unsqueeze(0)
+        cos_view = torch.cos(angle).unsqueeze(0)
+        sin_view = torch.sin(angle).unsqueeze(0)
+        beta_x_view = torch.ones_like(rho_view)
+        beta_y_view = torch.zeros_like(rho_view)
         input_current_sequence = to_sequence_state_dtype(torch.matmul(input_sequence, weight.t()), input_sequence)
         mem_seq, spike_seq, inp_seq = self._run_sequence(input_current_sequence, x_post, y_post, prev_spike, recurrent_weight, threshold_view, rho_view, cos_view, sin_view, beta_x_view, beta_y_view, return_traces=return_traces, record_raw=record_raw)
         self._last_layer_input = inp_seq.contiguous() if inp_seq is not None else None
         return (mem_seq.contiguous() if mem_seq is not None else None), spike_seq.contiguous()
 
     def filter_stats_vectors(self) -> dict[str, torch.Tensor]:
-        return {'damping': self.effective_damping_magnitude().detach(), 'center_frequency': self.f_cyc_per_sample().detach(), 'v_threshold': self.effective_threshold().detach()}
-
+        radius = self.effective_pole_radius().detach()
+        angle = self.effective_pole_angle().detach()
+        return {
+            'pole_radius': radius,
+            'damping': -torch.log(torch.clamp(radius, min=1e-12)),
+            'sample_decay_factor': radius,
+            'pole_angle': angle,
+            'pole_real': radius * torch.cos(angle),
+            'pole_imag': radius * torch.sin(angle),
+            'center_frequency': self.f_cyc_per_sample().detach(),
+            'stability_margin': 1.0 - radius,
+            'stability_excess': torch.relu(radius - 1.0),
+            'v_threshold': self.effective_threshold().detach(),
+        }
 
 try:
     from src.neurons.spikingjelly_compat import install_spikingjelly_contract as _install_spikingjelly_contract

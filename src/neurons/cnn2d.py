@@ -326,7 +326,7 @@ class CNN2DLIFLayer(nn.Module):
 
 
 class CNN2DRFLayer(nn.Module):
-    """Time-distributed Conv2d input coupling followed by exact-ZOH RF dynamics."""
+    """Time-distributed Conv2d input coupling followed by direct discrete RF dynamics."""
 
     compile_granularity = 'sequence'
 
@@ -348,6 +348,8 @@ class CNN2DRFLayer(nn.Module):
         batch_norm: bool = False,
         bias: bool = False,
         filter_value: float | None = None,
+        pole_radius_constrained: bool = True,
+        pole_radius_max: float = 0.9999,
     ) -> None:
         super().__init__()
         if reset_mode not in {'soft_reset', 'hard_reset', 'no_reset'}:
@@ -363,6 +365,12 @@ class CNN2DRFLayer(nn.Module):
         self.emit_spike = bool(emit_spike)
         self.reset_mode = str(reset_mode)
         self.reset_enabled = bool(reset_enabled) and self.reset_mode != 'no_reset'
+        self.pole_radius_constrained = bool(pole_radius_constrained)
+        self.pole_radius_max = float(pole_radius_max)
+        if not math.isfinite(self.pole_radius_max) or self.pole_radius_max <= 0.0:
+            raise ValueError('pole_radius_max must be a positive finite number.')
+        if self.pole_radius_constrained and self.pole_radius_max >= 1.0:
+            raise ValueError('pole_radius_max must be smaller than 1.0 when pole_radius_constrained=True.')
         self.uses_batch_norm = bool(batch_norm)
         self._compiled_sequence_no_trace = None
         self._compiled_sequence_with_trace = None
@@ -393,8 +401,8 @@ class CNN2DRFLayer(nn.Module):
                 raise ValueError('Fixed CNN-RF filter center frequency is outside frequency clip/bound range.')
         self.damping_lower = float(damping_magnitude_bounds[0])
         self.damping_upper = float(damping_magnitude_bounds[1])
-        self.freq_raw = nn.Parameter(torch.empty(self.output_size))
-        self.damping_raw = nn.Parameter(torch.empty(self.output_size))
+        self.pole_angle_raw = nn.Parameter(torch.empty(self.output_size))
+        self.pole_radius_raw = nn.Parameter(torch.empty(self.output_size))
         threshold_init = torch.full((self.output_size,), float(v_threshold), dtype=torch.float32)
         if self.trainable_threshold:
             self.v_threshold_param = nn.Parameter(_positive_threshold_init(v_threshold, self.output_size, eps=self.threshold_eps))
@@ -413,35 +421,50 @@ class CNN2DRFLayer(nn.Module):
             self.bn.reset_parameters()
         with torch.no_grad():
             freq = torch.empty_like(self.freq_lower)
-            damping = torch.empty_like(self.damping_raw)
+            radius = torch.empty_like(self.pole_radius_raw)
+            dleft, dright = trim_open_interval(self.damping_lower, self.damping_upper)
+            radius_left = math.exp(-dright)
+            radius_right = math.exp(-dleft)
+            if self.pole_radius_constrained:
+                radius_right = min(radius_right, self.pole_radius_max - 1.0e-6)
+            radius_left = max(1.0e-6, min(radius_left, max(radius_right - 1.0e-6, 1.0e-6)))
             for index in range(freq.numel()):
                 left, right = trim_open_interval(float(self.freq_lower[index]), float(self.freq_upper[index]))
                 if self.filter_fixed_value is None:
                     freq[index] = 0.5 * (left + right) if right <= left else float(torch.empty(1).uniform_(left, right).item())
                 else:
                     freq[index] = float(self.filter_fixed_value)
-                dleft, dright = trim_open_interval(self.damping_lower, self.damping_upper)
-                damping[index] = 0.5 * (dleft + dright) if dright <= dleft else float(torch.empty(1).uniform_(dleft, dright).item())
+                radius[index] = 0.5 * (radius_left + radius_right) if radius_right <= radius_left else float(torch.empty(1).uniform_(radius_left, radius_right).item())
             freq_span = torch.clamp(self.freq_upper - self.freq_lower, min=1.0e-6)
             freq01 = torch.clamp((freq - self.freq_lower) / freq_span, min=1.0e-6, max=1.0 - 1.0e-6)
-            damp01 = torch.clamp((damping - self.damping_lower) / (self.damping_upper - self.damping_lower), min=1.0e-6, max=1.0 - 1.0e-6)
-            self.freq_raw.copy_(torch.log(freq01) - torch.log1p(-freq01))
-            self.damping_raw.copy_(torch.log(damp01) - torch.log1p(-damp01))
-        self.freq_raw.requires_grad_(self.filter_fixed_value is None)
+            self.pole_angle_raw.copy_(torch.log(freq01) - torch.log1p(-freq01))
+            if self.pole_radius_constrained:
+                radius01 = torch.clamp(radius / self.pole_radius_max, min=1.0e-6, max=1.0 - 1.0e-6)
+                self.pole_radius_raw.copy_(torch.log(radius01) - torch.log1p(-radius01))
+            else:
+                self.pole_radius_raw.copy_(torch.log(torch.expm1(torch.clamp(radius, min=1.0e-6))))
+        self.pole_angle_raw.requires_grad_(self.filter_fixed_value is None)
 
     def effective_frequency(self) -> torch.Tensor:
-        sigma = torch.sigmoid(self.freq_raw)
+        sigma = torch.sigmoid(self.pole_angle_raw)
         return self.freq_lower + (self.freq_upper - self.freq_lower) * sigma
 
+    def effective_pole_angle(self) -> torch.Tensor:
+        return 2.0 * math.pi * self.effective_frequency()
+
+    def effective_pole_radius(self) -> torch.Tensor:
+        if self.pole_radius_constrained:
+            return self.pole_radius_max * torch.sigmoid(self.pole_radius_raw)
+        return F.softplus(self.pole_radius_raw)
+
     def effective_damping_magnitude(self) -> torch.Tensor:
-        sigma = torch.sigmoid(self.damping_raw)
-        return self.damping_lower + (self.damping_upper - self.damping_lower) * sigma
+        return -torch.log(torch.clamp(self.effective_pole_radius(), min=1.0e-12))
 
     def effective_b(self) -> torch.Tensor:
-        return -self.effective_damping_magnitude()
+        return torch.log(torch.clamp(self.effective_pole_radius(), min=1.0e-12))
 
     def effective_omega(self) -> torch.Tensor:
-        return 2.0 * math.pi * self.effective_frequency()
+        return self.effective_pole_angle()
 
     def effective_threshold(self) -> torch.Tensor:
         if self.v_threshold_param is not None:
@@ -449,7 +472,7 @@ class CNN2DRFLayer(nn.Module):
         return self.v_threshold_buffer
 
     def rho(self) -> torch.Tensor:
-        return torch.exp(self.effective_b())
+        return self.effective_pole_radius()
 
     def f_cyc_per_sample(self) -> torch.Tensor:
         return self.effective_frequency()
@@ -457,17 +480,6 @@ class CNN2DRFLayer(nn.Module):
     def effective_input_weight(self) -> torch.Tensor:
         return self.conv.weight.reshape(self.output_size, -1)
 
-    @staticmethod
-    def _zoh_input_coefficients(b: torch.Tensor, omega: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        exp_b = torch.exp(b)
-        cos_phi = torch.cos(omega)
-        sin_phi = torch.sin(omega)
-        real_num = exp_b * cos_phi - 1.0
-        imag_num = exp_b * sin_phi
-        denom = torch.clamp(b.square() + omega.square(), min=torch.finfo(b.dtype).eps)
-        beta_x = (real_num * b + imag_num * omega) / denom
-        beta_y = (imag_num * b - real_num * omega) / denom
-        return beta_x, beta_y
 
     def enable_compiled_forward(self, **compile_kwargs: Any) -> tuple[bool, str]:
         no_trace, no_applied, no_policy = compile_callable(_cnn_rf_sequence_no_trace, compile_kwargs=compile_kwargs, label='cnn_rf_sequence_no_trace')
@@ -510,12 +522,12 @@ class CNN2DRFLayer(nn.Module):
         _batch, _time, _channels, height, width = [int(v) for v in current_seq.shape]
         dtype = sequence_state_dtype(input_sequence)
         device = input_sequence.device
-        b = self.effective_b().to(device=device, dtype=dtype)
-        omega = self.effective_omega().to(device=device, dtype=dtype)
-        rho = torch.exp(b)
-        cos_phi = torch.cos(omega)
-        sin_phi = torch.sin(omega)
-        beta_x, beta_y = self._zoh_input_coefficients(b, omega)
+        rho = self.effective_pole_radius().to(device=device, dtype=dtype)
+        angle = self.effective_pole_angle().to(device=device, dtype=dtype)
+        cos_phi = torch.cos(angle)
+        sin_phi = torch.sin(angle)
+        beta_x = torch.ones_like(rho)
+        beta_y = torch.zeros_like(rho)
         x_post = torch.zeros(batch_size, self.output_size, height, width, device=device, dtype=dtype)
         y_post = torch.zeros_like(x_post)
         threshold = self.effective_threshold().to(device=device, dtype=dtype)
@@ -531,9 +543,18 @@ class CNN2DRFLayer(nn.Module):
         return (mem_seq.contiguous() if mem_seq is not None else None), spike_seq.contiguous()
 
     def filter_stats_vectors(self) -> dict[str, torch.Tensor]:
+        radius = self.effective_pole_radius().detach()
+        angle = self.effective_pole_angle().detach()
         return {
-            'damping': self.effective_damping_magnitude().detach(),
+            'pole_radius': radius,
+            'damping': -torch.log(torch.clamp(radius, min=1e-12)),
+            'sample_decay_factor': radius,
+            'pole_angle': angle,
+            'pole_real': radius * torch.cos(angle),
+            'pole_imag': radius * torch.sin(angle),
             'center_frequency': self.f_cyc_per_sample().detach(),
+            'stability_margin': 1.0 - radius,
+            'stability_excess': torch.relu(radius - 1.0),
             'v_threshold': self.effective_threshold().detach(),
         }
 

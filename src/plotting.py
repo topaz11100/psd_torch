@@ -83,6 +83,8 @@ PSD_CATEGORIES = {
     # here makes the script safe for dataset PSD CSVs with the same schema.
     "dataset_curve",
     "dataset_dispersion",
+    "dataset_element_psd",
+    "dataset_element_fft",
 }
 RENDERED_CATEGORIES = PSD_CATEGORIES | {"filter_snapshot", "filter_trend", "layer_distance_profile", "layer_distance_trend", "layer_dispersion_profile", "layer_dispersion_trend"}
 SKIPPED_CATEGORIES = {
@@ -397,6 +399,10 @@ def _layer_display(rows: Sequence[dict[str, str]]) -> str:
 
 def _psd_title(category: str, rows: Sequence[dict[str, str]]) -> str:
     layer = _layer_display(rows)
+    if category == "dataset_element_psd":
+        return "Dataset Element PSD"
+    if category == "dataset_element_fft":
+        return "Dataset Element FFT"
     if category.endswith("curve"):
         return f"PSD of {layer}"
     return f"PSD Dispersion of {layer}"
@@ -406,6 +412,8 @@ def _psd_ylabel(category: str, rows: Sequence[dict[str, str]]) -> str:
     scale = _first_nonempty(rows, "scale").lower()
     unit = _first_nonempty(rows, "value_unit")
     statistic = _first_nonempty(rows, "statistic")
+    if category.startswith("dataset_element_"):
+        return _human_token(unit, "Value")
     if category.endswith("curve"):
         return "Power (dB)" if scale == "db" else "Power"
     stat_name = _human_token(statistic, "Dispersion")
@@ -415,13 +423,17 @@ def _psd_ylabel(category: str, rows: Sequence[dict[str, str]]) -> str:
 
 
 def _series_label(row: dict[str, str], category: str) -> str:
-    if category.endswith("curve"):
+    if category.startswith("dataset_element_"):
+        columns = ["scope", "element_index", "fft_component", "variant", "scale"]
+    elif category.endswith("curve"):
         columns = ["probe_family", "label", "signal_kind", "series", "extractor", "reducer", "variant", "scale"]
     elif category.endswith("dispersion"):
         columns = ["probe_family", "label", "signal_kind", "series", "extractor", "statistic", "variant", "scale"]
     else:
         columns = ["metric", "statistic"]
     tokens = [_human_token(row.get(column, "")) for column in columns if str(row.get(column, "")).strip()]
+    if category.startswith("dataset_element_"):
+        return " / ".join(tokens) if tokens else "Element"
     # In the usual split psd_analysis files, all rows have one effective series.
     # Keep the label short to avoid unreadable legends.
     if len(tokens) <= 2:

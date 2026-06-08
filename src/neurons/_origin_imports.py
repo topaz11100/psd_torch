@@ -2,7 +2,7 @@
 
 The user explicitly requested that origin-backed models keep author code
 rather than ad-hoc reimplementations. These helpers therefore load the
-released origin modules directly from ``Origin/`` and expose them to the
+released origin modules directly from ``origin/`` and expose them to the
 wrapper modules.
 """
 
@@ -17,7 +17,7 @@ from src.neurons._common import surrogate_spike
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_ORIGIN_ROOT = _PROJECT_ROOT / 'Origin'
+_ORIGIN_ROOT = _PROJECT_ROOT / 'origin'
 _ORIGIN_NEURON_ROOT = _ORIGIN_ROOT / 'neuron_model'
 
 

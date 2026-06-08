@@ -1,48 +1,68 @@
 model_training:
-  dataset: mnist
-  prep_root: /home/yongokhan/workspace/data/prep_data
-  checkpoint_root: /home/yongokhan/workspace/result/model_training/checkpoints
-  metric_root: /home/yongokhan/workspace/result/model_training/metrics
-  neuron_type: lif
-  recurrent: false
-  reset: soft
-  v_th:
-  - fixed
-  - 1.0
-  filter: train
-  hidden_spec: 256,128
-  readout_mode: temporal_membrane
-  epochs: 10
-  batch_size: 128
-  lr: 0.001
-  num_workers: 0
-  seed: 0
-  gpu_index: 0
-  analysis_checkpoint_epochs: [10]
-  ddp: false
-  ddp_world_size: 2
-  batch_size_is_global: true
-  signal_curve_space: exact
-  signal_curve_scale: raw
-  signal_curve_centering: raw
-  signal_curve_reducer: mean
-  signal_curve_distance_metric: centered_l2
-  signal_curve_userbin_edges: null
-  signal_curve_userbin_reducer: mean
-  signal_window: hann
-  psd_reg_output_family: spike
-  pca_dim_per_layer: []
-  w_clip_edges: null
-  alpha_clip_edges: null
-  scenario_mode: none
-  band_edge: null
-  tear: 1
-  compile_cpu_threads: null
-  compile: true
-  amp: 'off'
-  ddp_timeout_minutes: 120
-  resume_checkpoint: null
-  lambda_psd_rep_input: 0.0
-  lambda_psd_rep_adjacent: 0.0
-  lambda_psd_pca_input: 0.0
-  lambda_psd_pca_adjacent: 0.0
+  data:
+    dataset: ""              # Dataset token matching a prepared bundle under prep_root.
+    prep_root: ""            # Prepared data root containing <dataset>/manifest.yaml.
+  model:
+    neuron_type: ""          # Explicit model family only: if, lif, rf, dh_snn, d_rf, my_dh_snn, my_d_rf, my_r_dh_snn, spikegru, spikformer, vgg11_lif, vgg11_rf, etc.; do not encode branch/reset/v_th in this string.
+    recurrent: ""            # true enables recurrent hidden connections for supported dense families.
+    reset: ""                # Explicit reset mode: soft, hard, or none/no_reset when supported. my_* reset is soma-local and never touches dendritic branch states.
+    filter: ""               # Filter policy: train or a fixed numeric value.
+    branch: ""               # Explicit positive branch count for DH-SNN/D-RF/my_* models; required for those families and never encoded in neuron_type.
+    discrete_dynamics:
+      rf_pole_radius_constrained: "" # Vanilla RF only. true constrains the direct discrete pole radius |a| to [0, rf_pole_radius_max); false allows learned radii above one.
+      rf_pole_radius_max: ""         # Vanilla RF pole-radius ceiling when constrained; use a value below 1, e.g. 0.9999.
+    hidden_spec: ""          # Dense/CNN architecture spec string.
+    readout_mode: ""         # Readout: temporal_membrane, final_membrane, first_spike, max_fire, max_rate, spikegru_max_over_time.
+    v_th: ["", ""]          # Soma threshold pair [fixed|train, initial_value]. Applies to vanilla soma and my_* soma only; branch thresholds are not created. Always write as an array.
+  optimization:
+    epochs: ""               # Training epochs.
+    batch_size: ""           # Global batch size; in DDP this must divide the number of selected GPUs.
+    lr: ""                   # Optimizer learning rate.
+    num_workers: ""          # DataLoader worker count.
+    seed: ""                 # Random seed.
+    analysis_checkpoint_epochs: []   # Epochs to evaluate/save checkpoints; blank defaults to the final epoch.
+    resume_checkpoint: ""    # Optional checkpoint path for strict resume.
+  regularization:
+    signal_curve:
+      signal_curve_space: ""             # PSD regularizer curve space: exact or userbin.
+      signal_curve_scale: ""             # PSD regularizer scale: raw, db, or area.
+      signal_curve_centering: ""         # PSD centering: raw or centered.
+      signal_curve_reducer: ""           # PSD curve reducer: mean or median.
+      signal_curve_distance_metric: ""   # PSD distance: centered_l2 or diff_l2.
+      signal_curve_userbin_edges: []      # Optional userbin edges for userbin regularization.
+      signal_curve_userbin_reducer: ""   # Userbin reducer: mean, median, or sum.
+      signal_window: ""                  # Temporal taper for signal processing: hann or none.
+    psd_regularizer:
+      lambda_psd_rep_input: ""           # Weight for input-to-layer representative PSD matching.
+      lambda_psd_rep_adjacent: ""        # Weight for adjacent-layer representative PSD matching.
+      lambda_psd_pca_input: ""           # Weight for input-to-layer PCA PSD matching.
+      lambda_psd_pca_adjacent: ""        # Weight for adjacent-layer PCA PSD matching.
+      psd_reg_output_family: ""          # Regularizer signal family: spike or membrane.
+      pca_dim_per_layer: []               # PCA dimensions per layer; 1 gives 1D PCA, >=2 gives MIMO PCA.
+    proposed_branch:
+      lambda_branch_ortho: ""            # my_* branch-basis orthogonality regularization weight.
+      lambda_branch_s: ""                # my_* soft branch-count regularization weight.
+      soft_mask_epochs: ""               # Epochs before branch STE can be enabled.
+      ste_epochs: ""                     # Epoch count for straight-through branch-count training.
+      harden_epoch: ""                   # Epoch from which my_* branch masks are hardened.
+  scenario_constraints:
+    scenario_mode: ""       # Vanilla-only constraint: none, clip, structure, clipstructure.
+    w_clip_edges: []         # Vanilla RF frequency clip edges, grouped by layer when scenario uses RF clipping.
+    alpha_clip_edges: []     # Vanilla LIF alpha clip edges, grouped by layer when scenario uses LIF clipping.
+    band_edge: ""           # Vanilla structure band edge spec.
+    tear: ""                # Vanilla structure grouping factor.
+  distributed:
+    gpu_index: []            # CUDA index array. [k] => non-DDP cuda:k; [a,b,...] => auto torchrun DDP over those GPUs.
+    batch_size_is_global: "" # true treats batch_size as global batch size; DDP currently requires true.
+    ddp_timeout_minutes: "" # DDP/NCCL collective timeout minutes.
+  output:
+    checkpoint_root: ""     # Directory for .pt checkpoints; must be empty for a fresh run.
+    metric_root: ""         # Directory for training metric CSVs.
+    run_timestamp: ""       # Optional run_<timestamp> suffix.
+    timestamped_output: ""  # true writes under timestamped run directories.
+  runtime:
+    compile: ""             # true enables the fixed regional torch.compile policy.
+    compile_cpu_threads: "" # CPU threads reserved for torch.compile/Inductor. Overrides torchrun's OMP_NUM_THREADS=1 default.
+    compile_cache_mode: ""  # shared reuses one Inductor cache across DDP ranks; per_rank isolates rank-local caches.
+    ddp_compile_warmup: ""  # true lets rank0 prime the shared compile cache before other ranks enter training.
+    amp: ""                 # off or on; on maps to bf16_safe where supported.

@@ -144,8 +144,12 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _origin_root() -> Path:
+    return _project_root() / 'origin'
+
+
 def _load_origin_spikformer_class() -> type[nn.Module]:
-    source_path = _project_root() / 'Origin' / 'spikformer' / 'cifar10dvs' / 'model.py'
+    source_path = _origin_root() / 'spikformer' / 'cifar10dvs' / 'model.py'
     if not source_path.exists():
         raise RuntimeError(f'Official Spikformer source is missing: {source_path}')
     module_spec = importlib.util.spec_from_file_location('_psd_origin_spikformer_cifar10dvs_model', source_path)
@@ -157,7 +161,7 @@ def _load_origin_spikformer_class() -> type[nn.Module]:
         module_spec.loader.exec_module(module)
     except Exception as exc:
         raise RuntimeError(
-            'Could not import Origin/spikformer/cifar10dvs/model.py. '
+            'Could not import origin/spikformer/cifar10dvs/model.py. '
             'Install the author-code dependencies used by the official Spikformer profile.'
         ) from exc
     cls = getattr(module, 'Spikformer', None)
@@ -206,7 +210,7 @@ def _adapt_to_cifar10dvs_frames(input_sequence: torch.Tensor) -> torch.Tensor:
 
 
 class SpikformerAuthorClassifier(nn.Module):
-    """Wrapper around Origin/spikformer/cifar10dvs/model.py::Spikformer."""
+    """Wrapper around origin/spikformer/cifar10dvs/model.py::Spikformer."""
 
     def __init__(
         self,
@@ -291,7 +295,7 @@ class SpikformerAuthorClassifier(nn.Module):
     @staticmethod
     def _block_output_to_batch_time_feature(tensor: torch.Tensor) -> torch.Tensor:
         if tensor.ndim == 4:
-            # Origin Block returns (T,B,C,N). PSD analysis expects (B,T,features).
+            # origin Block returns (T,B,C,N). PSD analysis expects (B,T,features).
             return tensor.permute(1, 0, 2, 3).reshape(int(tensor.shape[1]), int(tensor.shape[0]), -1).contiguous()
         if tensor.ndim == 3:
             return tensor.permute(1, 0, 2).contiguous()
@@ -319,10 +323,10 @@ class SpikformerAuthorClassifier(nn.Module):
             'main_analysis_target': 'dense_snn',
             'model_profile': 'spikformer',
             'paper_experiment': 'cifar10_dvs_neuromorphic_classification',
-            'source_code_path': 'Origin/spikformer/cifar10dvs/model.py',
+            'source_code_path': 'origin/spikformer/cifar10dvs/model.py',
             'source_factory_name': 'spikformer',
             'source_class_name': 'Spikformer',
-            'source_train_entrypoint': 'Origin/spikformer/cifar10dvs/train.py',
+            'source_train_entrypoint': 'origin/spikformer/cifar10dvs/train.py',
             'paper_setting': '2-256',
             'model_size': '2-256',
             'patch_size': 16,

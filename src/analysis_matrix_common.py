@@ -22,7 +22,7 @@ from src.stat.probe_selection import (
 )
 from src.util.csv_schema import common_row, write_common_csv
 
-MLP_MODEL_FAMILIES = frozenset({'lif', 'rf'})
+MLP_MODEL_FAMILIES = frozenset({'if', 'lif', 'rf', 'tc_lif', 'ts_lif', 'dh_snn', 'd_rf', 'my_dh_snn', 'my_d_rf', 'my_r_dh_snn'})
 OUTPUT_SERIES = frozenset({'membrane', 'spike'})
 ProbeMapKey = tuple[str, int, str, str, str, str, int | None, str, int | None]
 

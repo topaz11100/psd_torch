@@ -239,7 +239,7 @@ def _reconstruct_structured_view(
         flatten = original.reshape(int(original.shape[0]), -1)
         if view in {'model_input', 'original_input'}:
             return original
-        if view in {'flatten_input', 'sequence_input'}:
+        if view in {'flatten_input', 'sequence_input', 'model_input_flatten'}:
             return flatten
         if view in {'psd_input', 'event_frame_psd_view'}:
             return flatten.transpose(0, 1).contiguous()
@@ -339,7 +339,7 @@ class PreparedStructuredSplitDataset(Dataset[tuple[torch.Tensor, int]]):
                 declared = tuple(str(v) for v in self.metadata.get('available_views', ()))
                 defaults = ('model_input', 'model_input_cnn', 'cnn_input', 'model_input_flatten', 'psd_input', 'image_psd_view', 'original_input', 'flatten_input', 'sequence_input')
                 return tuple(dict.fromkeys((*declared, *defaults)))
-            return ('model_input', 'psd_input', 'event_frame_psd_view', 'original_input', 'flatten_input', 'sequence_input')
+            return ('model_input', 'psd_input', 'event_frame_psd_view', 'original_input', 'flatten_input', 'model_input_flatten', 'sequence_input')
         return (self.primary_view_name,)
 
     def view_tensor(self, view_name: str) -> PreparedViewAccessor:

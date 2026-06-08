@@ -1,0 +1,32 @@
+DI:
+  data:
+    dataset: shd
+    prep_root: /home/yongokhan/workspace/data/prep_data
+    split: train
+    view_name: ''
+    max_samples: ''
+  output:
+    output_root: /home/yongokhan/workspace/result/rf_scinario/DI/shd/train/demean/area
+    run_timestamp: ''
+    timestamped_output: false
+  runtime:
+    batch_size: 128
+    num_workers: 8
+    gpu_index:
+    - 0
+    device: cuda
+    allow_cpu_fallback: false
+    seed: 0
+    pin_memory: true
+    stats_dtype: float32
+  signal:
+    demean: true
+    epsilon: 1.0e-12
+    psd_windows:
+    - none
+    psd_row_reducer: mean
+    psd_value_transform: area
+  plotting:
+    plot_dpi: 180
+    plot_log_y: false
+    save_plots: true

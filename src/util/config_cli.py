@@ -28,8 +28,36 @@ def extract_config_path(argv: Sequence[str] | None) -> str | None:
     return None
 
 
+def _flatten_config_payload(payload: dict[str, Any], *, path: str = '') -> dict[str, Any]:
+    """Flatten a nested stage config by leaf argument name.
+
+    Public YAML files are intentionally grouped by semantic blocks such as
+    ``data:``, ``model:``, ``regularization:``, and ``runtime:``.  Existing
+    entrypoints still use argparse destination names.  This helper preserves the
+    cleaner YAML hierarchy while keeping CLI compatibility by mapping each leaf
+    key to its argparse destination.  Duplicate leaf names are rejected because
+    they would make the resolved command ambiguous.
+    """
+
+    flattened: dict[str, Any] = {}
+
+    def walk(mapping: dict[str, Any], prefix: str) -> None:
+        for key, value in mapping.items():
+            name = str(key)
+            child_path = f'{prefix}.{name}' if prefix else name
+            if isinstance(value, dict):
+                walk(value, child_path)
+                continue
+            if name in flattened:
+                raise ValueError(f'--config leaf key is duplicated after flattening: {name!r} at {child_path!r}')
+            flattened[name] = value
+
+    walk(payload, path)
+    return flattened
+
+
 def load_config_dict(config_path: str, *, stage_key: str | None = None) -> dict[str, Any]:
-    """YAML 설정 파일을 읽어 딕셔너리로 반환한다."""
+    """YAML 설정 파일을 읽고 stage 내부의 중첩 구조를 CLI 인수 dict로 평탄화한다."""
 
     path = Path(config_path).expanduser().resolve()
     suffix = path.suffix.lower()
@@ -43,7 +71,7 @@ def load_config_dict(config_path: str, *, stage_key: str | None = None) -> dict[
         if not isinstance(stage_payload, dict):
             raise ValueError(f'--config의 {stage_key!r} 값은 객체(dict)여야 합니다: {path}')
         payload = stage_payload
-    return dict(payload)
+    return _flatten_config_payload(dict(payload), path=stage_key or '')
 
 
 
@@ -60,11 +88,24 @@ def parse_args_with_config(
     config_path = extract_config_path(resolved_argv)
     if config_path:
         loaded = load_config_dict(config_path, stage_key=stage_key)
-        known = {action.dest for action in parser._actions}
+        action_by_dest = {action.dest: action for action in parser._actions}
+        known = set(action_by_dest)
         unknown = sorted(key for key in loaded.keys() if key not in known)
         if unknown:
             raise ValueError(f'--config에 알 수 없는 키가 있습니다: {", ".join(unknown)}')
-        parser.set_defaults(**loaded)
+
+        def is_blank_template_value(value: Any) -> bool:
+            if value is None or value == '':
+                return True
+            if isinstance(value, (list, tuple)) and all(item in (None, '') for item in value):
+                return True
+            return False
+
+        # Clean templates intentionally use blank values.  Do not pass those
+        # blanks into argparse because typed actions would try to convert ""
+        # and fail before the project can report missing required settings.
+        resolved_defaults = {key: value for key, value in loaded.items() if not is_blank_template_value(value)}
+        parser.set_defaults(**resolved_defaults)
     for action in parser._actions:
         if getattr(action, 'required', False):
             action.required = False

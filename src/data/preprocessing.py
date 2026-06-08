@@ -19,8 +19,8 @@ from src.data.storage import SINGLE_STRUCTURED_NPY_STORAGE_FORMAT, fsync_path, l
 from src.util.config import ensure_dir, save_yaml
 
 
-_PREPROCESSING_SPEC_DOC = 'Spec/theory/data_prep/data_prep.md'
-_PREPROCESSING_IMPL_SPEC_DOC = 'Spec/impl/spec/data_prep.md'
+_PREPROCESSING_SPEC_DOC = 'spec/Theory/data_prep/data_prep.md'
+_PREPROCESSING_IMPL_SPEC_DOC = 'spec/Implementation/data_prep.md'
 _DEAP_LABEL_AXIS_TO_INDEX = {
     'valence': 0,
     'arousal': 1,
@@ -60,6 +60,8 @@ _STREAMING_WRITERS: dict[str, StreamingDatasetWriter] = {}
 
 _PROJECT_STANDARD_PREP_PROFILE = 'project_standard'
 _STATIC_IMAGE_REPEAT_T = 4
+_IMAGE_DATASET_TOKENS = {'mnist', 'cifar-10', 'cifar-100', 'n-mnist', 'cifar10-dvs', 'dvs128-gesture'}
+_IMAGE_MLP_FLATTEN_VIEWS = ('model_input_flatten', 'sequence_input', 'flatten_input')
 _REFERENCE_PREP_PROFILES = {
     'need_high_cifar10_dvs_t16': {
         'dataset_name': 'cifar10-dvs',
@@ -206,7 +208,7 @@ def _quantize_deap_labels(scores: np.ndarray, *, num_classes: int) -> np.ndarray
         quantized[scores <= 3.0] = 0
         quantized[scores >= 7.0] = 2
         return quantized
-    raise ValueError('DEAP deap_num_classes must be 2 or 3 according to Spec/theory/data_prep/data_prep.md.')
+    raise ValueError('DEAP deap_num_classes must be 2 or 3 according to spec/Theory/data_prep/data_prep.md.')
 
 
 def _remove_deap_baseline(subject_eeg: np.ndarray) -> np.ndarray:
@@ -319,7 +321,7 @@ def _singlefile_storage_contract(dataset_token: str) -> _SingleFileStorageContra
             stored_view_name='model_input',
             training_view_name='model_input',
             psd_view_name=spec.psd_view_name,
-            available_views=('model_input', 'psd_input', spec.psd_view_name, 'original_input', 'flatten_input', 'sequence_input'),
+            available_views=('model_input', 'psd_input', spec.psd_view_name, 'original_input', 'flatten_input', 'model_input_flatten', 'sequence_input'),
         )
     raise ValueError(f'Unsupported single-file storage contract dataset: {dataset_token!r}.')
 
@@ -653,7 +655,55 @@ def _save_streaming_manifest(
     )
     if max_samples is not None:
         manifest['max_samples_truncated'] = int(max_samples)
+    _install_and_validate_image_mlp_manifest_contract(manifest)
     save_yaml(out_dir / 'manifest.yaml', manifest)
+
+
+def _install_and_validate_image_mlp_manifest_contract(manifest: dict[str, Any]) -> None:
+    """Attach and validate the image-to-MLP flatten contract during data_prep.
+
+    Static image datasets must provide an explicit flattened split file, while
+    event-frame image datasets may reconstruct the flattened time-major view on
+    demand from the stored frame tensor.  The training and analysis entrypoints
+    re-check this manifest contract before using an MLP/dense family.
+    """
+
+    dataset_token = canonicalize_dataset_name(str(manifest.get('dataset_name', '')))
+    if dataset_token not in _IMAGE_DATASET_TOKENS:
+        return
+    available = tuple(str(v) for v in manifest.get('available_views', ()))
+    missing_views = [view for view in ('sequence_input', 'flatten_input') if view not in available]
+    if missing_views:
+        raise ValueError(
+            f'Image dataset {dataset_token!r} manifest must declare flattened MLP views {missing_views}. '
+            f'Available views: {sorted(available)}.'
+        )
+    psd_axis_kind = str(manifest.get('psd_axis_kind', ''))
+    if psd_axis_kind == 'static_repeat':
+        files_by_view = manifest.get('files_by_view')
+        if not isinstance(files_by_view, dict) or 'model_input_flatten' not in files_by_view:
+            raise ValueError(
+                f'Static image dataset {dataset_token!r} must store a separate model_input_flatten split payload for MLP experiments.'
+            )
+        flatten_shape = manifest.get('flatten_input_shape') or manifest.get('stored_shape_by_view', {}).get('model_input_flatten')
+        if not isinstance(flatten_shape, (list, tuple)) or len(flatten_shape) != 2:
+            raise ValueError(f'Static image dataset {dataset_token!r} must declare rank-2 flatten_input_shape [T, F].')
+        manifest['flatten_training_view_name'] = 'model_input_flatten'
+    elif psd_axis_kind == 'image_temporal':
+        original_shape = manifest.get('original_shape') or manifest.get('stored_shape')
+        if not isinstance(original_shape, (list, tuple)) or len(original_shape) != 4:
+            raise ValueError(f'Event/image-temporal dataset {dataset_token!r} must declare original_shape [T, C, H, W].')
+        manifest['flatten_training_view_name'] = 'sequence_input'
+        manifest['flatten_input_shape'] = [int(original_shape[0]), int(original_shape[1]) * int(original_shape[2]) * int(original_shape[3])]
+    else:
+        raise ValueError(f'Image dataset {dataset_token!r} must use psd_axis_kind static_repeat or image_temporal, got {psd_axis_kind!r}.')
+    manifest['image_mlp_flatten_contract'] = {
+        'enabled': True,
+        'scope': 'all_non_frame_mlp_training_and_checkpoint_signal_analysis',
+        'training_view_name_for_mlp': str(manifest.get('flatten_training_view_name')),
+        'rank_contract': 'per_sample_(T,F)',
+        'frame_model_exempt_families': ['cnn_lif', 'cnn_rf', 'spikformer'],
+    }
 
 
 def _channel_major_flatten_from_static_image(images: torch.Tensor) -> torch.Tensor:
@@ -1246,7 +1296,7 @@ def _stream_write_deap_bundle(
         allowed = ', '.join(sorted(_DEAP_LABEL_AXIS_TO_INDEX))
         raise ValueError(f'Unsupported deap_label_axis {context.deap_label_axis!r}. Allowed: {allowed}.')
     if int(context.deap_num_classes) not in {2, 3}:
-        raise ValueError('DEAP deap_num_classes must be 2 or 3 according to Spec/theory/data_prep/data_prep.md.')
+        raise ValueError('DEAP deap_num_classes must be 2 or 3 according to spec/Theory/data_prep/data_prep.md.')
     dataset_token = 'deap'
     profile_name, profile_payload = _resolve_prep_profile(dataset_token, context.prep_profile)
     dataset_root = _resolve_deap_root(context.raw_data_root)
@@ -1726,6 +1776,8 @@ def _stream_write_dvs_bundle(
         'loader_backend_policy': 'spikingjelly_preferred_with_tonic_fallback_for_n_mnist_only',
         'sequence_input_rule': 'flatten_input_identity',
         'original_shape': [int(num_frames), *[int(v) for v in sensor_shape]],
+        'flatten_input_shape': [int(num_frames), int(sensor_shape[0]) * int(sensor_shape[1]) * int(sensor_shape[2])],
+        'flatten_training_view_name': 'model_input_flatten',
     }
     if dataset_token == 'cifar10-dvs':
         metadata_extra['split_ratio'] = 0.9
@@ -1796,7 +1848,7 @@ def prepare_dataset_bundle(
         )
 
     raise RuntimeError(
-        f'No Spec-compliant one-sample streaming writer is registered for {dataset_token!r}. '
+        f'No spec-compliant one-sample streaming writer is registered for {dataset_token!r}. '
         'The official data_prep path cannot fall back to split-level in-memory materialization.'
     )
 

@@ -1,0 +1,31 @@
+dataset_element_psd:
+  data:
+    dataset: shd
+    prep_root: /home/yongokhan/workspace/data/prep_data
+    view_name: ''
+  output:
+    output_root: /home/yongokhan/workspace/result/rf_scinario/dataset_signal/shd/dataset_element_psd
+    run_timestamp: ''
+    timestamped_output: false
+  runtime:
+    batch_size: 128
+    gpu_index:
+    - 0
+    seed: 0
+    num_workers: 8
+    pin_memory: true
+    device: cuda
+    stats_dtype: float32
+  signal:
+    signal_window: none
+    variants:
+    - raw
+    - centered
+    scales:
+    - raw
+    - db
+    - area
+    scopes:
+    - train
+    - test
+    sample_reducer: mean

@@ -1,8 +1,13 @@
 plotting:
-  output_root: null
-  format: png
-  include_filter_count: false
-  input: /home/yongokhan/workspace/result/base/psd_analysis
-  manifest_name: recursive_plot_manifest.yaml
-  output: /home/yongokhan/workspace/result/base/plots
-  overwrite: true
+  input_output:
+    input: ""                # Batch directory or single CSV file to plot.
+    output: ""               # Output plot directory; blank uses the program default.
+    output_root: ""          # Deprecated alias of output, retained for compatibility.
+    manifest_name: ""        # Manifest YAML filename under output_root.
+  rendering:
+    format: ""               # Figure format; currently png.
+    overwrite: ""            # true overwrites existing figure files.
+    include_filter_count: "" # true includes count statistic in filter_snapshot plots.
+  output:
+    run_timestamp: ""        # Optional run_<timestamp> suffix.
+    timestamped_output: ""   # true writes under a timestamped run directory.

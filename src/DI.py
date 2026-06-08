@@ -1,12 +1,10 @@
-"""Standalone frequency-bin discriminative-index extractor.
+"""Integrated frequency-bin discriminative-index extractor.
 
-Place this file at ``src/DI.py`` in the project root and run with
-``python -m src.DI --config config/DI.yaml``.
-
-The implementation is intentionally self-contained: it does not import project
-modules and does not modify any existing file. It directly reads the prepared
-``data_prep`` single-structured ``.npy`` bundles and the accompanying
-``manifest.yaml``.
+Run with ``python -m src.DI --config config/DI.yaml``.  The module remains
+independent of the model-training pipeline, but now uses the project YAML/path
+helpers and accepts the same nested clean-config style as the other stages.
+It reads prepared ``data_prep`` single-structured ``.npy`` bundles and their
+``manifest.yaml`` files directly.
 """
 
 from __future__ import annotations
@@ -106,11 +104,46 @@ def as_list(value: Any) -> list[Any]:
     if value is None:
         return []
     if isinstance(value, (list, tuple)):
-        return list(value)
-    if isinstance(value, str) and "," in value:
-        return [chunk.strip() for chunk in value.split(",") if chunk.strip()]
+        return [item for item in value if item not in (None, "")]
+    if isinstance(value, str):
+        if value.strip() == "":
+            return []
+        if "," in value:
+            return [chunk.strip() for chunk in value.split(",") if chunk.strip()]
     return [value]
 
+
+def flatten_config_section(section: Mapping[str, Any]) -> dict[str, Any]:
+    """Flatten nested DI config groups by leaf argument name."""
+
+    flattened: dict[str, Any] = {}
+
+    def walk(mapping: Mapping[str, Any], prefix: str = "") -> None:
+        for key, value in mapping.items():
+            name = str(key)
+            child = f"{prefix}.{name}" if prefix else name
+            if isinstance(value, Mapping):
+                walk(value, child)
+                continue
+            if name in flattened:
+                raise ValueError(f"Duplicate DI config leaf key after flattening: {name!r} at {child!r}")
+            flattened[name] = value
+
+    walk(section)
+    return flattened
+
+
+
+
+def config_value(section: Mapping[str, Any], key: str, default: Any = None) -> Any:
+    """Return a DI config value while treating clean-template blanks as missing."""
+
+    value = section.get(key, default)
+    if value in (None, ""):
+        return default
+    if isinstance(value, (list, tuple)) and len(value) == 0:
+        return default
+    return value
 
 def str_to_bool(value: Any) -> bool:
     if isinstance(value, bool):
@@ -254,46 +287,47 @@ def config_from_mapping(payload: Mapping[str, Any]) -> DIConfig:
         if isinstance(candidate, Mapping):
             section = candidate
             break
+    section = flatten_config_section(section)
 
-    dataset_tokens = [canonicalize_dataset_name(str(v)) for v in as_list(section.get("dataset"))]
+    dataset_tokens = [canonicalize_dataset_name(str(v)) for v in as_list(config_value(section, "dataset"))]
     if not dataset_tokens:
         raise ValueError("Config field dataset must not be empty.")
 
-    psd_windows = tuple(dict.fromkeys(normalize_signal_window(v) for v in as_list(section.get("psd_windows", ["none", "hann"]))))
+    psd_windows = tuple(dict.fromkeys(normalize_signal_window(v) for v in as_list(config_value(section, "psd_windows", ["none", "hann"]))))
     if not psd_windows:
         raise ValueError("Config field psd_windows must not be empty.")
-    reducer = str(section.get("psd_row_reducer", "mean")).strip().lower()
+    reducer = str(config_value(section, "psd_row_reducer", "mean")).strip().lower()
     if reducer not in {"mean", "median"}:
         raise ValueError("psd_row_reducer must be mean or median.")
-    transform = str(section.get("psd_value_transform", "raw")).strip().lower()
+    transform = str(config_value(section, "psd_value_transform", "raw")).strip().lower()
     if transform not in {"raw", "db", "area"}:
         raise ValueError("psd_value_transform must be raw, db, or area.")
 
     return DIConfig(
         dataset=dataset_tokens,
-        prep_root=Path(str(section.get("prep_root", "data/prep_data"))).expanduser(),
-        output_root=Path(str(section.get("output_root", "result/DI"))).expanduser(),
-        split=str(section.get("split", "train")).strip().lower(),
-        batch_size=int(section.get("batch_size", 256)),
-        num_workers=int(section.get("num_workers", 0)),
-        gpu_index=int(section.get("gpu_index", 0)),
-        device=str(section.get("device", "cuda")),
-        allow_cpu_fallback=str_to_bool(section.get("allow_cpu_fallback", False)),
-        seed=int(section.get("seed", 0)),
-        max_samples=maybe_int(section.get("max_samples")),
-        view_name=None if section.get("view_name") in (None, "") else str(section.get("view_name")),
-        demean=str_to_bool(section.get("demean", True)),
-        epsilon=float(section.get("epsilon", 1.0e-12)),
+        prep_root=Path(str(config_value(section, "prep_root", "data/prep_data"))).expanduser(),
+        output_root=Path(str(config_value(section, "output_root", "result/DI"))).expanduser(),
+        split=str(config_value(section, "split", "train")).strip().lower(),
+        batch_size=int(config_value(section, "batch_size", 256)),
+        num_workers=int(config_value(section, "num_workers", 0)),
+        gpu_index=int(config_value(section, "gpu_index", 0)),
+        device=str(config_value(section, "device", "cuda")),
+        allow_cpu_fallback=str_to_bool(config_value(section, "allow_cpu_fallback", False)),
+        seed=int(config_value(section, "seed", 0)),
+        max_samples=maybe_int(config_value(section, "max_samples")),
+        view_name=None if config_value(section, "view_name") in (None, "") else str(config_value(section, "view_name")),
+        demean=str_to_bool(config_value(section, "demean", True)),
+        epsilon=float(config_value(section, "epsilon", 1.0e-12)),
         psd_windows=psd_windows,
         psd_row_reducer=reducer,
         psd_value_transform=transform,
-        timestamped_output=str_to_bool(section.get("timestamped_output", True)),
-        run_timestamp=None if section.get("run_timestamp") in (None, "") else str(section.get("run_timestamp")),
-        plot_dpi=int(section.get("plot_dpi", 180)),
-        plot_log_y=str_to_bool(section.get("plot_log_y", False)),
-        save_plots=str_to_bool(section.get("save_plots", True)),
-        pin_memory=str_to_bool(section.get("pin_memory", True)),
-        stats_dtype=str(section.get("stats_dtype", "float64")).strip().lower(),
+        timestamped_output=str_to_bool(config_value(section, "timestamped_output", True)),
+        run_timestamp=None if config_value(section, "run_timestamp") in (None, "") else str(config_value(section, "run_timestamp")),
+        plot_dpi=int(config_value(section, "plot_dpi", 180)),
+        plot_log_y=str_to_bool(config_value(section, "plot_log_y", False)),
+        save_plots=str_to_bool(config_value(section, "save_plots", True)),
+        pin_memory=str_to_bool(config_value(section, "pin_memory", True)),
+        stats_dtype=str(config_value(section, "stats_dtype", "float64")).strip().lower(),
     )
 
 
@@ -327,7 +361,7 @@ def dataclass_to_jsonable(config: DIConfig) -> dict[str, Any]:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Standalone dataset-level frequency DI extractor.")
+    parser = argparse.ArgumentParser(description="Integrated dataset-level frequency DI extractor.")
     parser.add_argument("--config", default="config/DI.yaml", help="Path to DI YAML config.")
     parser.add_argument("--dataset", default=None, help="Override dataset token/list. Comma separated is accepted.")
     parser.add_argument("--prep_root", default=None)
@@ -363,7 +397,8 @@ def merge_cli_overrides(payload: dict[str, Any], args: argparse.Namespace) -> di
         if isinstance(merged.get(key), Mapping):
             section_key = key
             break
-    section = dict(merged.get(section_key, merged)) if section_key else dict(merged)
+    section_raw = dict(merged.get(section_key, merged)) if section_key else dict(merged)
+    section = flatten_config_section(section_raw)
     for key in (
         "dataset",
         "prep_root",
@@ -540,7 +575,7 @@ class PreparedSplitViewDataset(Dataset[tuple[np.ndarray, int]]):
                 flatten = original.reshape(1, -1)
             if view in {"model_input", "original_input"}:
                 return np.ascontiguousarray(original, dtype=np.float32)
-            if view in {"flatten_input", "sequence_input"}:
+            if view in {"flatten_input", "sequence_input", "model_input_flatten"}:
                 return np.ascontiguousarray(flatten, dtype=np.float32)
             if view in {"psd_input", "event_frame_psd_view"}:
                 return np.ascontiguousarray(flatten.T, dtype=np.float32)

@@ -6,8 +6,6 @@ from contextlib import contextmanager, nullcontext
 from typing import Any, Iterator
 import os
 
-import torch
-
 
 _AMP_OFF_TOKENS = {'', '0', 'false', 'no', 'none', 'null', 'off'}
 _AMP_BF16_SAFE_TOKENS = {'on', 'bf16_safe'}
@@ -24,9 +22,18 @@ def normalize_amp_mode(value: Any) -> str:
     raise ValueError('amp must be either off or on. amp=on maps to bf16_safe.')
 
 
+def _torch_module() -> Any:
+    """Import torch lazily so CLI config parsing can set thread env first."""
+
+    import torch
+
+    return torch
+
+
 def configure_tf32(*, enabled: bool = True) -> dict[str, Any]:
     """Configure FP32 matmul/conv internals to use TF32 where CUDA supports it."""
 
+    torch = _torch_module()
     enabled = bool(enabled)
     status: dict[str, Any] = {'requested': enabled}
     try:
@@ -60,7 +67,7 @@ def configure_tf32(*, enabled: bool = True) -> dict[str, Any]:
 
 
 @contextmanager
-def amp_autocast_context(*, amp_mode: Any, device: torch.device | str | None) -> Iterator[None]:
+def amp_autocast_context(*, amp_mode: Any, device: Any | str | None) -> Iterator[None]:
     """Forward-only BF16-safe autocast context.
 
     Only ``bf16_safe`` is supported.  The context sets a private environment flag
@@ -68,6 +75,7 @@ def amp_autocast_context(*, amp_mode: Any, device: torch.device | str | None) ->
     while allowing large GEMM/Conv kernels to run under CUDA BF16 autocast.
     """
 
+    torch = _torch_module()
     mode = normalize_amp_mode(amp_mode)
     device_type = str(getattr(device, 'type', device) or 'cpu')
     active = bool(mode == 'bf16_safe' and device_type == 'cuda')

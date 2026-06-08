@@ -1,33 +1,85 @@
 psd_analysis:
-  dataset: mnist
-  prep_root: /home/yongokhan/workspace/data/prep_data
-  checkpoint: /home/yongokhan/workspace/result/base/model_training/checkpoints
-  output_root: /home/yongokhan/workspace/result/base/psd_analysis
-  num_workers: 0
-  seed: 0
-  gpu_index: 0
-  signal_curve_userbin_edges: null
-  signal_curve_userbin_reducer:
-  - mean
-  signal_window: hann
-  pca_dim_per_layer: []
-  psd_curve_tokens:
-  - exact_mean_centered_db
-  analysis_distance_metric:
-  - centered_l2
-  parameter_alpha_bin_edges: null
-  parameter_alpha_bin_count: 10
-  parameter_center_frequency_bin_edges: null
-  parameter_center_frequency_bin_count: 10
-  parameter_damping_bin_edges: null
-  parameter_damping_bin_count: 10
-  anal_batch: 128
-  enable_pairwise_dependency_appendix: false
-  enable_pca_1d: false
-  enable_pca_mimo: false
-  low_vram: 0
-  pca_min_train_accuracy: 0.0
-  pca_ref_epoch: null
-  signal_curve_space: exact
-  parameter_threshold_bin_edges: null
-  parameter_threshold_bin_count: 10
+
+  data:
+    checkpoint: ""           # Single .pt checkpoint or strict .pt-only checkpoint directory.
+    dataset: ""              # Dataset token stored in checkpoint metadata.
+    prep_root: ""            # Prepared data root containing <dataset>/manifest.yaml.
+  output:
+    output_root: ""          # Root directory for analysis CSV/YAML artifacts.
+    run_timestamp: ""        # Optional run_<timestamp> suffix.
+    timestamped_output: ""   # true writes under a timestamped run directory.
+  runtime:
+    anal_batch: ""           # Maximum samples per analysis forward pass.
+    gpu_index: ""            # CUDA device index.
+    seed: ""                 # Analysis seed; blank falls back to checkpoint seed.
+    num_workers: ""          # Probe DataLoader worker count.
+    low_vram: ""             # 1 stages traces through CPU to reduce VRAM.
+
+  signal:
+    analysis_distance_metric: []       # Pair/layer PSD distance metrics: centered_l2 and/or diff_l2.
+    signal_window: ""                 # PSD/FFT temporal taper: hann or none.
+    enable_pairwise_dependency_appendix: "" # true emits pairwise dependency appendix rows.
+    enable_pca_1d: ""                 # true emits PCA-1D analysis tracks.
+    enable_pca_mimo: ""               # true emits PCA-MIMO analysis tracks.
+    pca_ref_epoch: ""                 # Epoch used as PCA reference; blank lets code choose.
+    pca_min_train_accuracy: ""        # Minimum train accuracy for PCA reference eligibility.
+    pca_dim_per_layer: []              # PCA dimensions per layer.
+    psd_curve_tokens: []               # Optional exact/userbin curve token list.
+    signal_curve_space: ""            # PSD curve space: exact or userbin.
+    signal_curve_scale: ""            # PSD scale: raw, db, or area.
+    signal_curve_userbin_edges: []     # Optional normalized-frequency userbin edges.
+    signal_curve_userbin_reducer: []   # Userbin reducers: mean, median, sum.
+
+  filter_histograms:
+    parameter_alpha_bin_edges: []                  # Histogram edges for alpha.
+    parameter_alpha_bin_count: ""                 # Bin count for alpha when edges are blank.
+    parameter_beta_bin_edges: []                   # Histogram edges for beta/soma decay.
+    parameter_beta_bin_count: ""                  # Bin count for beta when edges are blank.
+    parameter_tau_bin_edges: []                    # Histogram edges for D-RF tau.
+    parameter_tau_bin_count: ""                   # Bin count for tau when edges are blank.
+    parameter_omega_bin_edges: []                  # Histogram edges for D-RF omega.
+    parameter_omega_bin_count: ""                 # Bin count for omega when edges are blank.
+    parameter_center_frequency_bin_edges: []       # Histogram edges for normalized center frequency.
+    parameter_center_frequency_bin_count: ""      # Bin count for center frequency when edges are blank.
+    parameter_damping_bin_edges: []                # Histogram edges for damping/pole radius.
+    parameter_damping_bin_count: ""               # Bin count for damping when edges are blank.
+    parameter_threshold_bin_edges: []              # Histogram edges for threshold.
+    parameter_threshold_bin_count: ""             # Bin count for threshold when edges are blank.
+    parameter_s_value_bin_edges: []                # Histogram edges for soft branch-count s.
+    parameter_s_value_bin_count: ""               # Bin count for s_value when edges are blank.
+    parameter_active_branch_count_bin_edges: []    # Histogram edges for active/hardened branch count.
+    parameter_active_branch_count_bin_count: ""   # Bin count for active_branch_count when edges are blank.
+    parameter_branch_mask_mass_bin_edges: []       # Histogram edges for soft branch-mask mass.
+    parameter_branch_mask_mass_bin_count: ""      # Bin count for branch_mask_mass when edges are blank.
+    parameter_branch_utilization_bin_edges: []     # Histogram edges for active branch fraction.
+    parameter_branch_utilization_bin_count: ""    # Bin count for branch_utilization when edges are blank.
+    parameter_branch_mass_fraction_bin_edges: []   # Histogram edges for soft mask mass fraction.
+    parameter_branch_mass_fraction_bin_count: ""  # Bin count for branch_mass_fraction when edges are blank.
+    parameter_f_peak_bin_edges: []                 # Histogram edges for estimated peak response frequency.
+    parameter_f_peak_bin_count: ""                # Bin count for f_peak when edges are blank.
+    parameter_f_low_3db_bin_edges: []              # Histogram edges for low -3dB frequency.
+    parameter_f_low_3db_bin_count: ""             # Bin count for f_low_3db when edges are blank.
+    parameter_f_high_3db_bin_edges: []             # Histogram edges for high -3dB frequency.
+    parameter_f_high_3db_bin_count: ""            # Bin count for f_high_3db when edges are blank.
+    parameter_bw_3db_bin_edges: []                 # Histogram edges for -3dB bandwidth.
+    parameter_bw_3db_bin_count: ""                # Bin count for bw_3db when edges are blank.
+    parameter_dc_ratio_bin_edges: []               # Histogram edges for DC/max response ratio.
+    parameter_dc_ratio_bin_count: ""              # Bin count for dc_ratio when edges are blank.
+    parameter_nyquist_ratio_bin_edges: []          # Histogram edges for Nyquist/max response ratio.
+    parameter_nyquist_ratio_bin_count: ""         # Bin count for nyquist_ratio when edges are blank.
+    parameter_filter_class_code_bin_edges: []      # Histogram edges for LP/BP/HP/mixed categorical code.
+    parameter_filter_class_code_bin_count: ""     # Bin count for filter_class_code when edges are blank.
+    parameter_positive_mix_weight_count_bin_edges: []    # Histogram edges for positive reverse-DH mix count.
+    parameter_positive_mix_weight_count_bin_count: ""   # Bin count for positive_mix_weight_count when edges are blank.
+    parameter_negative_mix_weight_count_bin_edges: []    # Histogram edges for negative reverse-DH mix count.
+    parameter_negative_mix_weight_count_bin_count: ""   # Bin count for negative_mix_weight_count when edges are blank.
+    parameter_adaptive_threshold_kernel_sum_bin_edges: [] # Histogram edges for D-RF adaptive threshold kernel sum.
+    parameter_adaptive_threshold_kernel_sum_bin_count: "" # Bin count for adaptive_threshold_kernel_sum when edges are blank.
+    parameter_tau_mean_bin_edges: []               # Histogram edges for per-neuron masked tau mean.
+    parameter_tau_mean_bin_count: ""              # Bin count for tau_mean when edges are blank.
+    parameter_omega_mean_bin_edges: []             # Histogram edges for per-neuron masked omega mean.
+    parameter_omega_mean_bin_count: ""            # Bin count for omega_mean when edges are blank.
+    parameter_tau_std_bin_edges: []                # Histogram edges for per-neuron masked tau std.
+    parameter_tau_std_bin_count: ""               # Bin count for tau_std when edges are blank.
+    parameter_omega_std_bin_edges: []              # Histogram edges for per-neuron masked omega std.
+    parameter_omega_std_bin_count: ""             # Bin count for omega_std when edges are blank.

@@ -37,6 +37,8 @@ CATEGORY_COLUMNS: dict[str, tuple[str, ...]] = {
     'dataset_curve': (*AXIS_METADATA_COLUMNS, 'scope', 'probe_family', 'label', 'signal_kind', 'extractor', 'reducer', 'variant', 'scale', 'frequency', 'frequency_unit', 'bin_left', 'bin_right', 'value', 'value_unit'),
     'dataset_dispersion': (*AXIS_METADATA_COLUMNS, 'scope', 'probe_family', 'label', 'signal_kind', 'extractor', 'variant', 'scale', 'statistic', 'frequency', 'frequency_unit', 'bin_left', 'bin_right', 'value', 'value_unit'),
     'dataset_fft': (*AXIS_METADATA_COLUMNS, 'seed', 'split', 'scope', 'probe_family', 'label', 'signal_kind', 'series', 'variant', 'scale', 'row_frequency_index', 'frequency_bin_count', 'frequency_grid', 'value', 'value_unit'),
+    'dataset_element_psd': (*AXIS_METADATA_COLUMNS, 'seed', 'split', 'scope', 'signal_kind', 'series', 'variant', 'scale', 'element_index', 'element_axis_order', 'time_length', 'frequency', 'frequency_unit', 'frequency_bin', 'frequency_bin_count', 'frequency_grid', 'signal_window', 'value', 'value_unit'),
+    'dataset_element_fft': (*AXIS_METADATA_COLUMNS, 'seed', 'split', 'scope', 'signal_kind', 'series', 'variant', 'scale', 'fft_component', 'element_index', 'element_axis_order', 'time_length', 'frequency', 'frequency_unit', 'frequency_bin', 'frequency_bin_count', 'frequency_grid', 'value', 'value_unit'),
     'analysis_curve': (*AXIS_METADATA_COLUMNS, 'model_token', 'model_family', 'readout_mode', 'seed', 'checkpoint_path', 'checkpoint_epoch', 'layer', 'layer_index', 'scope', 'probe_family', 'label', 'signal_kind', 'series', 'extractor', 'reducer', 'variant', 'scale', 'frequency', 'frequency_unit', 'frequency_bin', 'bin_left', 'bin_right', 'value', 'value_unit', 'pca_analysis_schema_version', 'basis_id', 'x_basis_id', 'y_basis_id', 'pca_mode', 'source_mode', 'target_mode', 'resolved_dim', 'x_resolved_dim', 'y_resolved_dim', 'reference_epoch', 'value_real', 'value_imag', 'relation', 'source_layer_index', 'source_layer_name', 'source_signal_kind', 'target_layer_index', 'target_layer_name', 'target_signal_kind'),
     'analysis_dispersion': (*AXIS_METADATA_COLUMNS, 'model_token', 'model_family', 'readout_mode', 'seed', 'checkpoint_path', 'checkpoint_epoch', 'layer', 'layer_index', 'scope', 'probe_family', 'label', 'signal_kind', 'series', 'extractor', 'variant', 'scale', 'statistic', 'frequency', 'frequency_unit', 'bin_left', 'bin_right', 'value', 'value_unit'),
     'analysis_2d_fft': (*AXIS_METADATA_COLUMNS, 'model_token', 'model_family', 'readout_mode', 'seed', 'checkpoint_path', 'checkpoint_epoch', 'layer', 'layer_index', 'scope', 'probe_family', 'label', 'sample_role', 'sample_index', 'signal_kind', 'series', 'variant', 'scale', 'row_frequency_index', 'row_frequency', 'row_frequency_unit', 'row_count', 'time_length', 'time_frequency_bin_count', 'time_frequency_grid', 'value_unit'),
@@ -248,8 +250,3 @@ __all__ = [
     'write_common_csv',
     'write_manifest_yaml',
 ]
-try:
-    from src.patch_overlays.runtime_patch import patch_csv_schema as _patch_csv_schema
-    _patch_csv_schema(globals())
-except Exception:
-    pass

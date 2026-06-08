@@ -44,9 +44,53 @@ group bounds:
 u_t^- = \alpha u_{t-1} + I_t.
 ```
 
-RF keeps a second-order exact-ZOH oscillator state `(x_t, y_t)` with learned
-frequency and damping. RF supports `soft_reset`, `hard_reset`, and `no_reset`;
-`no_reset` disables the reset transform but still records spikes for readout.
+RF keeps a two-real-channel implementation of a direct discrete complex pole
+`a = rho exp(j phi)`:
+
+```math
+\begin{bmatrix}
+x_t^- \\
+y_t^-
+\end{bmatrix}
+=
+\rho
+\begin{bmatrix}
+\cos\phi & -\sin\phi \\
+\sin\phi & \cos\phi
+\end{bmatrix}
+\begin{bmatrix}
+x_{t-1} \\
+y_{t-1}
+\end{bmatrix}
++
+\begin{bmatrix}
+1 \\
+0
+\end{bmatrix} I_t.
+```
+
+`rho` is the per-sample pole radius and `phi` is the rad/sample pole angle.  The
+legacy names `frequency`, `damping`, `omega`, and `b` are compatibility aliases
+for reporting and old scenario code; they are not the primary implementation
+contract.  RF supports `soft_reset`, `hard_reset`, and `no_reset`; `no_reset`
+disables the reset transform but still records spikes for readout.
+
+## Proposed `my_*` soma contract
+
+`my_DH_SNN`, `my_D_RF`, and `my_R_DH_SNN` now expose the same public threshold
+and reset switches as project-native vanilla neurons:
+
+```yaml
+reset: soft | hard | none
+v_th: [fixed | train, initial_value]
+```
+
+The implementation attaches a per-soma threshold vector to every proposed layer.
+`fixed` stores it as a buffer; `train` stores a positive `softplus(raw)+eps`
+parameter.  Reset is soma-local only.  DH-style EMA branch states, D-RF resonator
+states, branch masks, and hardened branch-count buffers are never reset by this
+switch.  This keeps branch/filter statistics invariant to readout reset policy
+while making the soma spiking contract compatible with vanilla IF/LIF/RF.
 
 ## Constraint schema
 

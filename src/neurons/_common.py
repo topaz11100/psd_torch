@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import os
+import math
+from dataclasses import dataclass
 
 import numpy as np
 import torch
+from torch.nn import functional as F
 
 from src.neurons.spikingjelly_compat import (
     SPIKINGJELLY_AVAILABLE,
@@ -124,6 +127,78 @@ def surrogate_spike(input_tensor: torch.Tensor, slope: float = 10.0) -> torch.Te
     return FastSigmoidSpike.apply(input_tensor, slope)
 
 
+
+
+def gaussian_surrogate_kernel(x: torch.Tensor, mu: float = 0.0, sigma: float = 0.5) -> torch.Tensor:
+    """Device-safe Gaussian density used by the Multi-Gaussian spike surrogate."""
+
+    sigma = float(sigma)
+    if sigma <= 0.0:
+        raise ValueError('sigma must be positive.')
+    pi = torch.as_tensor(math.pi, device=x.device, dtype=x.dtype)
+    return torch.exp(-((x - float(mu)) ** 2) / (2.0 * sigma * sigma)) / torch.sqrt(2.0 * pi) / sigma
+
+
+class MultiGaussianSpike(torch.autograd.Function):
+    """Heaviside spike with the DH-SNN-style Multi-Gaussian surrogate gradient."""
+
+    @staticmethod
+    def forward(ctx, input_tensor: torch.Tensor, lens: float = 0.5, gamma: float = 0.5) -> torch.Tensor:
+        ctx.save_for_backward(input_tensor)
+        ctx.lens = float(lens)
+        ctx.gamma = float(gamma)
+        return (input_tensor > 0).to(dtype=input_tensor.dtype)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, None, None]:
+        (input_tensor,) = ctx.saved_tensors
+        lens = float(ctx.lens)
+        gamma = float(ctx.gamma)
+        scale = 6.0
+        height = 0.15
+        grad = (
+            gaussian_surrogate_kernel(input_tensor, mu=0.0, sigma=lens) * (1.0 + height)
+            - gaussian_surrogate_kernel(input_tensor, mu=lens, sigma=scale * lens) * height
+            - gaussian_surrogate_kernel(input_tensor, mu=-lens, sigma=scale * lens) * height
+        )
+        return grad_output * grad.to(dtype=grad_output.dtype) * gamma, None, None
+
+
+def spike_mg(input_tensor: torch.Tensor, lens: float = 0.5, gamma: float = 0.5) -> torch.Tensor:
+    """Apply the Multi-Gaussian surrogate spike operator."""
+
+    return MultiGaussianSpike.apply(input_tensor, float(lens), float(gamma))
+
+
+@dataclass(frozen=True)
+class SpikeFn:
+    """Small callable surrogate selector used by proposed my_* neurons.
+
+    The project-standard layers keep using :func:`surrogate_spike`; this class
+    exists so the proposed neurons ported from ``multi_base`` do not need a
+    separate ``src.common`` dependency.
+    """
+
+    name: str = 'mg'
+    lens: float = 0.5
+    gamma: float = 0.5
+    fs_gamma: float = 1.0
+
+    def __call__(self, input_tensor: torch.Tensor) -> torch.Tensor:
+        token = str(self.name).strip().lower()
+        if token == 'mg':
+            return spike_mg(input_tensor, lens=float(self.lens), gamma=float(self.gamma))
+        if token in {'fs', 'fast_sigmoid'}:
+            return FastSigmoidSpike.apply(input_tensor, float(self.fs_gamma))
+        if token == 'project':
+            return surrogate_spike(input_tensor)
+        if token == 'linear':
+            hard = (input_tensor > 0).to(dtype=input_tensor.dtype)
+            soft = F.relu(1.0 - input_tensor.abs())
+            return hard + soft - soft.detach()
+        raise ValueError(f'Unknown spike surrogate: {self.name!r}.')
+
+
 def trim_open_interval(left: float, right: float, *, epsilon: float = 1.0e-4) -> tuple[float, float]:
     """Trim a possibly closed interval into a numerically stable open interval."""
 
@@ -147,17 +222,35 @@ def logit(x: torch.Tensor | float) -> torch.Tensor:
     return torch.log(x) - torch.log1p(-x)
 
 
+def positive_threshold_raw_init(v_threshold: float, size: int, *, eps: float = 1.0e-6) -> torch.Tensor:
+    """Return a raw tensor whose ``softplus(raw) + eps`` equals ``v_threshold``.
+
+    Vanilla IF/LIF/RF layers use a positive learnable soma threshold.  The
+    proposed ``my_*`` layers share the same threshold contract, so the raw-space
+    initialization lives here instead of being duplicated in each neuron file.
+    """
+
+    value = max(float(v_threshold) - float(eps), float(eps))
+    raw = math.log(math.expm1(value))
+    return torch.full((int(size),), float(raw), dtype=torch.float32)
+
+
 __all__ = [
     'FastSigmoidSpike',
+    'MultiGaussianSpike',
+    'SpikeFn',
     'amp_bf16_safe_enabled',
+    'gaussian_surrogate_kernel',
     'compile_safe_surrogate_spike',
     'SPIKINGJELLY_AVAILABLE',
     'install_spikingjelly_contract',
     'logit',
+    'positive_threshold_raw_init',
     'reset_spikingjelly_state',
     'sequence_backend_name',
     'sequence_buffer_mode',
     'sequence_state_dtype',
+    'spike_mg',
     'stack_time_sequence',
     'surrogate_spike',
     'surrogate_backend_name',

@@ -3,10 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Sequence
 
-try:
-    import torch
-except Exception:  # pragma: no cover
-    torch = None
+
+def _torch_module() -> Any:
+    """Import torch lazily after model_training has applied thread env."""
+
+    try:
+        import torch
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError('torch is required to build layer constraints.') from exc
+    return torch
 
 
 @dataclass(frozen=True)
@@ -251,8 +256,7 @@ def resolve_constraint_plan(model_spec: Any, hidden_widths: Sequence[int], const
 
 
 def layer_constraint_for_hidden_index(plan: ResolvedConstraintPlan, hidden_index: int, input_size: int, output_size: int, recurrent: bool) -> LayerConstraint | None:
-    if torch is None:
-        raise RuntimeError('torch is required to build layer constraints.')
+    torch = _torch_module()
     if not plan.enabled:
         return None
     gids = plan.group_ids_per_hidden_layer

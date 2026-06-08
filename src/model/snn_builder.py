@@ -23,7 +23,7 @@ from src.model.arch_spec import (
     serialize_arch_spec,
 )
 from src.model.constraints import ConstraintConfig, LayerConstraint, layer_constraint_for_hidden_index, resolve_constraint_plan
-from src.model.model_registry import ModelSpec, canonicalize_model_token
+from src.model.model_registry import ModelSpec
 from src.neurons.DH_SNN_neuron import DHSNNLayer
 from src.neurons.D_RF_neuron import DRFLayer
 from src.neurons.IF_neuron import IFLayer
@@ -31,6 +31,9 @@ from src.neurons.LIF_neuron import LIFLayer
 from src.neurons.RF_neuron import RFLayer
 from src.neurons.TC_LIF_neuron import TCLIFLayer
 from src.neurons.TS_LIF_neuron import TSLIFLayer
+from src.neurons.my_DH_SNN_neuron import MyDHSNNDenseLayer
+from src.neurons.my_D_RF_neuron import MyDRFDenseLayer
+from src.neurons.my_R_DH_SNN_neuron import MyReverseDHSNNDenseLayer
 from src.neurons._common import logit, sequence_backend_name, sequence_buffer_mode, sequence_state_dtype, surrogate_spike, to_sequence_state_dtype
 from src.neurons._compile import compile_callable, disable_compiled_runtime
 from src.neurons.cnn2d import CNN2DLIFLayer, CNN2DRFLayer
@@ -423,6 +426,40 @@ class FixedCNN2DClassifier(nn.Module):
             else:
                 yield meta.name, layer
 
+
+    def proposed_regularization_loss(self, *, lambda_ortho: float = 0.0, lambda_s: float = 0.0) -> torch.Tensor:
+        """Sum branch-structure regularizers exposed by proposed my_* layers."""
+
+        reference = next(self.parameters(), None)
+        if reference is None:
+            return torch.zeros((), dtype=torch.float32)
+        total = reference.new_zeros(())
+        for _name, layer in self.iter_named_layers():
+            hook = getattr(layer, 'regularization_loss', None)
+            if callable(hook):
+                total = total + hook(lambda_ortho=float(lambda_ortho), lambda_s=float(lambda_s))
+        return total
+
+    def enable_branch_ste(self, enabled: bool) -> None:
+        """Enable/disable branch-count STE mode for all proposed my_* layers."""
+
+        for module in self.modules():
+            if module is self:
+                continue
+            hook = getattr(module, 'enable_ste', None)
+            if callable(hook):
+                hook(bool(enabled))
+
+    def harden_branches(self) -> None:
+        """Harden all proposed my_* branch masks in-place."""
+
+        for module in self.modules():
+            if module is self:
+                continue
+            hook = getattr(module, 'harden_branches', None)
+            if callable(hook):
+                hook()
+
     def model_metadata(self) -> dict[str, Any]:
         payload = {
             'raw_model_token': self.spec.raw_token,
@@ -587,6 +624,40 @@ class SNNClassifier(nn.Module):
     def iter_named_hidden_layers(self) -> Iterable[tuple[str, nn.Module]]:
         for meta, layer in zip(self.layer_meta[:-1], self.hidden_layers):
             yield meta.name, layer
+
+
+    def proposed_regularization_loss(self, *, lambda_ortho: float = 0.0, lambda_s: float = 0.0) -> torch.Tensor:
+        """Sum branch-structure regularizers exposed by proposed my_* layers."""
+
+        reference = next(self.parameters(), None)
+        if reference is None:
+            return torch.zeros((), dtype=torch.float32)
+        total = reference.new_zeros(())
+        for _name, layer in self.iter_named_layers():
+            hook = getattr(layer, 'regularization_loss', None)
+            if callable(hook):
+                total = total + hook(lambda_ortho=float(lambda_ortho), lambda_s=float(lambda_s))
+        return total
+
+    def enable_branch_ste(self, enabled: bool) -> None:
+        """Enable/disable branch-count STE mode for all proposed my_* layers."""
+
+        for module in self.modules():
+            if module is self:
+                continue
+            hook = getattr(module, 'enable_ste', None)
+            if callable(hook):
+                hook(bool(enabled))
+
+    def harden_branches(self) -> None:
+        """Harden all proposed my_* branch masks in-place."""
+
+        for module in self.modules():
+            if module is self:
+                continue
+            hook = getattr(module, 'harden_branches', None)
+            if callable(hook):
+                hook()
 
     def model_metadata(self) -> dict[str, Any]:
         payload = {
@@ -803,6 +874,40 @@ class SpikGRUClassifier(nn.Module):
         yield 'layer_01', self.layer_01
         yield 'layer_02', self.layer_02
 
+
+    def proposed_regularization_loss(self, *, lambda_ortho: float = 0.0, lambda_s: float = 0.0) -> torch.Tensor:
+        """Sum branch-structure regularizers exposed by proposed my_* layers."""
+
+        reference = next(self.parameters(), None)
+        if reference is None:
+            return torch.zeros((), dtype=torch.float32)
+        total = reference.new_zeros(())
+        for _name, layer in self.iter_named_layers():
+            hook = getattr(layer, 'regularization_loss', None)
+            if callable(hook):
+                total = total + hook(lambda_ortho=float(lambda_ortho), lambda_s=float(lambda_s))
+        return total
+
+    def enable_branch_ste(self, enabled: bool) -> None:
+        """Enable/disable branch-count STE mode for all proposed my_* layers."""
+
+        for module in self.modules():
+            if module is self:
+                continue
+            hook = getattr(module, 'enable_ste', None)
+            if callable(hook):
+                hook(bool(enabled))
+
+    def harden_branches(self) -> None:
+        """Harden all proposed my_* branch masks in-place."""
+
+        for module in self.modules():
+            if module is self:
+                continue
+            hook = getattr(module, 'harden_branches', None)
+            if callable(hook):
+                hook()
+
     def model_metadata(self) -> dict[str, Any]:
         payload = {
             'raw_model_token': self.spec.raw_token,
@@ -912,6 +1017,16 @@ def _resolved_reset_enabled(spec: ModelSpec, *, output_overrides: dict[str, Any]
     return enabled
 
 
+def _resolved_trainable_threshold(spec: ModelSpec, *, output_overrides: dict[str, Any]) -> bool:
+    """Return effective threshold trainability for one layer.
+
+    Membrane-only readouts construct an output layer with emit_spike=False.  In
+    that layer the threshold has no path to the loss, so leaving it trainable
+    creates DDP unused-parameter failures.  Hidden layers pass empty overrides
+    and keep the user-requested train/fixed threshold policy.
+    """
+
+    return bool(spec.trainable_threshold) and bool(output_overrides.get('emit_spike', True))
 
 
 def _fixed_filter_value_for_family(spec: ModelSpec, *, family: str) -> float | None:
@@ -924,6 +1039,16 @@ def _fixed_filter_value_for_family(spec: ModelSpec, *, family: str) -> float | N
     if family not in {'lif', 'rf', 'cnn_lif', 'cnn_rf'}:
         raise ValueError(f'Fixed filter values are supported only for lif/rf/cnn_lif/cnn_rf families, got {family!r}.')
     return float(value)
+
+
+def _apply_spike_output_overrides(layer: nn.Module, output_overrides: dict[str, Any]) -> nn.Module:
+    """Apply readout/output-layer spike/reset switches to layers that expose them as attributes."""
+
+    if 'emit_spike' in output_overrides:
+        setattr(layer, 'emit_spike', bool(output_overrides.get('emit_spike')))
+    if 'reset_enabled' in output_overrides:
+        setattr(layer, 'reset_enabled', bool(output_overrides.get('reset_enabled')))
+    return layer
 
 def _build_dense_family_layer(
     spec: ModelSpec,
@@ -941,7 +1066,7 @@ def _build_dense_family_layer(
             output_size,
             recurrent=spec.recurrent,
             v_threshold=v_th,
-            trainable_threshold=bool(spec.trainable_threshold),
+            trainable_threshold=_resolved_trainable_threshold(spec, output_overrides=output_overrides),
             input_mask=lc.input_mask,
             recurrent_mask=lc.recurrent_mask,
             reset_mode=_resolved_model_reset_mode(spec, family='if'),
@@ -955,7 +1080,7 @@ def _build_dense_family_layer(
             output_size,
             recurrent=spec.recurrent,
             v_threshold=v_th,
-            trainable_threshold=bool(spec.trainable_threshold),
+            trainable_threshold=_resolved_trainable_threshold(spec, output_overrides=output_overrides),
             reset_mode=_resolved_model_reset_mode(spec, family='lif'),
             alpha_bounds=lc.lif_alpha_bounds,
             input_mask=lc.input_mask,
@@ -971,7 +1096,7 @@ def _build_dense_family_layer(
             output_size,
             recurrent=spec.recurrent,
             v_threshold=v_th,
-            trainable_threshold=bool(spec.trainable_threshold),
+            trainable_threshold=_resolved_trainable_threshold(spec, output_overrides=output_overrides),
             frequency_bounds=lc.rf_frequency_bounds,
             input_mask=lc.input_mask,
             recurrent_mask=lc.recurrent_mask,
@@ -979,6 +1104,8 @@ def _build_dense_family_layer(
             emit_spike=output_overrides.get('emit_spike', True),
             reset_enabled=_resolved_reset_enabled(spec, output_overrides=output_overrides),
             filter_value=_fixed_filter_value_for_family(spec, family='rf'),
+            pole_radius_constrained=bool(getattr(spec, 'rf_pole_radius_constrained', True)),
+            pole_radius_max=float(getattr(spec, 'rf_pole_radius_max', 0.9999)),
         )
     if spec.family == 'tc_lif':
         return TCLIFLayer(input_size, output_size, recurrent=spec.recurrent, v_threshold=v_th, **output_overrides)
@@ -996,6 +1123,47 @@ def _build_dense_family_layer(
             v_threshold=v_th,
             emit_spike=output_overrides.get('emit_spike', True),
             reset_enabled=output_overrides.get('reset_enabled', True),
+        )
+    if spec.family == 'my_dh_snn':
+        if spec.recurrent:
+            raise ValueError('my_dh_snn does not support recurrent=true; use my_r_dh_snn for the reverse-DH variant.')
+        return MyDHSNNDenseLayer(
+            input_size,
+            output_size,
+            branch=int(spec.branch or 8),
+            v_th=v_th,
+            trainable_threshold=_resolved_trainable_threshold(spec, output_overrides=output_overrides),
+            reset_mode=_resolved_model_reset_mode(spec, family='my_dh_snn'),
+            emit_spike=output_overrides.get('emit_spike', True),
+            reset_enabled=_resolved_reset_enabled(spec, output_overrides=output_overrides),
+        )
+    if spec.family == 'my_d_rf':
+        if spec.recurrent:
+            raise ValueError('my_d_rf does not support recurrent=true.')
+        return MyDRFDenseLayer(
+            input_size,
+            output_size,
+            branch=int(spec.branch or 8),
+            v_pre=v_th,
+            trainable_threshold=_resolved_trainable_threshold(spec, output_overrides=output_overrides),
+            reset_mode=_resolved_model_reset_mode(spec, family='my_d_rf'),
+            emit_spike=output_overrides.get('emit_spike', True),
+            reset_enabled=_resolved_reset_enabled(spec, output_overrides=output_overrides),
+            pole_radius_constrained=bool(getattr(spec, 'rf_pole_radius_constrained', True)),
+            pole_radius_max=float(getattr(spec, 'rf_pole_radius_max', 0.9999)),
+        )
+    if spec.family == 'my_r_dh_snn':
+        if spec.recurrent:
+            raise ValueError('my_r_dh_snn is already the reverse-DH variant and does not use recurrent=true.')
+        return MyReverseDHSNNDenseLayer(
+            input_size,
+            output_size,
+            branch=int(spec.branch or 8),
+            v_th=v_th,
+            trainable_threshold=_resolved_trainable_threshold(spec, output_overrides=output_overrides),
+            reset_mode=_resolved_model_reset_mode(spec, family='my_r_dh_snn'),
+            emit_spike=output_overrides.get('emit_spike', True),
+            reset_enabled=_resolved_reset_enabled(spec, output_overrides=output_overrides),
         )
     raise ValueError(f'Dense hidden layers are unsupported for model family {spec.family!r}.')
 
@@ -1021,7 +1189,7 @@ def _build_conv2d_family_layer(
             stride=int(layer_spec.stride),
             padding=int(layer_spec.padding),
             v_threshold=v_th,
-            trainable_threshold=bool(spec.trainable_threshold),
+            trainable_threshold=_resolved_trainable_threshold(spec, output_overrides=output_overrides),
             reset_mode=_resolved_model_reset_mode(spec, family='cnn_lif'),
             batch_norm=bool(layer_spec.batch_norm),
             bias=bool(layer_spec.bias),
@@ -1038,11 +1206,13 @@ def _build_conv2d_family_layer(
             stride=int(layer_spec.stride),
             padding=int(layer_spec.padding),
             v_threshold=v_th,
-            trainable_threshold=bool(spec.trainable_threshold),
+            trainable_threshold=_resolved_trainable_threshold(spec, output_overrides=output_overrides),
             reset_mode=_resolved_model_reset_mode(spec, family='cnn_rf'),
             batch_norm=bool(layer_spec.batch_norm),
             bias=bool(layer_spec.bias),
             filter_value=_fixed_filter_value_for_family(spec, family='cnn_rf'),
+            pole_radius_constrained=bool(getattr(spec, 'rf_pole_radius_constrained', True)),
+            pole_radius_max=float(getattr(spec, 'rf_pole_radius_max', 0.9999)),
             **cnn_rf_overrides,
         )
     raise ValueError(f'2-D conv hidden layers are unsupported for model family {spec.family!r}.')
@@ -1217,6 +1387,9 @@ def _build_fixed_cnn2d_classifier(
         'spikingjelly_runtime_backend': False,
         'input_contract': 'prepared prep_data image frames, rank (B,T,C,H,W); no reference input front-end is imported',
         'input_policy': 'prepared_data_shape_driven_no_reference_input_frontend',
+        'discrete_dynamics_contract': 'rf_and_my_d_rf_use_direct_discrete_poles; rho=|a| per sample, phi=arg(a) rad/sample',
+        'rf_pole_radius_constrained': bool(getattr(spec, 'rf_pole_radius_constrained', True)) if spec.family == 'cnn_rf' else None,
+        'rf_pole_radius_max': float(getattr(spec, 'rf_pole_radius_max', 0.9999)) if spec.family == 'cnn_rf' else None,
     }
     return FixedCNN2DClassifier(
         spec=spec,
@@ -1284,12 +1457,15 @@ def build_snn_classifier(
     arch_spec: str | Sequence[str] | None = None,
     layer_specs: Sequence[LayerSpec] | None = None,
     output_layer_overrides: dict[str, Any] | None = None,
-    v_th: float = 1.0,
+    v_th: float | None = None,
     constraint_config: ConstraintConfig | None = None,
 ) -> SNNClassifier:
     """Build one complete hidden-layer stack plus output neuron layer."""
 
-    spec = canonicalize_model_token(model_token) if isinstance(model_token, str) else model_token
+    if isinstance(model_token, str):
+        raise ValueError('String model_token support has been removed. Resolve a ModelSpec from structured fields with model_spec_from_config_fields/model_spec_from_namespace.')
+    spec = model_token
+    effective_v_th = float(spec.threshold_value if v_th is None else v_th)
     if constraint_config is not None:
         scenario_mode = str(getattr(constraint_config, 'mode', 'none')).strip().lower()
         if scenario_mode not in {'', 'none'} and spec.family not in {'if', 'lif', 'rf'}:
@@ -1303,7 +1479,7 @@ def build_snn_classifier(
             sequence_length=int(sequence_length),
             num_classes=int(num_classes),
             hidden_size=128,
-            v_th=float(v_th),
+            v_th=effective_v_th,
         )
         if input_shape is not None:
             classifier.extra_metadata['input_shape_metadata_ignored_for_sequence_model'] = [int(v) for v in input_shape]
@@ -1344,7 +1520,7 @@ def build_snn_classifier(
             num_classes=int(num_classes),
             layer_specs=resolved_layer_specs,
             output_layer_overrides=output_layer_overrides,
-            v_th=float(v_th),
+            v_th=effective_v_th,
         )
 
     hidden_widths_for_constraints = [
@@ -1364,7 +1540,7 @@ def build_snn_classifier(
             spec,
             input_size=prev_size,
             layer_spec=layer_spec,
-            v_th=v_th,
+            v_th=effective_v_th,
             output_overrides={},
             layer_constraint=layer_constraint,
         )
@@ -1390,7 +1566,7 @@ def build_snn_classifier(
         output_spec,
         input_size=prev_size,
         layer_spec=output_layer_spec,
-        v_th=v_th,
+        v_th=effective_v_th,
         output_overrides=output_layer_overrides,
     )
     layer_meta.append(LayerMeta(name='output', size=int(num_classes), is_output=True))
@@ -1398,15 +1574,23 @@ def build_snn_classifier(
     extra_metadata: dict[str, Any] = {
         'rf_reset_mode': spec.reset_mode if spec.family in {'rf', 'cnn_rf'} else None,
         'lif_reset_mode': spec.reset_mode if spec.family in {'lif', 'cnn_lif'} else None,
+        'my_reset_mode': spec.reset_mode if spec.family in {'my_dh_snn', 'my_d_rf', 'my_r_dh_snn'} else None,
         'rf_trainable_threshold': bool(spec.trainable_threshold) if spec.family in {'rf', 'cnn_rf'} else None,
         'lif_trainable_threshold': bool(spec.trainable_threshold) if spec.family in {'lif', 'cnn_lif'} else None,
-        'v_th': float(v_th),
+        'my_trainable_threshold': bool(spec.trainable_threshold) if spec.family in {'my_dh_snn', 'my_d_rf', 'my_r_dh_snn'} else None,
+        'my_soma_reset_mode': spec.reset_mode if spec.family in {'my_dh_snn', 'my_d_rf', 'my_r_dh_snn'} else None,
+        'my_soma_trainable_threshold': bool(spec.trainable_threshold) if spec.family in {'my_dh_snn', 'my_d_rf', 'my_r_dh_snn'} else None,
+        'my_soma_reset_scope': 'soma_only_branch_states_not_reset' if spec.family in {'my_dh_snn', 'my_d_rf', 'my_r_dh_snn'} else None,
+        'v_th': effective_v_th,
         'backbone': spec.backbone,
         'hidden_spec': serialize_arch_spec(resolved_layer_specs),
         'arch_spec': serialize_arch_spec(resolved_layer_specs),
         'arch_layers': arch_spec_payload(resolved_layer_specs),
         'hidden_sizes': arch_hidden_sizes(resolved_layer_specs),
         'constraint_metadata': constraint_plan.metadata,
+        'discrete_dynamics_contract': 'rf_and_my_d_rf_use_direct_discrete_poles; rho=|a| per sample, phi=arg(a) rad/sample',
+        'rf_pole_radius_constrained': bool(getattr(spec, 'rf_pole_radius_constrained', True)) if spec.family in {'rf', 'cnn_rf', 'my_d_rf'} else None,
+        'rf_pole_radius_max': float(getattr(spec, 'rf_pole_radius_max', 0.9999)) if spec.family in {'rf', 'cnn_rf', 'my_d_rf'} else None,
     }
 
     return SNNClassifier(
@@ -1431,8 +1615,3 @@ __all__ = [
     'build_layer_from_spec',
     'build_snn_classifier',
 ]
-try:
-    from src.patch_overlays.runtime_patch import patch_snn_builder as _patch_snn_builder
-    _patch_snn_builder(globals())
-except Exception:
-    pass

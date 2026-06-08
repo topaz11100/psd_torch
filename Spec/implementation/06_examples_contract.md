@@ -1,35 +1,41 @@
 # Example Execution Contract
 
-## Clean base 실행
+## Clean template 실행 방식
+
+`config/`의 YAML은 모든 인자를 공란으로 둔 template다. 실행 시 필요한 값은 YAML에 채우거나 CLI로 넘긴다.
 
 ```bash
-python src/data_prep.py --config config/base/data_prep.clean.yaml
-python src/model_training.py --config config/base/model_training.clean.yaml
-python src/psd_analysis.py --config config/base/psd_analysis.clean.yaml
+bash bash/data_prep.sh config/data_prep.yaml   --dataset mnist   --raw_data_root /home/yongokhan/workspace/data/raw_data   --prep_root /home/yongokhan/workspace/data/prep_data
+```
+
+```bash
+bash bash/model_training.sh config/model_training.yaml   --dataset mnist   --prep_root /home/yongokhan/workspace/data/prep_data   --neuron_type my_dh_snn   --branch 8   --reset soft   --hidden_spec 256,128   --readout_mode temporal_membrane   --v_th train 1.0   --epochs 100   --batch_size 128   --lr 0.001   --seed 0   --checkpoint_root /home/yongokhan/workspace/result/checkpoints   --metric_root /home/yongokhan/workspace/result/metrics
 ```
 
 ## DDP 학습
 
 ```bash
-NPROC_PER_NODE=2 bash bash/model_training_ddp.sh config/base/model_training_ddp.clean.yaml
+bash bash/model_training.sh config/model_training.yaml   --dataset mnist   --prep_root /home/yongokhan/workspace/data/prep_data   --neuron_type my_d_rf   --branch 8   --reset hard   --hidden_spec 256,128   --readout_mode temporal_membrane   --v_th train 1.0   --epochs 100   --batch_size 256   --lr 0.001   --seed 0   --gpu_index 0 1   --checkpoint_root /home/yongokhan/workspace/result/checkpoints   --metric_root /home/yongokhan/workspace/result/metrics
 ```
 
-## Scenario 전체 분석
+`--gpu_index 0 1`은 physical cuda:0,1을 선택하고 자동으로 `torchrun` DDP child process를 띄운다.
 
-`config/ddp_train_scenario/<group>/<case>.yaml`으로 학습한 뒤, 같은 `<group>/<case>`의 분석 config를 실행한다.
+## Checkpoint 분석
 
 ```bash
-python src/psd_analysis.py --config config/psd_analysis_scenario/00_soft_fixed/s-mnist_lif_soft_fixed.yaml
-python src/2d_fft_analysis.py --config config/fft2d_analysis_scenario/00_soft_fixed/s-mnist_lif_soft_fixed.yaml
-python src/element_psd.py --config config/element_psd_scenario/00_soft_fixed/s-mnist_lif_soft_fixed.yaml
-python src/element_fft.py --config config/element_fft_scenario/00_soft_fixed/s-mnist_lif_soft_fixed.yaml
-python src/dataset_fft.py --config config/dataset_fft_scenario/00_soft_fixed/s-mnist_lif_soft_fixed.yaml
+bash bash/psd_analysis.sh config/psd_analysis.yaml   --checkpoint /home/yongokhan/workspace/result/checkpoints/epoch0100.pt   --dataset mnist   --prep_root /home/yongokhan/workspace/data/prep_data   --output_root /home/yongokhan/workspace/result/psd_analysis   --anal_batch 128   --gpu_index 0
 ```
 
-## 2D bash 그룹
+## `my_*` branch regularization 예
 
 ```bash
-# group0의 두 config를 병렬 실행하고, 모두 성공하면 group1 실행
-# 스크립트 내부 CONFIG_GROUP_* 배열을 편집한다.
-bash bash/psd_analysis.sh
+bash bash/model_training.sh config/model_training.yaml   --dataset shd   --prep_root /home/yongokhan/workspace/data/prep_data   --neuron_type my_r_dh_snn   --branch 8   --reset soft   --hidden_spec 512,256   --readout_mode temporal_membrane   --v_th train 1.0   --lambda_branch_ortho 0.001   --lambda_branch_s 0.0001   --soft_mask_epochs 80   --ste_epochs 5   --harden_epoch 90   --epochs 120   --batch_size 64   --lr 0.001   --seed 0   --checkpoint_root /home/yongokhan/workspace/result/checkpoints   --metric_root /home/yongokhan/workspace/result/metrics
+```
+
+## Vanilla clip/structure 예
+
+`clip`, `structure`, `clipstructure`는 vanilla `if/lif/rf` dense family에만 사용한다.
+
+```bash
+bash bash/model_training.sh config/model_training.yaml   --dataset mnist   --prep_root /home/yongokhan/workspace/data/prep_data   --neuron_type lif   --hidden_spec 256,128   --readout_mode temporal_membrane   --v_th fixed 1.0   --scenario_mode clipstructure   --alpha_clip_edges 0.2 0.98   --epochs 100   --batch_size 128   --lr 0.001   --seed 0   --checkpoint_root /home/yongokhan/workspace/result/checkpoints   --metric_root /home/yongokhan/workspace/result/metrics
 ```

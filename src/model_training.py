@@ -63,23 +63,24 @@ class DDPContext:
     world_size: int
     device: Any
     is_rank0: bool
+    gpu_indices: tuple[int, ...] = ()
 
 def _load_runtime_dependencies() -> None:
-    global torch, tqdm, _seed_everything, make_loader, resolve_dataset_bundle, select_training_view_for_model
-    global ModelSpec, canonicalize_model_token, model_spec_from_namespace, build_optimizer, evaluate_one_epoch, train_one_epoch, build_snn_classifier, build_readout, canonicalize_readout_mode, DistributedSampler, DDP
+    global torch, tqdm, _seed_everything, make_loader, resolve_dataset_bundle, select_training_view_for_model, validate_image_mlp_flatten_contract
+    global ModelSpec, model_spec_from_namespace, build_optimizer, evaluate_one_epoch, train_one_epoch, eval_one_batch, train_one_batch, build_snn_classifier, build_readout, canonicalize_readout_mode, DistributedSampler, DDP
     import torch as _torch
     from tqdm import tqdm as _tqdm
     from torch.nn.parallel import DistributedDataParallel as _DDP
     from torch.utils.data.distributed import DistributedSampler as _DistributedSampler
-    from src.data.registry import make_loader as _make_loader, resolve_dataset_bundle as _resolve_dataset_bundle, select_training_view_for_model as _select_training_view_for_model
-    from src.model.model_registry import ModelSpec as _ModelSpec, canonicalize_model_token as _canonicalize_model_token, model_spec_from_namespace as _model_spec_from_namespace
-    from src.model.training import build_optimizer as _build_optimizer, evaluate_one_epoch as _evaluate_one_epoch, train_one_epoch as _train_one_epoch
+    from src.data.registry import make_loader as _make_loader, resolve_dataset_bundle as _resolve_dataset_bundle, select_training_view_for_model as _select_training_view_for_model, validate_image_mlp_flatten_contract as _validate_image_mlp_flatten_contract
+    from src.model.model_registry import ModelSpec as _ModelSpec, model_spec_from_namespace as _model_spec_from_namespace
+    from src.model.training import build_optimizer as _build_optimizer, evaluate_one_epoch as _evaluate_one_epoch, train_one_epoch as _train_one_epoch, eval_one_batch as _eval_one_batch, train_one_batch as _train_one_batch
     from src.model.snn_builder import build_snn_classifier as _build_snn_classifier
     from src.readout.readout import build_readout as _build_readout, canonicalize_readout_mode as _canonicalize_readout_mode
     from src.util.random import seed_everything as _runtime_seed_everything
     torch=_torch; tqdm=_tqdm; DDP=_DDP; DistributedSampler=_DistributedSampler
-    make_loader=_make_loader; resolve_dataset_bundle=_resolve_dataset_bundle; select_training_view_for_model=_select_training_view_for_model
-    ModelSpec=_ModelSpec; canonicalize_model_token=_canonicalize_model_token; model_spec_from_namespace=_model_spec_from_namespace; build_optimizer=_build_optimizer; evaluate_one_epoch=_evaluate_one_epoch; train_one_epoch=_train_one_epoch
+    make_loader=_make_loader; resolve_dataset_bundle=_resolve_dataset_bundle; select_training_view_for_model=_select_training_view_for_model; validate_image_mlp_flatten_contract=_validate_image_mlp_flatten_contract
+    ModelSpec=_ModelSpec; model_spec_from_namespace=_model_spec_from_namespace; build_optimizer=_build_optimizer; evaluate_one_epoch=_evaluate_one_epoch; train_one_epoch=_train_one_epoch; eval_one_batch=_eval_one_batch; train_one_batch=_train_one_batch
     build_snn_classifier=_build_snn_classifier; build_readout=_build_readout; canonicalize_readout_mode=_canonicalize_readout_mode; _seed_everything=_runtime_seed_everything
 
 def _load_config_light(path: Path) -> dict[str, Any]:
@@ -88,7 +89,119 @@ def _load_config_light(path: Path) -> dict[str, Any]:
         raise ValueError(f'구조화 파일 루트는 mapping이어야 합니다: {path}')
     return dict(payload)
 def _parse_bool_config_value(value: Any, *, default: bool) -> bool: return parse_bool_token(value, default=default)
-def _ddp_requested(args: argparse.Namespace) -> bool: return _parse_bool_config_value(getattr(args,'ddp',False), default=False)
+
+
+def _split_gpu_index_token(value: Any) -> list[int]:
+    """Parse one gpu_index scalar/list token into integer CUDA ordinals."""
+
+    if value is None or value == '':
+        return []
+    if isinstance(value, int):
+        return [int(value)]
+    if isinstance(value, str):
+        token = value.strip()
+        if token == '':
+            return []
+        # Accept either YAML lists or CLI-friendly forms such as --gpu_index 0,1.
+        token = token.strip('[]()')
+        if token == '':
+            return []
+        parts = [part.strip() for part in token.replace(';', ',').split(',')]
+        return [int(part) for part in parts if part != '']
+    if isinstance(value, (list, tuple)):
+        out: list[int] = []
+        for item in value:
+            out.extend(_split_gpu_index_token(item))
+        return out
+    return [int(value)]
+
+
+def _normalize_gpu_index_sequence(value: Any) -> list[int]:
+    indices = _split_gpu_index_token(value)
+    if not indices:
+        indices = [0]
+    if len(set(indices)) != len(indices):
+        raise ValueError(f'gpu_index must not contain duplicate CUDA indices: {indices}')
+    for index in indices:
+        if int(index) < 0:
+            raise ValueError(f'gpu_index entries must be non-negative CUDA ordinals: {indices}')
+    return [int(index) for index in indices]
+
+
+def _gpu_indices_from_args(args: argparse.Namespace) -> list[int]:
+    indices = _normalize_gpu_index_sequence(getattr(args, 'gpu_index', [0]))
+    # Normalize the argparse namespace once so all downstream metadata sees the
+    # public array contract, not argparse's string/list variants.
+    args.gpu_index = list(indices)
+    return indices
+
+
+def _inside_torchrun() -> bool:
+    return all(key in os.environ for key in ('LOCAL_RANK', 'RANK', 'WORLD_SIZE'))
+
+
+def _torchrun_world_size(default: int = 1) -> int:
+    try:
+        return int(os.environ.get('WORLD_SIZE', str(default)))
+    except Exception:
+        return int(default)
+
+
+def _ddp_requested(args: argparse.Namespace) -> bool:
+    """DDP is derived only from gpu_index length or an existing torchrun env."""
+
+    if _torchrun_world_size(default=1) > 1:
+        return True
+    return len(_gpu_indices_from_args(args)) >= 2
+
+
+def _maybe_reexec_for_gpu_index_ddp(args: argparse.Namespace, argv: Sequence[str] | None) -> dict[str, Any]:
+    """Launch torchrun automatically when gpu_index contains multiple devices.
+
+    Public contract:
+    - gpu_index: [k]      -> single-process training on cuda:k;
+    - gpu_index: [a, b+]  -> torchrun DDP over exactly those physical devices.
+
+    The child processes see CUDA_VISIBLE_DEVICES narrowed to the requested list,
+    so LOCAL_RANK 0..N-1 maps onto the chosen physical ordinals.
+    """
+
+    indices = _gpu_indices_from_args(args)
+    if len(indices) < 2:
+        return {'reexec': False, 'reason': 'single_gpu', 'gpu_index': list(indices)}
+    if _inside_torchrun():
+        return {'reexec': False, 'reason': 'already_inside_torchrun', 'gpu_index': list(indices), 'world_size': _torchrun_world_size(default=len(indices))}
+
+    original_argv = list(sys.argv[1:] if argv is None else argv)
+    env = os.environ.copy()
+    previous_visible = env.get('CUDA_VISIBLE_DEVICES')
+    env['PSD_PARENT_CUDA_VISIBLE_DEVICES'] = '' if previous_visible is None else previous_visible
+    env['CUDA_VISIBLE_DEVICES'] = ','.join(str(index) for index in indices)
+    env['PSD_GPU_INDEX_REQUESTED'] = env['CUDA_VISIBLE_DEVICES']
+    env['PSD_GPU_INDEX_AUTO_TORCHRUN'] = '1'
+
+    # torchrun sets OMP_NUM_THREADS=1 when it is unset.  If the user supplied
+    # compile_cpu_threads, seed the thread environment before torchrun starts so
+    # the child interpreter and Inductor see the requested value from process start.
+    raw_threads = getattr(args, 'compile_cpu_threads', None)
+    if raw_threads not in (None, ''):
+        threads = str(max(1, int(raw_threads)))
+        for key in _THREAD_ENV_KEYS:
+            env[key] = threads
+
+    command = [
+        sys.executable,
+        '-m',
+        'torch.distributed.run',
+        '--standalone',
+        '--nnodes=1',
+        f'--nproc_per_node={len(indices)}',
+        '-m',
+        'src.model_training',
+        *original_argv,
+    ]
+    os.execvpe(command[0], command, env)
+    raise RuntimeError('os.execvpe returned unexpectedly while launching torchrun.')
 
 def _signal_window_from_args(args: argparse.Namespace) -> str:
     from src.signal.psd_utils import normalize_signal_window
@@ -96,7 +209,7 @@ def _signal_window_from_args(args: argparse.Namespace) -> str:
 
 
 def _signal_curve_userbin_edges_from_args(args: argparse.Namespace) -> list[float] | None:
-    from src.patch_overlays.psd_curve_config import resolve_userbin_edges
+    from src.signal.psd_curve_config import resolve_userbin_edges
 
     curve_space = str(getattr(args, 'signal_curve_space', 'exact')).strip().lower()
     return resolve_userbin_edges(
@@ -131,6 +244,31 @@ def _configure_token_regularizer_env_from_args(args: argparse.Namespace) -> None
 
 
 def _unwrap_model(model: Any) -> Any: return _unwrap_checkpoint_model(model)
+
+
+def _set_branch_training_stage(model: Any, epoch: int, args: argparse.Namespace) -> None:
+    """Apply the proposed my_* soft/STE/hard branch-count training schedule.
+
+    The hook is no-op for vanilla layers.  Scenario clip/structure constraints
+    are handled by ConstraintConfig and remain limited to vanilla IF/LIF/RF
+    families inside snn_builder.
+    """
+
+    root = _unwrap_model(model)
+    harden_epoch = getattr(args, 'harden_epoch', None)
+    if harden_epoch not in (None, '') and int(epoch) >= int(harden_epoch):
+        hook = getattr(root, 'harden_branches', None)
+        if callable(hook):
+            hook()
+        return
+
+    soft_epochs = max(0, int(getattr(args, 'soft_mask_epochs', 0) or 0))
+    ste_epochs = max(0, int(getattr(args, 'ste_epochs', 0) or 0))
+    enable_ste = ste_epochs > 0 and int(epoch) > soft_epochs and int(epoch) <= soft_epochs + ste_epochs
+    hook = getattr(root, 'enable_branch_ste', None)
+    if callable(hook):
+        hook(bool(enable_ste))
+
 
 def _model_for_evaluation(model: Any) -> Any:
     """Return the compiled model body while removing only DDP for evaluation."""
@@ -298,18 +436,18 @@ def _resolve_training_result_roots(args: argparse.Namespace, ctx: DDPContext) ->
 def build_arg_parser() -> argparse.ArgumentParser:
     p=argparse.ArgumentParser(description='Supervised model training entrypoint for selected checkpoint production.')
     p.add_argument('--dataset', required=True); p.add_argument('--prep_root', required=True)
-    p.add_argument('--neuron_type', default=None, help='Explicit model family, e.g. lif, rf, tc, ts, dh_snn, d_rf, spikeformer, spikegru, vgg11_lif, resnet18_lif.')
+    p.add_argument('--neuron_type', default=None, help='Base model family only, e.g. lif, rf, dh_snn, d_rf, my_d_rf, spikeformer, spikegru, vgg11_lif. Token forms such as my_d_rf_8_hard_train are rejected.')
     p.add_argument('--recurrent', default='false', help='Use recurrent hidden connections for supported dense families.')
-    p.add_argument('--reset', default=None, help='Reset mode: soft, hard, or none when supported.')
+    p.add_argument('--reset', default=None, help='Reset mode as a separate field: soft, hard, or none when supported.')
     p.add_argument('--filter', default='train', help='Neuron filter parameter policy: train or numeric fixed value.')
-    p.add_argument('--branch', default=None, help='Branch count for dh_snn/d_rf style models.')
+    p.add_argument('--branch', default=None, help='Branch count for dh_snn/d_rf/my_* models. Do not append the branch count to neuron_type.')
+    p.add_argument('--rf_pole_radius_constrained', default='true', help='Vanilla RF direct-discrete pole radius policy. true constrains |a| to [0, rf_pole_radius_max); false uses a positive unconstrained radius and can learn finite-horizon amplification.')
+    p.add_argument('--rf_pole_radius_max', default=0.9999, type=float, help='Upper pole-radius bound for vanilla RF when rf_pole_radius_constrained=true.')
     p.add_argument('--hidden_spec', required=True)
     p.add_argument('--readout_mode', required=True, choices=('temporal_membrane','final_membrane','first_spike','max_fire','max_rate','spikegru_max_over_time'))
     p.add_argument('--epochs', required=True, type=int); p.add_argument('--batch_size', required=True, type=int); p.add_argument('--lr', required=True, type=float)
-    p.add_argument('--num_workers', type=int, default=0); p.add_argument('--seed', required=True, type=int); p.add_argument('--gpu_index', type=int, default=0)
-    p.add_argument('--ddp', default='false', help='2-GPU DDP 사용 여부(true/false).')
-    p.add_argument('--ddp_world_size', type=int, default=2, help='DDP world size expected from torchrun.')
-    p.add_argument('--batch_size_is_global', default='true', help='batch_size를 global batch로 해석할지 여부. 현재 true만 허용.')
+    p.add_argument('--num_workers', type=int, default=0); p.add_argument('--seed', required=True, type=int); p.add_argument('--gpu_index', nargs='*', default=[0], help='CUDA device index array. One item runs non-DDP on that GPU; two or more items auto-launch DDP on those GPUs.')
+    p.add_argument('--batch_size_is_global', default='true', help='batch_size를 global batch로 해석할지 여부. DDP에서는 true만 허용.')
     p.add_argument('--signal_curve_space', default='exact', choices=('exact','userbin'))
     p.add_argument('--signal_curve_scale', default='raw', choices=('raw','db','area'))
     p.add_argument('--signal_curve_centering', default='raw', choices=('raw','centered'))
@@ -323,6 +461,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument('--lambda_psd_pca_input', default=0.0, type=float)
     p.add_argument('--lambda_psd_pca_adjacent', default=0.0, type=float)
     p.add_argument('--psd_reg_output_family', default='spike', choices=('spike','membrane'))
+    p.add_argument('--lambda_branch_ortho', default=0.0, type=float, help='Proposed my_* branch-basis orthogonality regularization weight.')
+    p.add_argument('--lambda_branch_s', default=0.0, type=float, help='Proposed my_* soft branch-count regularization weight.')
+    p.add_argument('--soft_mask_epochs', default=0, type=int, help='Epochs that keep proposed my_* branch masks in soft mode before optional STE.')
+    p.add_argument('--ste_epochs', default=0, type=int, help='Epochs that enable STE branch-count selection after soft_mask_epochs.')
+    p.add_argument('--harden_epoch', default=None, type=int, help='Epoch from which proposed my_* branch masks are hardened in-place.')
     p.add_argument('--pca_dim_per_layer', nargs='*', default=None)
     p.add_argument('--scenario_mode', default='none', choices=('none','clip','structure','clipstructure','clip_structure'))
     p.add_argument('--w_clip_edges', nargs='*', default=None)
@@ -331,11 +474,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument('--tear', type=int, default=1)
     p.add_argument('--analysis_checkpoint_epochs', nargs='*', default=None, help='Epoch list for evaluation, metric recording, and checkpoint saving.')
     p.add_argument('--checkpoint_root', required=True); p.add_argument('--metric_root', required=True)
-    p.add_argument('--v_th', nargs='*', default=None, help='Threshold pair [fixed|train, init_value].')
+    p.add_argument('--v_th', nargs='*', default=None, help='Threshold pair [fixed|train, init_value] as a separate structured field.')
     p.add_argument('--resume_checkpoint', default=None); p.add_argument('--config', default=None)
     p.add_argument('--run_timestamp', default=None, help='결과 checkpoint/metric 루트 아래에 생성할 실행시각 폴더명 suffix. DDP에서는 rank0 값이 전 rank에 공유된다.')
     p.add_argument('--timestamped_output', default='true', help='true이면 실제 산출물을 실행시각 run_<timestamp> 폴더에 저장한다. false이면 기존 경로에 직접 저장한다.')
     p.add_argument('--compile_cpu_threads', type=int, default=None, help='torch.compile/Inductor 준비에 사용할 CPU 스레드 수. DDP 기본값은 2이며 config로 지정할 수 있다.')
+    p.add_argument('--compile_cache_mode', default='shared', choices=('shared','per_rank'), help='DDP torch.compile cache policy. shared reuses one Inductor cache across ranks; per_rank isolates cache directories.')
+    p.add_argument('--ddp_compile_warmup', default='true', help='DDP에서 rank0가 먼저 compile cache를 priming한 뒤 다른 rank를 진행시킨다.')
     p.add_argument('--ddp_timeout_minutes', type=int, default=120, help='DDP/NCCL collective timeout minutes. 긴 compile/eval 동안 watchdog timeout을 방지한다.')
     p.add_argument('--compile', default='true', help='torch.compile 최적화 사용 여부(true/false). 세부 compile 정책은 코드에서 고정한다.')
     p.add_argument('--amp', default='off', choices=('off', 'on'), help='AMP 모드. off 또는 on만 지원한다. on은 항상 bf16_safe 정책으로 실행한다.')
@@ -365,10 +510,12 @@ def _assert_clean_checkpoint_dir(checkpoint_root: Path) -> None:
     for c in checkpoint_root.iterdir():
         if c.is_dir() or c.suffix!='.pt': raise ValueError(f'체크포인트 디렉터리 규칙 위반: {c}')
 
-def _resolve_device(gpu_index:int):
+def _resolve_device(gpu_index: int):
     configure_tf32(enabled=True)
     if torch.cuda.is_available():
-        if gpu_index<0 or gpu_index>=torch.cuda.device_count(): raise ValueError('gpu_index 오류')
+        gpu_index = int(gpu_index)
+        if gpu_index < 0 or gpu_index >= torch.cuda.device_count():
+            raise ValueError(f'gpu_index={gpu_index} is invalid for {torch.cuda.device_count()} visible CUDA device(s).')
         torch.cuda.set_device(gpu_index)
         configure_tf32(enabled=True)
         return torch.device(f'cuda:{gpu_index}')
@@ -384,17 +531,28 @@ def _ddp_timeout_from_args(args: argparse.Namespace) -> timedelta:
 
 
 def _build_ddp_context(args: argparse.Namespace) -> DDPContext:
-    enabled=_ddp_requested(args)
+    indices = _gpu_indices_from_args(args)
+    enabled = _ddp_requested(args)
     if not enabled:
-        device=_resolve_device(int(args.gpu_index)); return DDPContext(False,0,0,1,device,True)
-    if int(args.ddp_world_size) < 1: raise ValueError('ddp_world_size는 1 이상이어야 합니다.')
-    if not _parse_bool_config_value(args.batch_size_is_global, default=True): raise ValueError('DDP에서는 batch_size_is_global=true만 허용합니다.')
-    for key in ('LOCAL_RANK','RANK','WORLD_SIZE'):
-        if key not in os.environ: raise ValueError(f'DDP 실행 환경변수 누락: {key}. torchrun으로 실행하세요.')
-    local_rank=int(os.environ['LOCAL_RANK']); rank=int(os.environ['RANK']); world_size=int(os.environ['WORLD_SIZE'])
-    if world_size != int(args.ddp_world_size): raise ValueError(f'DDP WORLD_SIZE={world_size}가 ddp_world_size={int(args.ddp_world_size)}와 다릅니다.')
-    if local_rank < 0: raise ValueError('LOCAL_RANK는 0 이상이어야 합니다.')
-    if not torch.cuda.is_available() or torch.cuda.device_count() <= local_rank: raise ValueError('DDP에는 LOCAL_RANK에 대응하는 CUDA 장치가 필요합니다.')
+        if len(indices) != 1:
+            raise ValueError(f'Non-DDP training requires exactly one gpu_index entry, got {indices}.')
+        device = _resolve_device(int(indices[0]))
+        return DDPContext(False, 0, 0, 1, device, True, tuple(indices))
+
+    if not _parse_bool_config_value(args.batch_size_is_global, default=True):
+        raise ValueError('DDP에서는 batch_size_is_global=true만 허용합니다.')
+    for key in ('LOCAL_RANK', 'RANK', 'WORLD_SIZE'):
+        if key not in os.environ:
+            raise ValueError(f'DDP 실행 환경변수 누락: {key}. gpu_index를 2개 이상 주면 자동 torchrun으로 재실행됩니다.')
+    local_rank = int(os.environ['LOCAL_RANK'])
+    rank = int(os.environ['RANK'])
+    world_size = int(os.environ['WORLD_SIZE'])
+    if len(indices) >= 2 and int(world_size) != len(indices):
+        raise ValueError(f'gpu_index length={len(indices)} must match torchrun WORLD_SIZE={world_size}.')
+    if local_rank < 0:
+        raise ValueError('LOCAL_RANK는 0 이상이어야 합니다.')
+    if not torch.cuda.is_available() or torch.cuda.device_count() <= local_rank:
+        raise ValueError('DDP에는 LOCAL_RANK에 대응하는 CUDA 장치가 필요합니다. CUDA_VISIBLE_DEVICES/gpu_index 설정을 확인하세요.')
     try:
         torch.cuda.set_device(local_rank)
         configure_tf32(enabled=True)
@@ -405,7 +563,7 @@ def _build_ddp_context(args: argparse.Namespace) -> DDPContext:
             torch.distributed.init_process_group(backend='nccl', timeout=ddp_timeout)
     except Exception as exc:
         raise RuntimeError(f'DDP 초기화 실패: {exc}') from exc
-    return DDPContext(True,rank,local_rank,world_size,torch.device(f'cuda:{local_rank}'),rank==0)
+    return DDPContext(True, rank, local_rank, world_size, torch.device(f'cuda:{local_rank}'), rank == 0, tuple(indices))
 
 def _resolve_effective_batch_size(args: argparse.Namespace, ctx: DDPContext) -> int:
     g=int(args.batch_size)
@@ -525,6 +683,8 @@ def _normalize_psd_lambda_args(args: argparse.Namespace) -> None:
         'lambda_psd_rep_adjacent',
         'lambda_psd_pca_input',
         'lambda_psd_pca_adjacent',
+        'lambda_branch_ortho',
+        'lambda_branch_s',
     ):
         if getattr(args, key, None) is None:
             setattr(args, key, 0.0)
@@ -537,6 +697,13 @@ def _psd_regularization_metadata_from_args(args: argparse.Namespace) -> dict[str
         'lambda_psd_rep_adjacent': float(getattr(args, 'lambda_psd_rep_adjacent', 0.0) or 0.0),
         'lambda_psd_pca_input': float(getattr(args, 'lambda_psd_pca_input', 0.0) or 0.0),
         'lambda_psd_pca_adjacent': float(getattr(args, 'lambda_psd_pca_adjacent', 0.0) or 0.0),
+        'lambda_branch_ortho': float(getattr(args, 'lambda_branch_ortho', 0.0) or 0.0),
+        'lambda_branch_s': float(getattr(args, 'lambda_branch_s', 0.0) or 0.0),
+        'branch_schedule': {
+            'soft_mask_epochs': int(getattr(args, 'soft_mask_epochs', 0) or 0),
+            'ste_epochs': int(getattr(args, 'ste_epochs', 0) or 0),
+            'harden_epoch': None if getattr(args, 'harden_epoch', None) in (None, '') else int(getattr(args, 'harden_epoch')),
+        },
         'psd_reg_output_family': str(getattr(args, 'psd_reg_output_family', 'spike')),
         'psd_reg_relations': {
             'rep': [
@@ -902,10 +1069,13 @@ def _checkpoint_model_config(*, model: Any, args: argparse.Namespace, bundle: An
         'hidden_sizes': hidden_sizes,
         'v_th': ['train' if bool(getattr(model_spec, 'trainable_threshold', False)) else 'fixed', float(getattr(model_spec, 'threshold_value', 1.0))],
         'neuron_type': getattr(args, 'neuron_type', None),
+        'model_spec_contract': 'explicit_structured_fields_only',
         'recurrent': getattr(args, 'recurrent', False),
         'reset': getattr(args, 'reset', None),
         'filter': getattr(args, 'filter', None),
         'branch': getattr(args, 'branch', None),
+        'rf_pole_radius_constrained': getattr(args, 'rf_pole_radius_constrained', None),
+        'rf_pole_radius_max': float(getattr(args, 'rf_pole_radius_max', 0.9999)),
         'model_metadata': dict(model_meta or {}),
     }
 
@@ -1066,21 +1236,25 @@ def _install_compile_cpu_thread_env_from_args(args: argparse.Namespace, *, ddp_e
     }
 
 
-def _configure_compile_cache(*, enabled: bool, rank: int = 0) -> dict[str, Any]:
+def _configure_compile_cache(*, enabled: bool, rank: int = 0, ddp_enabled: bool = False, cache_mode: str = 'shared') -> dict[str, Any]:
     if not bool(enabled):
         return {'enabled': False}
     root = Path(os.environ.get('PSD_TORCH_COMPILE_CACHE_DIR', str(Path.cwd() / '.torch_compile_cache'))).expanduser().resolve()
-    cache_dir = root / f'rank{int(rank)}'
+    mode = str(cache_mode or 'shared').strip().lower()
+    if mode not in {'shared', 'per_rank'}:
+        raise ValueError("compile_cache_mode must be 'shared' or 'per_rank'.")
+    cache_leaf = f'rank{int(rank)}' if (bool(ddp_enabled) and mode == 'per_rank') else ('shared' if bool(ddp_enabled) else 'single')
+    cache_dir = root / cache_leaf
     cache_dir.mkdir(parents=True, exist_ok=True)
     previous_env = {
         'TORCHINDUCTOR_CACHE_DIR': os.environ.get('TORCHINDUCTOR_CACHE_DIR'),
         'TORCHINDUCTOR_FX_GRAPH_CACHE': os.environ.get('TORCHINDUCTOR_FX_GRAPH_CACHE'),
         'TORCHINDUCTOR_AUTOGRAD_CACHE': os.environ.get('TORCHINDUCTOR_AUTOGRAD_CACHE'),
     }
-    # This is intentionally an assignment rather than setdefault.  The DDP
-    # launcher may run several configs in one shell, and inheriting a parent
-    # TORCHINDUCTOR_CACHE_DIR would silently reintroduce cross-experiment cache
-    # contention.
+    # Assign explicitly.  For DDP the default is one shared cache directory so
+    # graph/codegen artifacts produced by rank0 can be reused by the remaining
+    # ranks instead of every rank compiling an identical graph into rank-local
+    # directories.
     os.environ['TORCHINDUCTOR_CACHE_DIR'] = str(cache_dir)
     os.environ['TORCHINDUCTOR_FX_GRAPH_CACHE'] = '1'
     os.environ['TORCHINDUCTOR_AUTOGRAD_CACHE'] = '1'
@@ -1088,6 +1262,9 @@ def _configure_compile_cache(*, enabled: bool, rank: int = 0) -> dict[str, Any]:
         'enabled': True,
         'root': str(root),
         'rank': int(rank),
+        'ddp_enabled': bool(ddp_enabled),
+        'mode': mode,
+        'cache_leaf': cache_leaf,
         'cache_dir': str(cache_dir),
         'PSD_TORCH_COMPILE_CACHE_DIR': os.environ.get('PSD_TORCH_COMPILE_CACHE_DIR'),
         'TORCHINDUCTOR_CACHE_DIR': os.environ.get('TORCHINDUCTOR_CACHE_DIR'),
@@ -1179,6 +1356,77 @@ def _maybe_compile_readout(readout: Any, *, requested: bool, compile_kwargs: dic
     return bool(applied), str(policy)
 
 
+
+
+def _ddp_compile_warmup_requested(args: argparse.Namespace) -> bool:
+    return _parse_bool_config_value(getattr(args, 'ddp_compile_warmup', True), default=True)
+
+
+def _prime_ddp_compile_cache_if_needed(
+    *,
+    model: Any,
+    readout: Any,
+    train_loader: Any,
+    args: argparse.Namespace,
+    ctx: DDPContext,
+    compile_requested: bool,
+    amp_bf16_safe_active: bool,
+) -> dict[str, Any]:
+    """Let rank0 populate the shared compile cache before other ranks enter training.
+
+    torch.compile is lazy: most regional functions are compiled on first call, not
+    when ``enable_compiled_forward`` is installed.  With a shared Inductor cache,
+    rank0 can trigger that first call and then release the other ranks through a
+    barrier.  This does not make CUDA kernels magically single-instance at
+    runtime, but it avoids the worst case where every DDP rank code-generates the
+    same graph into an isolated cache directory.
+    """
+
+    if not bool(ctx.enabled):
+        return {'enabled': False, 'reason': 'not_ddp'}
+    if not bool(compile_requested):
+        return {'enabled': False, 'reason': 'compile_disabled'}
+    if not _ddp_compile_warmup_requested(args):
+        return {'enabled': False, 'reason': 'ddp_compile_warmup_false'}
+    if str(getattr(args, 'compile_cache_mode', 'shared')).strip().lower() != 'shared':
+        return {'enabled': False, 'reason': 'compile_cache_mode_not_shared'}
+
+    status: dict[str, Any] = {
+        'enabled': True,
+        'policy': 'rank0_eval_first_batch_then_barrier_shared_inductor_cache',
+        'rank': int(ctx.rank),
+    }
+    if int(ctx.rank) == 0:
+        try:
+            first_inputs, first_target = next(iter(train_loader))
+            batch = eval_one_batch(
+                model,
+                first_inputs,
+                first_target,
+                readout=readout,
+                device=ctx.device,
+                amp_bf16_safe=bool(amp_bf16_safe_active),
+            )
+            status.update({
+                'rank0_warmup': 'ok',
+                'warmup_batch_size': int(batch.total),
+                'warmup_accuracy': float(batch.accuracy),
+            })
+        except StopIteration:
+            status.update({'rank0_warmup': 'skipped_empty_train_loader'})
+        except Exception as exc:  # pragma: no cover - backend/runtime dependent
+            status.update({'rank0_warmup': 'failed', 'error': f'{type(exc).__name__}: {exc}'})
+            warnings.warn('[model_training] DDP compile cache warmup failed on rank0: ' + status['error'], RuntimeWarning, stacklevel=2)
+        finally:
+            try:
+                if str(getattr(ctx.device, 'type', ctx.device)) == 'cuda':
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+    _ddp_barrier(ctx)
+    return status
+
+
 def _maybe_compile_model(
     model: Any,
     *,
@@ -1229,9 +1477,10 @@ def _atomic_torch_save(payload: dict[str, Any], path: Path) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser=build_arg_parser(); args=parse_args_with_config(parser, argv=argv, stage_key='model_training')
+    _maybe_reexec_for_gpu_index_ddp(args, argv)
     _normalize_psd_lambda_args(args)
     ctx=None
-    ddp=_ddp_requested(args); args.ddp=ddp; args.batch_size_is_global=_parse_bool_config_value(args.batch_size_is_global, default=True)
+    ddp=_ddp_requested(args); args.batch_size_is_global=_parse_bool_config_value(args.batch_size_is_global, default=True)
     amp_mode = normalize_amp_mode(getattr(args, 'amp', 'off'))
     amp_public_mode = 'on' if amp_mode == 'bf16_safe' else 'off'
     args.amp = amp_public_mode
@@ -1260,6 +1509,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _ddp_barrier(ctx)
         _seed_everything(int(args.seed))
         model_spec=model_spec_from_namespace(args); bundle=select_training_view_for_model(resolve_dataset_bundle(dataset_token, prep_root=prep_root), model_family=model_spec.family)
+        image_mlp_flatten_policy = validate_image_mlp_flatten_contract(bundle, model_family=model_spec.family, stage=SOURCE_PROGRAM)
         manifest = load_manifest(Path(bundle.manifest_path))
         if not isinstance(manifest, dict):
             raise ValueError(f'Prepared manifest must be a mapping: {bundle.manifest_path}')
@@ -1279,7 +1529,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         readout=build_readout(canonical_readout_mode, num_classes=bundle.num_classes, sequence_length=bundle.sequence_length, device=ctx.device)
         compile_threads_policy = _configure_compile_cpu_threads(args, ctx)
         compile_threads_policy['preload'] = dict(preload_compile_threads_policy)
-        compile_cache_policy = _configure_compile_cache(enabled=compile_requested, rank=(ctx.local_rank if ctx.enabled else 0))
+        compile_cache_policy = _configure_compile_cache(enabled=compile_requested, rank=(ctx.local_rank if ctx.enabled else 0), ddp_enabled=bool(ctx.enabled), cache_mode=str(getattr(args, 'compile_cache_mode', 'shared')))
         compile_stance_policy = _apply_fixed_compile_stance(enabled=compile_requested)
         previous_compile_env = os.environ.get('PSD_TORCH_COMPILE_REQUESTED')
         if compile_requested:
@@ -1336,6 +1586,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             tf32_policy=dict(tf32_policy),
             drop_last_train=bool(drop_last_train),
         )
+        ddp_compile_warmup_policy = _prime_ddp_compile_cache_if_needed(
+            model=model,
+            readout=readout,
+            train_loader=train_loader,
+            args=args,
+            ctx=ctx,
+            compile_requested=bool(compile_requested),
+            amp_bf16_safe_active=bool(amp_bf16_safe_active),
+        )
         if ctx.enabled:
             model=DDP(model, device_ids=[ctx.local_rank], output_device=ctx.local_rank)
         optimizer=build_optimizer(model, lr=float(args.lr))
@@ -1350,12 +1609,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         all_rows=[]
         for epoch in range(resume_epoch+1, int(args.epochs)+1):
             if train_sampler is not None: train_sampler.set_epoch(epoch)
-            train_metrics=train_one_epoch(model, train_loader, readout=readout, optimizer=optimizer, device=ctx.device, progress_desc=(f'train epoch {epoch}' if _is_rank0(ctx) else None), disable_progress=(ctx.enabled and (not _is_rank0(ctx))), regularization_curve_space=str(args.signal_curve_space), regularization_curve_scale=str(args.signal_curve_scale), regularization_centering=str(args.signal_curve_centering), regularization_reducer=str(args.signal_curve_reducer), regularization_distance_metric=str(args.signal_curve_distance_metric), regularization_userbin_edges=args.regularization_userbin_edges, regularization_userbin_reducer=str(args.signal_curve_userbin_reducer), lambda_psd_rep_input=float(args.lambda_psd_rep_input), lambda_psd_rep_adjacent=float(args.lambda_psd_rep_adjacent), lambda_psd_pca_input=float(args.lambda_psd_pca_input), lambda_psd_pca_adjacent=float(args.lambda_psd_pca_adjacent), psd_reg_output_family=str(args.psd_reg_output_family), pca_reference_bank=pca_reference_bank, signal_window=str(args.signal_window), amp_bf16_safe=amp_bf16_safe_active)
+            _set_branch_training_stage(model, epoch, args)
+            train_metrics=train_one_epoch(model, train_loader, readout=readout, optimizer=optimizer, device=ctx.device, progress_desc=None, disable_progress=True, regularization_curve_space=str(args.signal_curve_space), regularization_curve_scale=str(args.signal_curve_scale), regularization_centering=str(args.signal_curve_centering), regularization_reducer=str(args.signal_curve_reducer), regularization_distance_metric=str(args.signal_curve_distance_metric), regularization_userbin_edges=args.regularization_userbin_edges, regularization_userbin_reducer=str(args.signal_curve_userbin_reducer), lambda_psd_rep_input=float(args.lambda_psd_rep_input), lambda_psd_rep_adjacent=float(args.lambda_psd_rep_adjacent), lambda_psd_pca_input=float(args.lambda_psd_pca_input), lambda_psd_pca_adjacent=float(args.lambda_psd_pca_adjacent), lambda_branch_ortho=float(args.lambda_branch_ortho), lambda_branch_s=float(args.lambda_branch_s), psd_reg_output_family=str(args.psd_reg_output_family), pca_reference_bank=pca_reference_bank, signal_window=str(args.signal_window), amp_bf16_safe=amp_bf16_safe_active)
             train_metrics=_reduce_train_metrics_ddp(train_metrics, ctx)
             if epoch not in analysis_checkpoint_epochs: continue
             _ddp_barrier(ctx)
             eval_model=_model_for_evaluation(model)
-            local_test_metrics=evaluate_one_epoch(eval_model,test_loader,readout=readout,device=ctx.device,progress_desc=(f'test epoch {epoch}' if _is_rank0(ctx) else None),disable_progress=(ctx.enabled and (not _is_rank0(ctx))), amp_bf16_safe=amp_bf16_safe_active)
+            local_test_metrics=evaluate_one_epoch(eval_model,test_loader,readout=readout,device=ctx.device,progress_desc=None,disable_progress=True, amp_bf16_safe=amp_bf16_safe_active)
             test_metrics=_reduce_eval_metrics_ddp(local_test_metrics, ctx)
             if _is_rank0(ctx):
                 tqdm.write(f'[model_training] epoch={epoch} train_loss={train_metrics.loss:.6f} test_loss={test_metrics.loss:.6f} train_acc={float(train_metrics.accuracy):.6f} test_acc={float(test_metrics.accuracy):.6f}')
@@ -1378,15 +1638,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                 training_args={
                     'dataset': dataset_token, 'prep_root': str(prep_root),
                     'model_token': model_spec.canonical_token,
+                    'model_spec_contract': 'explicit_structured_fields_only',
                     'neuron_type': getattr(args, 'neuron_type', None),
                     'recurrent': _parse_bool_config_value(getattr(args, 'recurrent', False), default=False),
                     'reset': getattr(args, 'reset', None),
                     'v_th': ['train' if bool(getattr(model_spec, 'trainable_threshold', False)) else 'fixed', float(getattr(model_spec, 'threshold_value', 1.0))],
                     'filter': getattr(args, 'filter', None),
                     'branch': getattr(args, 'branch', None),
+                    'rf_pole_radius_constrained': getattr(args, 'rf_pole_radius_constrained', None),
+                    'rf_pole_radius_max': float(getattr(args, 'rf_pole_radius_max', 0.9999)),
                     'hidden_spec': str(args.hidden_spec), 'readout_mode': canonical_readout_mode,
                     'epochs': int(args.epochs), 'batch_size': int(args.batch_size), 'lr': float(args.lr),
-                    'ddp': bool(args.ddp), 'ddp_world_size': int(args.ddp_world_size),
+                    'lambda_branch_ortho': float(args.lambda_branch_ortho),
+                    'lambda_branch_s': float(args.lambda_branch_s),
+                    'soft_mask_epochs': int(args.soft_mask_epochs),
+                    'ste_epochs': int(args.ste_epochs),
+                    'harden_epoch': None if args.harden_epoch in (None, '') else int(args.harden_epoch),
+                    'ddp': bool(ctx.enabled), 'ddp_world_size': int(ctx.world_size), 'gpu_index': list(getattr(args, 'gpu_index', [])),
                     'batch_size_is_global': bool(args.batch_size_is_global),
                     'compile': bool(compile_requested),
                     'compile_applied': bool(compile_applied),
@@ -1404,6 +1672,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     'eval_dataset_policy': dict(eval_dataset_policy),
                     'ddp_eval_policy': 'all_rank_strided_subset_all_reduce' if bool(ctx.enabled) else 'single_process_full_eval',
                     'compile_cpu_threads': None if getattr(args, 'compile_cpu_threads', None) is None else int(args.compile_cpu_threads),
+                    'compile_cache_mode': str(getattr(args, 'compile_cache_mode', 'shared')),
+                    'ddp_compile_warmup': _parse_bool_config_value(getattr(args, 'ddp_compile_warmup', True), default=True),
                     'ddp_timeout_minutes': int(getattr(args, 'ddp_timeout_minutes', 120)),
                     'sequence_backend': checkpoint_sequence_backend,
                     'sequence_buffer_mode': checkpoint_sequence_buffer_mode,
@@ -1414,7 +1684,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     'checkpoint_root': str(checkpoint_root),
                     'metric_root': str(metric_root),
                 }
-                payload=_checkpoint_payload(epoch=epoch, model=model, model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=canonical_readout_mode, dataset_token=dataset_token, prep_root=str(prep_root), prepared_dataset_path=str(prepared_dataset_path), seed=int(args.seed), training_args=training_args, model_config=_checkpoint_model_config(model=model, args=args, bundle=bundle, model_spec=model_spec, manifest=manifest), readout_config=_checkpoint_readout_config(readout_mode=canonical_readout_mode, bundle=bundle), axis_metadata_ref={'manifest_path':str(bundle.manifest_path),'psd_axis_kind':str(bundle.psd_axis_kind),'training_view_name':str(bundle.training_view_name),'psd_view_name':str(bundle.psd_view_name)}, metric_snapshot={'train_loss':float(train_metrics.loss),'test_loss':float(test_metrics.loss), 'train_accuracy': float(train_metrics.accuracy), 'test_accuracy': float(test_metrics.accuracy)}, constraint_metadata=model_meta.get('constraint_metadata'), psd_regularization_metadata=psd_meta, compile_requested=bool(compile_requested), compile_applied=bool(compile_applied), compile_policy=str(compile_policy), compile_fixed_policy=str(_FIXED_COMPILE_POLICY), readout_compile_applied=bool(readout_compile_applied), readout_compile_policy=str(readout_compile_policy), regularizer_backend='eager_gpu', regularizer_compile_policy=psd_meta.get('regularizer_compile_policy', 'torch.compiler.disable(recursive=True)'), compile_stance_policy=str(compile_stance_policy), compile_runtime_note=runtime_compile_note, compile_threads_policy=compile_threads_policy, compile_cache_policy=compile_cache_policy, amp=str(args.amp), amp_internal_policy=str(amp_mode), amp_bf16_safe_active=bool(amp_bf16_safe_active), tf32_policy=tf32_policy, channels_last_policy=channels_last_policy, drop_last_train=bool(drop_last_train), eval_batch_size=int(eval_batch_size), eval_dataset_policy=dict(eval_dataset_policy), ddp_eval_policy=('all_rank_strided_subset_all_reduce' if bool(ctx.enabled) else 'single_process_full_eval'), ddp_timeout_minutes=int(getattr(args, 'ddp_timeout_minutes', 120)), run_timestamp=str(run_timestamp), timestamped_output=bool(timestamped_output), checkpoint_root=str(checkpoint_root), metric_root=str(metric_root))
+                payload=_checkpoint_payload(epoch=epoch, model=model, model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=canonical_readout_mode, dataset_token=dataset_token, prep_root=str(prep_root), prepared_dataset_path=str(prepared_dataset_path), seed=int(args.seed), training_args=training_args, model_config=_checkpoint_model_config(model=model, args=args, bundle=bundle, model_spec=model_spec, manifest=manifest), readout_config=_checkpoint_readout_config(readout_mode=canonical_readout_mode, bundle=bundle), axis_metadata_ref={'manifest_path':str(bundle.manifest_path),'psd_axis_kind':str(bundle.psd_axis_kind),'training_view_name':str(bundle.training_view_name),'psd_view_name':str(bundle.psd_view_name)}, metric_snapshot={'train_loss':float(train_metrics.loss),'test_loss':float(test_metrics.loss), 'train_accuracy': float(train_metrics.accuracy), 'test_accuracy': float(test_metrics.accuracy)}, constraint_metadata=model_meta.get('constraint_metadata'), psd_regularization_metadata=psd_meta, compile_requested=bool(compile_requested), compile_applied=bool(compile_applied), compile_policy=str(compile_policy), compile_fixed_policy=str(_FIXED_COMPILE_POLICY), readout_compile_applied=bool(readout_compile_applied), readout_compile_policy=str(readout_compile_policy), regularizer_backend='eager_gpu', regularizer_compile_policy=psd_meta.get('regularizer_compile_policy', 'torch.compiler.disable(recursive=True)'), compile_stance_policy=str(compile_stance_policy), compile_runtime_note=runtime_compile_note, compile_threads_policy=compile_threads_policy, compile_cache_policy=compile_cache_policy, ddp_compile_warmup_policy=ddp_compile_warmup_policy, amp=str(args.amp), amp_internal_policy=str(amp_mode), amp_bf16_safe_active=bool(amp_bf16_safe_active), tf32_policy=tf32_policy, channels_last_policy=channels_last_policy, drop_last_train=bool(drop_last_train), eval_batch_size=int(eval_batch_size), eval_dataset_policy=dict(eval_dataset_policy), image_mlp_flatten_policy=dict(image_mlp_flatten_policy), ddp_eval_policy=('all_rank_strided_subset_all_reduce' if bool(ctx.enabled) else 'single_process_full_eval'), ddp_timeout_minutes=int(getattr(args, 'ddp_timeout_minutes', 120)), run_timestamp=str(run_timestamp), timestamped_output=bool(timestamped_output), checkpoint_root=str(checkpoint_root), metric_root=str(metric_root))
                 _atomic_torch_save(payload, checkpoint_root / f'checkpoint_epoch_{epoch:06d}.pt')
                 all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='train', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=canonical_readout_mode, epoch=epoch, metric='loss', value=train_metrics.loss))
                 all_rows.append(common_row(category='training_metric', source_program=SOURCE_PROGRAM, run_id='run', dataset=dataset_token, scope='test', seed=int(args.seed), model_token=model_spec.canonical_token, model_family=str(model_spec.family), readout_mode=canonical_readout_mode, epoch=epoch, metric='loss', value=test_metrics.loss))

@@ -1,0 +1,17 @@
+element_fft:
+  data:
+    checkpoint: /home/yongokhan/workspace/result/rf_scinario/training/shd/rf__filter_train__vth_fixed__reset_none/checkpoints
+    dataset: shd
+    prep_root: /home/yongokhan/workspace/data/prep_data
+  output:
+    output_root: /home/yongokhan/workspace/result/rf_scinario/analysis/shd/rf__filter_train__vth_fixed__reset_none/element_fft
+    run_timestamp: ''
+    timestamped_output: false
+  runtime:
+    anal_batch: 128
+    gpu_index:
+    - 0
+    seed: 0
+    num_workers: 8
+    low_vram: 0
+  signal: {}

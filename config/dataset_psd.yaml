@@ -1,15 +1,21 @@
 dataset_psd:
-  dataset:
-  - s-mnist
-  - shd
-  prep_root: /home/yongokhan/workspace/data/prep_data
-  output_root: /home/yongokhan/workspace/result/base/dataset_psd
-  batch_size: 128
-  num_workers: 0
-  seed: 0
-  gpu_index: 1
-  signal_curve_userbin_edges: null
-  signal_curve_userbin_reducer: mean
-  signal_window: none
-  signal_curve_space: exact
-  signal_curve_scale: raw
+
+  data:
+    dataset: ""              # Dataset token or comma-separated token list.
+    prep_root: ""            # Prepared data root containing <dataset>/manifest.yaml.
+  output:
+    output_root: ""          # Root directory for generated CSV/YAML artifacts.
+    run_timestamp: ""        # Optional run_<timestamp> suffix; blank uses current Asia/Seoul time.
+    timestamped_output: ""   # true writes under a timestamped run directory; false writes directly.
+  runtime:
+    batch_size: ""           # Batch size for streaming analysis.
+    gpu_index: ""            # CUDA device index.
+    seed: ""                 # Analysis seed.
+    num_workers: ""          # DataLoader worker count.
+
+  signal:
+    signal_window: ""        # PSD temporal taper: hann or none.
+    signal_curve_space: ""   # PSD curve space: exact or userbin.
+    signal_curve_scale: ""   # PSD value scale: raw, db, or area.
+    signal_curve_userbin_edges: []   # Optional normalized-frequency userbin edges in [0, 0.5].
+    signal_curve_userbin_reducer: "" # Userbin reducer: mean, median, or sum.

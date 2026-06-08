@@ -1,4 +1,4 @@
-"""Origin first-spike module loader.
+"""origin first-spike module loader.
 
 This file centralizes the path handling for the released First-spike coding
 implementation so the rest of the project can keep using a thin wrapper.
@@ -15,7 +15,7 @@ from torch import nn
 
 
 _ROOT = Path(__file__).resolve().parents[2]
-_ORIGIN_ROOT = _ROOT / 'Origin' / 'readout' / 'first_spike'
+_ORIGIN_ROOT = _ROOT / 'origin' / 'readout' / 'first_spike'
 _TIME_PATH = _ORIGIN_ROOT / 'superspike' / 'src' / 'time_encoding.py'
 _LOSS_PATH = _ORIGIN_ROOT / 'utils' / 'loss.py'
 

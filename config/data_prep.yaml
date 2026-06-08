@@ -1,18 +1,19 @@
 data_prep:
-  dataset:
-  - mnist
-  - s-mnist
-  - shd
-  prep_root: /home/yongokhan/workspace/data/prep_data
-  raw_data_root: /home/yongokhan/workspace/data/raw_data
-  seed: 0
-  deap_label_axis: valence
-  deap_num_classes: 3
-  download: false
-  force_overwrite: false
-  max_samples: null
-  prep_profile: project_standard
-  shd_dt_ms: 1.0
-  shd_max_time: 1.2
-  ssc_dt_ms: 1.0
-  ssc_max_time: 1.0
+  data:
+    dataset: ""              # Dataset token to preprocess, e.g. s-mnist, shd, deap.
+    raw_data_root: ""        # Root directory containing original/raw dataset files.
+    prep_root: ""            # Output root where prepared <dataset>/manifest.yaml and .npy files are written.
+    prep_profile: ""         # Optional preprocessing profile; blank uses the dataset default.
+  sampling:
+    seed: ""                 # Global preprocessing seed recorded in the manifest.
+    max_samples: ""          # Optional maximum samples per split; blank uses full data.
+  dataset_options:
+    deap_label_axis: ""      # DEAP target axis: valence or arousal.
+    deap_num_classes: ""     # DEAP class count: 2 or 3.
+    shd_dt_ms: ""            # SHD event bin size in milliseconds.
+    shd_max_time: ""         # SHD maximum encoded time in seconds.
+    ssc_dt_ms: ""            # SSC event bin size in milliseconds.
+    ssc_max_time: ""         # SSC maximum encoded time in seconds.
+  io:
+    force_overwrite: ""      # true overwrites an existing prepared bundle.
+    download: ""             # true lets the preprocessor download supported raw data.

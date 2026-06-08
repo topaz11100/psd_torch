@@ -18,13 +18,13 @@ from dataclasses import dataclass
 from typing import Iterable
 
 
-_PREPROCESSING_SPEC_DOC = 'Spec/theory/data_prep/data_prep.md'
-_PREPROCESSING_IMPL_SPEC_DOC = 'Spec/impl/spec/data_prep.md'
+_PREPROCESSING_SPEC_DOC = 'spec/Theory/data_prep/data_prep.md'
+_PREPROCESSING_IMPL_SPEC_DOC = 'spec/Implementation/data_prep.md'
 
 
 @dataclass(frozen=True)
 class DatasetSpec:
-    """Official dataset-level contract derived from ``Spec/theory/data_prep/data_prep.md``."""
+    """Official dataset-level contract derived from ``spec/Theory/data_prep/data_prep.md``."""
 
     canonical_name: str
     aliases: tuple[str, ...]

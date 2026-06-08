@@ -1,29 +1,30 @@
 DI:
-  dataset:
-  - s-mnist
-  - shd
-  prep_root: /home/yongokhan/workspace/data/prep_data
-  output_root: /home/yongokhan/workspace/result/base/DI
-  split: train
-  batch_size: 256
-  num_workers: 0
-  gpu_index: 0
-  device: cuda
-  allow_cpu_fallback: false
-  seed: 0
-  max_samples: null
-  view_name: null
-  demean: true
-  epsilon: 1.0e-12
-  psd_windows:
-  - none
-  - hann
-  psd_row_reducer: mean
-  psd_value_transform: raw
-  timestamped_output: true
-  run_timestamp: null
-  plot_dpi: 180
-  plot_log_y: false
-  save_plots: true
-  pin_memory: true
-  stats_dtype: float64
+  data:
+    dataset: ""              # Dataset token or list; comma-separated string is accepted.
+    prep_root: ""            # Prepared data root containing <dataset>/manifest.yaml.
+    split: ""                # Dataset split to analyze: train, test, or all.
+    view_name: ""            # Prepared-data view name; blank uses the default input view.
+    max_samples: ""          # Optional per-split sample cap.
+  output:
+    output_root: ""          # Output root for DI CSV/YAML/plots.
+    run_timestamp: ""        # Optional run_<timestamp> suffix.
+    timestamped_output: ""   # true writes under a timestamped run directory.
+  runtime:
+    batch_size: ""           # Batch size for DI streaming.
+    num_workers: ""          # DataLoader worker count.
+    gpu_index: ""            # CUDA device index.
+    device: ""               # cuda or cpu.
+    allow_cpu_fallback: ""   # true permits CPU when CUDA is unavailable.
+    seed: ""                 # Random seed.
+    pin_memory: ""           # true pins DataLoader memory when useful.
+    stats_dtype: ""          # Accumulator dtype: float64 or float32.
+  signal:
+    demean: ""               # true subtracts per-row mean before PSD.
+    epsilon: ""              # Numerical epsilon for divisions/log transforms.
+    psd_windows: []           # PSD windows to compare: none and/or hann.
+    psd_row_reducer: ""      # Row reducer: mean or median.
+    psd_value_transform: ""  # PSD transform: raw, db, or area.
+  plotting:
+    plot_dpi: ""             # Plot DPI.
+    plot_log_y: ""           # true uses logarithmic y-axis where supported.
+    save_plots: ""           # true writes DI plots in addition to CSV/YAML.

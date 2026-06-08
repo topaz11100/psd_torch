@@ -1,0 +1,25 @@
+dataset_element_psd:
+
+  data:
+    dataset: ""              # Canonical dataset token.
+    prep_root: ""            # Prepared data root containing <dataset>/manifest.yaml.
+    view_name: ""            # Optional prepared view override, e.g. model_input_flatten for flattened event/image inputs.
+  output:
+    output_root: ""          # Root directory for row/element-wise dataset PSD CSV/YAML artifacts.
+    run_timestamp: ""        # Optional run_<timestamp> suffix.
+    timestamped_output: ""   # true writes under a timestamped run directory; false writes directly.
+  runtime:
+    batch_size: ""           # Batch size for streaming analysis.
+    gpu_index: ""            # CUDA device index.
+    seed: ""                 # Analysis seed.
+    num_workers: ""          # DataLoader worker count.
+    pin_memory: ""           # DataLoader pin_memory flag.
+    device: ""               # Expected device token. Use cuda for this experiment.
+    stats_dtype: ""          # Accumulation/output dtype, e.g. float32.
+
+  signal:
+    signal_window: ""        # PSD temporal taper: hann or none.
+    variants: []             # Dataset row variants, typically [raw, centered].
+    scales: []               # PSD value scales, typically [raw, db, area].
+    scopes: []               # Optional scope override. Blank/empty uses program defaults.
+    sample_reducer: ""       # Sample reducer for per-row spectra, typically mean.

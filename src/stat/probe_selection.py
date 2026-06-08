@@ -15,7 +15,7 @@ _DISTRIBUTION_ROUNDING_RULE = 'floor_plus_largest_remainder_with_half_up_total_a
 
 
 _FAMILY_HASH_TOKEN = {
-    # Spec/theory/dataset_psd/dataset_psd.md defines the family-specific seed inputs with
+    # spec/Theory/dataset_psd/dataset_psd.md defines the family-specific seed inputs with
     # the short string literals "same", "bal", and "dist". Using these exact
     # tokens here keeps the implementation byte-for-byte aligned with the spec.
     'same_label': 'same',
@@ -179,7 +179,7 @@ def build_probe_index_bundle(
 ) -> ProbeIndexBundle:
     """Build independent same_label, balanced_global, and distribution_global subsets.
 
-    The implementation follows ``Spec/theory/dataset_psd/dataset_psd.md`` exactly: each
+    The implementation follows ``spec/Theory/dataset_psd/dataset_psd.md`` exactly: each
     family uses its own hash token, tie-breaks by ``sample_index`` then
     ``dataset_index``, and concatenates multi-label families in ascending label
     order.

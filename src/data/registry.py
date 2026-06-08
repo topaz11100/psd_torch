@@ -27,6 +27,10 @@ from src.util.random import build_torch_generator, seed_dataloader_worker
 
 _EMITTED_LOADER_POLICY_WARNINGS: set[str] = set()
 _STATIC_IMAGE_REPEAT_T = 4
+_IMAGE_AXIS_KINDS = {'static_repeat', 'image_temporal', 'raster_spatial'}
+_FRAME_MODEL_FAMILIES = {'cnn_lif', 'cnn_rf', 'cnn', 'spikformer'}
+_FLATTEN_VIEW_NAMES = {'model_input_flatten', 'sequence_input', 'flatten_input'}
+_FRAME_VIEW_NAMES = {'model_input', 'model_input_cnn', 'cnn_input', 'original_input'}
 
 
 @dataclass(frozen=True)
@@ -175,6 +179,109 @@ def _select_image_training_view(manifest: Mapping[str, Any], *, model_family: st
     return selected if selected is not None else str(default_view)
 
 
+
+
+def _is_image_like_manifest(manifest: Mapping[str, Any]) -> bool:
+    """Return whether a prepared manifest carries image/frame-shaped samples."""
+
+    psd_axis_kind = str(manifest.get('psd_axis_kind', ''))
+    return psd_axis_kind in _IMAGE_AXIS_KINDS or bool(manifest.get('cnn_input_shape')) or bool(manifest.get('physical_input_shape')) and len(tuple(manifest.get('physical_input_shape', ()))) == 4
+
+
+def _validate_image_training_view_contract(
+    bundle: DatasetBundle,
+    *,
+    manifest: Mapping[str, Any],
+    selected_view: str,
+    model_family: str,
+) -> dict[str, Any]:
+    """Guard the preprocessing->training/analysis image-view contract.
+
+    Image datasets must remain available in two shapes: frame-shaped for CNN and
+    Spikformer paths, and flattened ``(T,F)`` for dense MLP/SNN/SpikeGRU paths.
+    Training and checkpoint-based signal analysis both call
+    ``select_training_view_for_model`` before building loaders, so this check
+    covers the stage boundary where the wrong view would otherwise surface as a
+    late shape error inside a model forward.
+    """
+
+    policy: dict[str, Any] = {
+        'dataset': str(bundle.dataset_name),
+        'model_family': str(model_family),
+        'image_like': bool(_is_image_like_manifest(manifest)),
+        'training_view_name': str(selected_view),
+        'flatten_required': False,
+        'flatten_contract': 'not_applicable',
+    }
+    if not _is_image_like_manifest(manifest):
+        return policy
+    selected = str(selected_view)
+    family = str(model_family)
+    try:
+        sample, _label = dataset_for_view(bundle.train_dataset, selected)[0]
+    except Exception as exc:
+        raise ValueError(f'Could not validate selected training view {selected!r} for image dataset {bundle.dataset_name!r}: {exc}') from exc
+    tensor = torch.as_tensor(sample)
+    if family in _FRAME_MODEL_FAMILIES:
+        if tensor.ndim != 4:
+            raise ValueError(
+                f'Image model family {family!r} requires a frame-shaped sample (T,C,H,W), '
+                f'but selected view {selected!r} produced shape {tuple(tensor.shape)}.'
+            )
+        if selected not in _FRAME_VIEW_NAMES and selected not in tuple(str(v) for v in manifest.get('available_views', ())):
+            raise ValueError(f'Frame model family {family!r} selected undeclared image view {selected!r}.')
+        policy.update({'flatten_contract': 'frame_model_exempt', 'flatten_required': False, 'sample_shape': list(tensor.shape)})
+        return policy
+
+    if selected not in _FLATTEN_VIEW_NAMES:
+        raise ValueError(
+            f'Dense/MLP model family {family!r} must use a flattened image view, '
+            f'but selected training view is {selected!r}.'
+        )
+    if tensor.ndim != 2:
+        raise ValueError(
+            f'Dense/MLP image path requires flattened per-sample shape (T,F), '
+            f'but view {selected!r} produced {tuple(tensor.shape)}.'
+        )
+    if int(tensor.shape[0]) != int(bundle.sequence_length) or int(tensor.shape[1]) != int(bundle.input_dim):
+        raise ValueError(
+            f'Flattened image view {selected!r} shape {tuple(tensor.shape)} does not match '
+            f'bundle sequence/input contract ({int(bundle.sequence_length)}, {int(bundle.input_dim)}).'
+        )
+    policy.update({
+        'flatten_required': True,
+        'flatten_contract': 'validated_rank2_time_feature_view',
+        'sample_shape': [int(tensor.shape[0]), int(tensor.shape[1])],
+        'sequence_length': int(bundle.sequence_length),
+        'input_dim': int(bundle.input_dim),
+    })
+    return policy
+
+def validate_image_mlp_flatten_contract(bundle: DatasetBundle, *, model_family: str, stage: str = 'runtime') -> dict[str, Any]:
+    """Public guard for the image flatten contract used by training and analysis.
+
+    Calling this after ``select_training_view_for_model`` verifies that dense
+    MLP/SNN-style families see rank-2 ``(T,F)`` samples for every image-like
+    dataset, while frame-based families continue to receive rank-4
+    ``(T,C,H,W)`` samples.
+    """
+
+    manifest = load_manifest(bundle.manifest_path)
+    if not isinstance(manifest, dict):
+        raise ValueError(f'Prepared manifest must be a mapping object: {bundle.manifest_path}')
+    try:
+        policy = _validate_image_training_view_contract(
+            bundle,
+            manifest=manifest,
+            selected_view=bundle.training_view_name,
+            model_family=str(model_family),
+        )
+    except Exception as exc:
+        raise ValueError(f'Image flatten contract validation failed during {stage}: {exc}') from exc
+    policy['stage'] = str(stage)
+    return policy
+
+
 def select_training_view_for_model(bundle: DatasetBundle, *, model_family: str) -> DatasetBundle:
     """Return a bundle whose primary split view matches the model family.
 
@@ -188,6 +295,7 @@ def select_training_view_for_model(bundle: DatasetBundle, *, model_family: str) 
     if not isinstance(manifest, dict):
         raise ValueError(f'Prepared manifest must be a mapping object: {bundle.manifest_path}')
     selected = _select_image_training_view(manifest, model_family=str(model_family), default_view=bundle.training_view_name)
+    _validate_image_training_view_contract(bundle, manifest=manifest, selected_view=selected, model_family=str(model_family))
     if selected == bundle.training_view_name:
         return bundle
     return replace(
@@ -509,4 +617,5 @@ __all__ = [
     'make_loader',
     'resolve_dataset_bundle',
     'select_training_view_for_model',
+    'validate_image_mlp_flatten_contract',
 ]

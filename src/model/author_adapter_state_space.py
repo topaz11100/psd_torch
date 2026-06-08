@@ -19,6 +19,10 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _origin_root() -> Path:
+    return _project_root() / 'origin'
+
+
 def _ensure_package(name: str) -> types.ModuleType:
     module = sys.modules.get(name)
     if module is None:
@@ -54,7 +58,7 @@ def _install_spiking_ssm_origin_import_shims() -> None:
     """
 
     global _STATE_SPACE_IMPORT_SHIMS
-    origin_root = _project_root() / 'Origin' / 'state_space_sd4'
+    origin_root = _origin_root() / 'state_space_sd4'
 
     try:
         import src as project_src  # type: ignore
@@ -142,7 +146,7 @@ def _install_spiking_ssm_origin_import_shims() -> None:
 
 
 def _load_origin_spiking_ssm_class() -> type[nn.Module]:
-    source_path = _project_root() / 'Origin' / 'state_space_sd4' / 'models' / 'spike' / 'ss4d.py'
+    source_path = _origin_root() / 'state_space_sd4' / 'models' / 'spike' / 'ss4d.py'
     if not source_path.exists():
         raise RuntimeError(f'Official SpikingSSM source is missing: {source_path}')
     module_spec = importlib.util.spec_from_file_location('_psd_origin_state_space_ss4d', source_path)
@@ -154,7 +158,7 @@ def _load_origin_spiking_ssm_class() -> type[nn.Module]:
         module_spec.loader.exec_module(module)
     except Exception as exc:
         raise RuntimeError(
-            'Could not import Origin/state_space_sd4/models/spike/ss4d.py. '
+            'Could not import origin/state_space_sd4/models/spike/ss4d.py. '
             'Install the complete author-code dependencies used by the official SpikingSSM profile.'
         ) from exc
     cls = getattr(module, 'SpikingSSM', None)
@@ -164,7 +168,7 @@ def _load_origin_spiking_ssm_class() -> type[nn.Module]:
 
 
 class SpikingSSMAuthorClassifier(nn.Module):
-    """Wrapper around Origin/state_space_sd4/models/spike/ss4d.py::SpikingSSM."""
+    """Wrapper around origin/state_space_sd4/models/spike/ss4d.py::SpikingSSM."""
 
     def __init__(
         self,
@@ -217,10 +221,10 @@ class SpikingSSMAuthorClassifier(nn.Module):
             'main_analysis_target': 'dense_snn',
             'model_profile': 'spikingssm',
             'paper_experiment': 'sequential_mnist_classification',
-            'source_code_path': 'Origin/state_space_sd4/models/spike/ss4d.py',
-            'source_neuron_path': 'Origin/state_space_sd4/src/models/spike/neuron.py',
+            'source_code_path': 'origin/state_space_sd4/models/spike/ss4d.py',
+            'source_neuron_path': 'origin/state_space_sd4/src/models/spike/neuron.py',
             'source_config_note': 'configuration metadata is supplied by root YAML config',
-            'source_train_entrypoint': 'Origin/state_space_sd4/train.py',
+            'source_train_entrypoint': 'origin/state_space_sd4/train.py',
             'source_class_name': 'SpikingSSM',
             'origin_block_name': 'SS4D',
             'n_layers': 2,

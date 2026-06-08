@@ -1,0 +1,19 @@
+data_prep:
+  data:
+    dataset: shd
+    raw_data_root: /home/yongokhan/workspace/data/raw_data
+    prep_root: /home/yongokhan/workspace/data/prep_data
+    prep_profile: ''
+  sampling:
+    seed: 0
+    max_samples: ''
+  dataset_options:
+    deap_label_axis: valence
+    deap_num_classes: 3
+    shd_dt_ms: 1.0
+    shd_max_time: 1.2
+    ssc_dt_ms: 1.0
+    ssc_max_time: 1.0
+  io:
+    force_overwrite: false
+    download: false

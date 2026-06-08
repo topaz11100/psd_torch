@@ -59,8 +59,8 @@ def _load_runtime_dependencies() -> None:
 
     global np, torch, tqdm, seed_everything
     global canonicalize_model_input_batch
-    global dataset_for_view, make_loader, resolve_dataset_bundle, select_training_view_for_model
-    global ModelSpec, canonicalize_model_token, model_spec_from_config_fields, parse_v_threshold_setting, build_snn_classifier, build_readout, canonicalize_readout_mode
+    global dataset_for_view, make_loader, resolve_dataset_bundle, select_training_view_for_model, validate_image_mlp_flatten_contract
+    global ModelSpec, model_spec_from_config_fields, parse_v_threshold_setting, build_snn_classifier, build_readout, canonicalize_readout_mode
     global compute_family_spectral_summary, curve_axis_from_summary, curve_pointwise_distance
     global pair_distance_from_summaries, representative_curve_from_summary
     global trace_tensor_to_channel_major_maps, pca_dim_from_cli_vector, compute_fixed_pca_basis, apply_fixed_pca_basis
@@ -71,8 +71,8 @@ def _load_runtime_dependencies() -> None:
     from tqdm import tqdm as _tqdm
     from src.util.random import seed_everything as _seed_everything
     from src.data.base import canonicalize_model_input_batch as _canonicalize_model_input_batch
-    from src.data.registry import dataset_for_view as _dataset_for_view, make_loader as _make_loader, resolve_dataset_bundle as _resolve_dataset_bundle, select_training_view_for_model as _select_training_view_for_model
-    from src.model.model_registry import ModelSpec as _ModelSpec, canonicalize_model_token as _canonicalize_model_token, model_spec_from_config_fields as _model_spec_from_config_fields, parse_v_threshold_setting as _parse_v_threshold_setting
+    from src.data.registry import dataset_for_view as _dataset_for_view, make_loader as _make_loader, resolve_dataset_bundle as _resolve_dataset_bundle, select_training_view_for_model as _select_training_view_for_model, validate_image_mlp_flatten_contract as _validate_image_mlp_flatten_contract
+    from src.model.model_registry import ModelSpec as _ModelSpec, model_spec_from_config_fields as _model_spec_from_config_fields, parse_v_threshold_setting as _parse_v_threshold_setting
     from src.model.snn_builder import build_snn_classifier as _build_snn_classifier
     from src.readout.readout import build_readout as _build_readout, canonicalize_readout_mode as _canonicalize_readout_mode
     from src.signal.family_spectral_analysis import compute_family_spectral_summary as _compute_family_spectral_summary, curve_axis_from_summary as _curve_axis_from_summary, curve_pointwise_distance as _curve_pointwise_distance, pair_distance_from_summaries as _pair_distance_from_summaries, representative_curve_from_summary as _representative_curve_from_summary
@@ -94,8 +94,8 @@ def _load_runtime_dependencies() -> None:
     make_loader = _make_loader
     resolve_dataset_bundle = _resolve_dataset_bundle
     select_training_view_for_model = _select_training_view_for_model
+    validate_image_mlp_flatten_contract = _validate_image_mlp_flatten_contract
     ModelSpec = _ModelSpec
-    canonicalize_model_token = _canonicalize_model_token
     model_spec_from_config_fields = _model_spec_from_config_fields
     parse_v_threshold_setting = _parse_v_threshold_setting
     build_snn_classifier = _build_snn_classifier
@@ -143,14 +143,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--signal_curve_scale', default='raw', choices=('raw','db','area'))
     parser.add_argument('--signal_curve_userbin_edges', nargs='*', default=None)
     parser.add_argument('--signal_curve_userbin_reducer', nargs='*', default=['mean'], choices=('mean', 'median', 'sum'))
-    parser.add_argument('--parameter_alpha_bin_edges', nargs='*', type=float, default=None)
-    parser.add_argument('--parameter_alpha_bin_count', type=int, default=10)
-    parser.add_argument('--parameter_center_frequency_bin_edges', nargs='*', type=float, default=None)
-    parser.add_argument('--parameter_center_frequency_bin_count', type=int, default=10)
-    parser.add_argument('--parameter_damping_bin_edges', nargs='*', type=float, default=None)
-    parser.add_argument('--parameter_damping_bin_count', type=int, default=10)
-    parser.add_argument('--parameter_threshold_bin_edges', nargs='*', type=float, default=None)
-    parser.add_argument('--parameter_threshold_bin_count', type=int, default=10)
+    # Filter/statistic histogram controls.  The list covers vanilla IF/LIF/RF
+    # parameters plus proposed my_* branch-count and filter-property vectors.
+    for parameter in (
+        'alpha', 'beta', 'tau', 'omega', 'center_frequency', 'damping', 'threshold',
+        'pole_radius', 'pole_angle', 'pole_real', 'pole_imag', 'sample_decay_factor',
+        'branch_pole_radius', 'branch_sample_decay_factor', 'soma_pole_radius', 'soma_sample_decay_factor',
+        'sample_time_constant', 'stability_margin', 'stability_excess', 'input_gain_real', 'input_gain_imag',
+        's_value', 'active_branch_count', 'branch_mask_mass', 'branch_utilization', 'branch_mass_fraction',
+        'f_peak', 'f_low_3db', 'f_high_3db', 'bw_3db', 'dc_ratio', 'nyquist_ratio', 'filter_class_code',
+        'positive_mix_weight_count', 'negative_mix_weight_count', 'adaptive_threshold_kernel_sum',
+        'tau_mean', 'omega_mean', 'tau_std', 'omega_std', 'pole_radius_mean', 'pole_angle_mean', 'pole_radius_std', 'pole_angle_std',
+    ):
+        parser.add_argument(f'--parameter_{parameter}_bin_edges', nargs='*', type=float, default=None)
+        parser.add_argument(f'--parameter_{parameter}_bin_count', type=int, default=10)
     return parser
 
 
@@ -240,11 +246,26 @@ def _resolve_bundle(
     bundle = resolve_dataset_bundle(requested_dataset, prep_root=prep_root)
     resolved_spec = model_spec
     if resolved_spec is None:
-        token = str(payload.get('model_token') or payload.get('training_args', {}).get('model') or '')
-        if token:
-            resolved_spec = canonicalize_model_token(token)
-    if resolved_spec is not None:
-        bundle = select_training_view_for_model(bundle, model_family=resolved_spec.family)
+        model_config = _checkpoint_model_config(payload)
+        training_args = _checkpoint_training_args(payload)
+        neuron_type = model_config.get('neuron_type') or training_args.get('neuron_type')
+        if _is_blank_checkpoint_field(neuron_type):
+            raise ValueError(
+                'Checkpoint does not contain structured model_config.neuron_type/training_args.neuron_type. '
+                'Token-only legacy checkpoints are not supported by the structured model contract.'
+            )
+        resolved_spec = model_spec_from_config_fields(
+            neuron_type=neuron_type,
+            recurrent=model_config.get('recurrent', training_args.get('recurrent', False)),
+            reset=model_config.get('reset', training_args.get('reset')),
+            v_th=model_config.get('v_th', training_args.get('v_th')),
+            filter=model_config.get('filter', training_args.get('filter', 'train')),
+            branch=model_config.get('branch', training_args.get('branch')),
+            rf_pole_radius_constrained=model_config.get('rf_pole_radius_constrained', training_args.get('rf_pole_radius_constrained')),
+            rf_pole_radius_max=model_config.get('rf_pole_radius_max', training_args.get('rf_pole_radius_max')),
+        )
+    bundle = select_training_view_for_model(bundle, model_family=resolved_spec.family)
+    validate_image_mlp_flatten_contract(bundle, model_family=resolved_spec.family, stage=SOURCE_PROGRAM)
     return bundle
 
 
@@ -295,12 +316,14 @@ def _checkpoint_training_args(payload: Mapping[str, Any]) -> Mapping[str, Any]:
     return training_args if isinstance(training_args, Mapping) else {}
 
 
-def _checkpoint_model_token(payload: Mapping[str, Any]) -> str:
-    training_args = _checkpoint_training_args(payload)
-    token = str(payload.get('model_token') or payload.get('model') or training_args.get('model') or '')
-    if not token:
-        raise ValueError('Checkpoint is missing model_token/model metadata.')
-    return token
+def _is_blank_checkpoint_field(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip() == ''
+    if isinstance(value, (list, tuple)):
+        return all(_is_blank_checkpoint_field(item) for item in value)
+    return False
 
 
 def _checkpoint_model_config(payload: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -326,7 +349,7 @@ def _checkpoint_model_config(payload: Mapping[str, Any]) -> Mapping[str, Any]:
     raise ValueError(
         'Checkpoint is missing model_config and does not contain enough legacy '
         'dimension metadata. Re-run model_training or repair the checkpoint with '
-        'input_dim, sequence_length, num_classes, model_token, and readout_mode.'
+        'input_dim, sequence_length, num_classes, structured model_config.neuron_type, and readout_mode.'
     )
 
 
@@ -347,19 +370,22 @@ def _checkpoint_readout_config(payload: Mapping[str, Any]) -> Mapping[str, Any]:
 def _build_model_from_checkpoint(payload: Mapping[str, Any], *, device: torch.device):
     model_config = _checkpoint_model_config(payload)
     training_args = _checkpoint_training_args(payload)
-    try:
-        spec = model_spec_from_config_fields(
-            neuron_type=model_config.get('neuron_type') or training_args.get('neuron_type'),
-            recurrent=model_config.get('recurrent', training_args.get('recurrent', False)),
-            reset=model_config.get('reset', training_args.get('reset')),
-            v_th=model_config.get('v_th', training_args.get('v_th')),
-            filter=model_config.get('filter', training_args.get('filter', 'train')),
-            branch=model_config.get('branch', training_args.get('branch')),
-            model=model_config.get('model') or training_args.get('model') or payload.get('model_token') or payload.get('model'),
+    neuron_type = model_config.get('neuron_type') or training_args.get('neuron_type')
+    if _is_blank_checkpoint_field(neuron_type):
+        raise ValueError(
+            'Checkpoint is missing structured neuron_type metadata. '
+            'Token-only legacy checkpoint analysis is no longer supported; re-run model_training with explicit model fields.'
         )
-    except Exception:
-        model_token = _checkpoint_model_token(payload)
-        spec = canonicalize_model_token(model_token)
+    spec = model_spec_from_config_fields(
+        neuron_type=neuron_type,
+        recurrent=model_config.get('recurrent', training_args.get('recurrent', False)),
+        reset=model_config.get('reset', training_args.get('reset')),
+        v_th=model_config.get('v_th', training_args.get('v_th')),
+        filter=model_config.get('filter', training_args.get('filter', 'train')),
+        branch=model_config.get('branch', training_args.get('branch')),
+        rf_pole_radius_constrained=model_config.get('rf_pole_radius_constrained', training_args.get('rf_pole_radius_constrained')),
+        rf_pole_radius_max=model_config.get('rf_pole_radius_max', training_args.get('rf_pole_radius_max')),
+    )
     readout_config = _checkpoint_readout_config(payload)
     mode = str(readout_config.get('mode') or readout_config.get('readout_mode') or '')
     if not mode:
@@ -711,7 +737,51 @@ def _summary_curve_rows(*, common: dict[str, Any], summary: Mapping[str, Any], e
     return curve_rows, dispersion_rows
 
 
+_FILTER_STAT_NAME_ALIASES: dict[str, str] = {
+    'damping_per_sample': 'damping',
+    'f_cyc_per_sample': 'center_frequency',
+    'v_threshold': 'threshold',
+    'vth': 'threshold',
+    's': 's_value',
+    'S': 's_value',
+    'd_int': 'active_branch_count',
+    'D_int': 'active_branch_count',
+    'active_branches': 'active_branch_count',
+    'rho': 'pole_radius',
+    'phi': 'pole_angle',
+    'radius': 'pole_radius',
+    'angle': 'pole_angle',
+}
+
+
+def _normalize_filter_stat_name(name: str) -> str:
+    token = str(name).strip()
+    return _FILTER_STAT_NAME_ALIASES.get(token, token)
+
+
+
+
+def _ensure_numeric_runtime_dependencies() -> None:
+    """Load numeric modules needed by lightweight filter-stat helpers."""
+
+    global np, torch
+    if 'np' not in globals():
+        import numpy as _np
+        np = _np
+    if 'torch' not in globals():
+        import torch as _torch
+        torch = _torch
+
 def _filter_vectors(model: torch.nn.Module) -> dict[str, dict[str, np.ndarray]]:
+    """Collect numeric layer-level filter/branch statistic vectors.
+
+    ``filter_stats_vectors`` is treated as the explicit analysis contract.  Vanilla
+    layers expose classic parameters such as alpha/damping/frequency/threshold;
+    proposed my_* layers additionally expose branch counts, soft mask mass,
+    response-summary frequencies, and resonant/adaptive-threshold statistics.
+    """
+
+    _ensure_numeric_runtime_dependencies()
     collected: dict[str, dict[str, np.ndarray]] = {}
     if not hasattr(model, 'iter_named_layers'):
         return collected
@@ -723,17 +793,11 @@ def _filter_vectors(model: torch.nn.Module) -> dict[str, dict[str, np.ndarray]]:
             continue
         normalized: dict[str, np.ndarray] = {}
         for key, value in raw.items():
-            name = str(key)
-            if name == 'damping_per_sample':
-                name = 'damping'
-            if name == 'f_cyc_per_sample':
-                name = 'center_frequency'
-            if name in {'v_threshold', 'threshold', 'vth'}:
-                name = 'threshold'
-            if name in {'alpha', 'damping', 'center_frequency', 'threshold'}:
-                arr = value.detach().cpu().numpy() if isinstance(value, torch.Tensor) else np.asarray(value)
-                if arr.size > 0:
-                    normalized[name] = np.asarray(arr, dtype=np.float64).reshape(-1)
+            name = _normalize_filter_stat_name(str(key))
+            arr = value.detach().cpu().numpy() if isinstance(value, torch.Tensor) else np.asarray(value)
+            arr = np.asarray(arr, dtype=np.float64).reshape(-1)
+            if arr.size > 0 and np.any(np.isfinite(arr)):
+                normalized[name] = arr
         if normalized:
             collected[str(layer_name)] = normalized
     return collected
@@ -741,16 +805,96 @@ def _filter_vectors(model: torch.nn.Module) -> dict[str, dict[str, np.ndarray]]:
 
 _FILTER_DEFAULT_USERBIN_BOUNDS: dict[str, tuple[float, float]] = {
     'alpha': (0.0, 1.0),
+    'beta': (0.0, 1.0),
+    'tau': (0.0, 50.0),
+    'omega': (0.0, 3.141592653589793),
     'center_frequency': (0.0, 0.5),
-    'damping': (0.1, 1.0),
+    'damping': (0.0, 1.25),
+    'pole_radius': (0.0, 1.25),
+    'pole_angle': (0.0, 3.141592653589793),
+    'pole_real': (-1.25, 1.25),
+    'pole_imag': (-1.25, 1.25),
+    'sample_decay_factor': (0.0, 1.25),
+    'branch_pole_radius': (0.0, 1.0),
+    'branch_sample_decay_factor': (0.0, 1.0),
+    'soma_pole_radius': (0.0, 1.0),
+    'soma_sample_decay_factor': (0.0, 1.0),
+    'sample_time_constant': (0.0, 100.0),
+    'stability_margin': (-0.5, 1.0),
+    'stability_excess': (0.0, 0.5),
+    'input_gain_real': (-4.0, 4.0),
+    'input_gain_imag': (-4.0, 4.0),
     'threshold': (0.0, 2.0),
+    's_value': (0.0, 16.0),
+    'active_branch_count': (0.0, 16.0),
+    'branch_mask_mass': (0.0, 16.0),
+    'branch_utilization': (0.0, 1.0),
+    'branch_mass_fraction': (0.0, 1.0),
+    'f_peak': (0.0, 0.5),
+    'f_low_3db': (0.0, 0.5),
+    'f_high_3db': (0.0, 0.5),
+    'bw_3db': (0.0, 0.5),
+    'dc_ratio': (0.0, 1.0),
+    'nyquist_ratio': (0.0, 1.0),
+    'filter_class_code': (0.0, 3.0),
+    'positive_mix_weight_count': (0.0, 16.0),
+    'negative_mix_weight_count': (0.0, 16.0),
+    'adaptive_threshold_kernel_sum': (-4.0, 4.0),
+    'tau_mean': (0.0, 50.0),
+    'omega_mean': (0.0, 3.141592653589793),
+    'tau_std': (0.0, 25.0),
+    'omega_std': (0.0, 3.141592653589793),
+    'pole_radius_mean': (0.0, 1.25),
+    'pole_angle_mean': (0.0, 3.141592653589793),
+    'pole_radius_std': (0.0, 0.5),
+    'pole_angle_std': (0.0, 3.141592653589793),
 }
 
 _FILTER_VALUE_UNITS: dict[str, str] = {
-    'alpha': 'parameter_value',
-    'damping': 'parameter_value',
+    'alpha': 'decay_factor',
+    'beta': 'decay_factor',
+    'tau': 'time_constant_steps',
+    'omega': 'angular_frequency_rad_per_step',
+    'damping': 'sample_log_damping_minus_log_rho',
+    'pole_radius': 'pole_radius_per_sample',
+    'pole_angle': 'radians_per_sample',
+    'pole_real': 'discrete_pole_real_part',
+    'pole_imag': 'discrete_pole_imag_part',
+    'sample_decay_factor': 'decay_factor_per_sample',
+    'branch_pole_radius': 'branch_decay_factor_per_sample',
+    'branch_sample_decay_factor': 'branch_decay_factor_per_sample',
+    'soma_pole_radius': 'soma_decay_factor_per_sample',
+    'soma_sample_decay_factor': 'soma_decay_factor_per_sample',
+    'sample_time_constant': 'samples',
+    'stability_margin': 'one_minus_pole_radius',
+    'stability_excess': 'pole_radius_minus_one_clipped_positive',
+    'input_gain_real': 'discrete_input_gain_real',
+    'input_gain_imag': 'discrete_input_gain_imag',
     'center_frequency': 'normalized_frequency_cyc_per_sample_nyquist_0p5',
     'threshold': 'membrane_threshold',
+    's_value': 'branch_count_soft_value',
+    'active_branch_count': 'branch_count',
+    'branch_mask_mass': 'branch_mask_mass',
+    'branch_utilization': 'ratio',
+    'branch_mass_fraction': 'ratio',
+    'f_peak': 'normalized_frequency_cyc_per_sample_nyquist_0p5',
+    'f_low_3db': 'normalized_frequency_cyc_per_sample_nyquist_0p5',
+    'f_high_3db': 'normalized_frequency_cyc_per_sample_nyquist_0p5',
+    'bw_3db': 'normalized_frequency_bandwidth',
+    'dc_ratio': 'gain_ratio',
+    'nyquist_ratio': 'gain_ratio',
+    'filter_class_code': 'categorical_code_lp0_bp1_hp2_mixed3',
+    'positive_mix_weight_count': 'branch_count',
+    'negative_mix_weight_count': 'branch_count',
+    'adaptive_threshold_kernel_sum': 'threshold_adaptation_kernel_sum',
+    'tau_mean': 'time_constant_steps',
+    'omega_mean': 'angular_frequency_rad_per_step',
+    'tau_std': 'time_constant_steps',
+    'omega_std': 'angular_frequency_rad_per_step',
+    'pole_radius_mean': 'pole_radius_per_sample',
+    'pole_angle_mean': 'radians_per_sample',
+    'pole_radius_std': 'pole_radius_per_sample',
+    'pole_angle_std': 'radians_per_sample',
 }
 
 
@@ -806,7 +950,7 @@ def _parameter_bin_edges(parameter: str, values: np.ndarray, args: argparse.Name
 
 
 def _filter_frequency_value(parameter: str, scalar: float) -> float | str:
-    if str(parameter) == 'center_frequency':
+    if str(parameter) in {'center_frequency', 'f_peak', 'f_low_3db', 'f_high_3db'}:
         return float(scalar)
     return ''
 
@@ -838,7 +982,7 @@ def _filter_distribution_rows_for_values(
             neuron_index=int(index),
             parameter_value=float(scalar),
             frequency=_filter_frequency_value(parameter, float(scalar)),
-            frequency_unit=unit if str(parameter) == 'center_frequency' else '',
+            frequency_unit=unit if str(parameter) in {'center_frequency', 'f_peak', 'f_low_3db', 'f_high_3db'} else '',
             value=float(scalar),
             value_unit=unit,
         )
@@ -870,7 +1014,7 @@ def _filter_distribution_rows_for_values(
             bin_density=density,
             parameter_value=center,
             frequency=_filter_frequency_value(parameter, center),
-            frequency_unit=unit if str(parameter) == 'center_frequency' else '',
+            frequency_unit=unit if str(parameter) in {'center_frequency', 'f_peak', 'f_low_3db', 'f_high_3db'} else '',
             value=int(count),
             value_unit='count',
         )
@@ -1509,7 +1653,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     pca_enabled = bool(enable_pca_1d or enable_pca_mimo or args.pca_ref_epoch is not None)
     if pca_enabled and args.pca_ref_epoch is None:
         raise ValueError('pca_ref_epoch must be provided when enable_pca_1d or enable_pca_mimo is enabled.')
-    # Base path keeps exact PSD summaries; runtime token overlay expands psd_curve_tokens/userbins.
+    # Base path keeps exact PSD summaries; userbin/token controls are now handled natively.
 
     _load_runtime_dependencies()
 
@@ -1821,11 +1965,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-try:
-    from src.patch_overlays.runtime_patch import patch_psd_analysis as _patch_psd_analysis
-    _patch_psd_analysis(globals())
-except Exception:
-    pass
 
 if __name__ == '__main__':
     raise SystemExit(main())

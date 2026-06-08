@@ -5,7 +5,7 @@
 1. **데이터 계층**: `src/data_prep.py`, `src/data/*`는 원본 데이터셋을 표준 manifest와 memory-mapped bundle로 변환한다. manifest는 학습 입력 view와 PSD 분석 view의 축 의미를 함께 보관한다.
 2. **학습 계층**: `src/model_training.py`는 supervised SNN 학습, PSD regularization, DDP, `torch.compile`을 통합한다. 체크포인트는 wrapper 제거 후 순수 model `state_dict`로 저장된다.
 3. **분석 계층**: `src/psd_analysis.py`, `src/2d_fft_analysis.py`, `src/element_psd.py`, `src/element_fft.py`, `src/dataset_fft.py`, `src/dataset_psd.py`는 체크포인트와 prepared dataset을 읽어 공통 CSV schema로 spectral artifact를 쓴다.
-4. **문서·실행 계층**: `config/`, `bash/`, `Spec/`는 실험을 사람이 읽고 반복할 수 있는 형태로 고정한다.
+4. **문서·실행 계층**: `config/`, `bash/`, `spec/`는 실험을 사람이 읽고 반복할 수 있는 형태로 고정한다.
 
 아키텍처의 중심 불변식은 다음과 같다.
 

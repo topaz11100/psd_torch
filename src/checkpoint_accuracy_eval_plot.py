@@ -45,8 +45,8 @@ for _candidate in _PROJECT_ROOT_CANDIDATES:
         sys.path.insert(0, str(_candidate))
         break
 
-from src.data.registry import make_loader, resolve_dataset_bundle  # noqa: E402
-from src.model.model_registry import ModelSpec, canonicalize_model_token  # noqa: E402
+from src.data.registry import make_loader, resolve_dataset_bundle, select_training_view_for_model, validate_image_mlp_flatten_contract  # noqa: E402
+from src.model.model_registry import ModelSpec, model_spec_from_config_fields, parse_v_threshold_setting  # noqa: E402
 from src.model.snn_builder import build_snn_classifier  # noqa: E402
 from src.model.training import EpochMetrics, evaluate_one_epoch  # noqa: E402
 from src.readout.readout import build_readout, canonicalize_readout_mode  # noqa: E402
@@ -302,12 +302,35 @@ def _payload_readout_mode(payload: Mapping[str, Any]) -> str:
     return canonicalize_readout_mode(mode)
 
 
-def _build_model_from_checkpoint(payload: Mapping[str, Any], *, device: torch.device):
+def _model_spec_from_checkpoint_metadata(payload: Mapping[str, Any]) -> ModelSpec:
+    """Resolve checkpoint model identity with explicit config fields first."""
+
     training_args = payload.get("training_args") if isinstance(payload.get("training_args"), Mapping) else {}
-    model_token = str(payload.get("model_token") or payload.get("model") or training_args.get("model") or "").strip()
-    if not model_token:
-        raise ValueError("Checkpoint is missing model_token.")
-    spec = canonicalize_model_token(model_token)
+    model_config = _payload_model_config(payload)
+    explicit_neuron_type = model_config.get("neuron_type") or training_args.get("neuron_type")
+    if explicit_neuron_type not in (None, ""):
+        return model_spec_from_config_fields(
+            neuron_type=explicit_neuron_type,
+            recurrent=model_config.get("recurrent", training_args.get("recurrent", False)),
+            reset=model_config.get("reset", training_args.get("reset")),
+            v_th=model_config.get("v_th", training_args.get("v_th")),
+            filter=model_config.get("filter", training_args.get("filter", "train")),
+            branch=model_config.get("branch", training_args.get("branch")),
+            rf_pole_radius_constrained=model_config.get("rf_pole_radius_constrained", training_args.get("rf_pole_radius_constrained")),
+            rf_pole_radius_max=model_config.get("rf_pole_radius_max", training_args.get("rf_pole_radius_max")),
+        )
+    descriptor = str(payload.get("model_token") or payload.get("model") or training_args.get("model") or "").strip()
+    if not descriptor:
+        raise ValueError("Checkpoint is missing explicit structured model_config.neuron_type metadata.")
+    raise ValueError(
+        "Checkpoint is missing explicit structured model_config fields. "
+        f"Descriptor-only metadata cannot rebuild a model: {descriptor!r}. Re-run model_training with "
+        "neuron_type/branch/reset/v_th stored in model_config."
+    )
+
+
+def _build_model_from_checkpoint(payload: Mapping[str, Any], *, device: torch.device):
+    spec = _model_spec_from_checkpoint_metadata(payload)
     model_config = _payload_model_config(payload)
 
     mode = _payload_readout_mode(payload)
@@ -323,7 +346,10 @@ def _build_model_from_checkpoint(payload: Mapping[str, Any], *, device: torch.de
     else:
         hidden_spec = str(model_config.get("hidden_spec") or model_config.get("arch_spec") or "")
 
-    v_th = float(model_config.get("v_th", 1.0))
+    try:
+        _v_trainable, v_th = parse_v_threshold_setting(model_config.get("v_th", 1.0))
+    except Exception:
+        v_th = float(model_config.get("v_th", 1.0))
     readout = build_readout(mode, num_classes=num_classes, sequence_length=sequence_length, device=device)
     model = build_snn_classifier(
         model_token=spec,
@@ -346,11 +372,10 @@ def _build_model_from_checkpoint(payload: Mapping[str, Any], *, device: torch.de
 
 def _run_identity(payload: Mapping[str, Any]) -> tuple[str, str, str, int]:
     dataset = _payload_dataset(payload)
-    training_args = payload.get("training_args") if isinstance(payload.get("training_args"), Mapping) else {}
-    model_token = str(payload.get("model_token") or payload.get("model") or training_args.get("model") or "").strip()
+    spec = _model_spec_from_checkpoint_metadata(payload)
     readout_mode = _payload_readout_mode(payload)
     seed = _payload_seed(payload)
-    return dataset, model_token, readout_mode, seed
+    return dataset, spec.canonical_token, readout_mode, seed
 
 
 def _validate_same_run(payloads: Sequence[Mapping[str, Any]], checkpoint_files: Sequence[Path]) -> tuple[str, str, str, int]:
@@ -556,7 +581,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     _seed_everything(seed)
     device = _resolve_device(int(args.gpu_index))
 
+    first_model_spec = _model_spec_from_checkpoint_metadata(payloads[0])
     bundle = resolve_dataset_bundle(dataset_token, prep_root=prep_root)
+    bundle = select_training_view_for_model(bundle, model_family=first_model_spec.family)
+    validate_image_mlp_flatten_contract(bundle, model_family=first_model_spec.family, stage=SOURCE_PROGRAM)
     manifest = _read_manifest(bundle.manifest_path)
     axis_base = _axis_metadata_columns(manifest, psd_axis_kind=bundle.psd_axis_kind)
 

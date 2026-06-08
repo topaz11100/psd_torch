@@ -7,7 +7,8 @@
 - 공개 compile on/off key는 `compile: true|false`이다. CPU thread 수는 `compile_cpu_threads`로 지정할 수 있다.
 - CUDA compile kwargs는 `backend=inductor`, `fullgraph=true`, `dynamic=false`를 사용한다.
 - CPU는 codegen 지연을 피하기 위해 `backend=eager`를 사용한다.
-- DDP에서 compile CPU thread 기본값은 rank당 2이다. `compile_cpu_threads` 인자 또는 `PSD_TORCH_COMPILE_CPU_THREADS` 환경변수로 override할 수 있다. 명시값은 자동 8-thread cap에 의해 잘리지 않는다.
+- DDP에서 compile CPU thread 기본값은 rank당 2이다. `compile_cpu_threads` 인자 또는 `PSD_TORCH_COMPILE_CPU_THREADS` 환경변수로 override할 수 있다. 명시값은 자동 8-thread cap에 의해 잘리지 않는다. `src.util.precision`과 constraint helper는 torch를 lazy import하므로 torchrun의 기본 `OMP_NUM_THREADS=1`이 명시 `compile_cpu_threads`를 선점하지 않는다.
+- DDP compile cache 기본값은 `compile_cache_mode=shared`이다. 모든 rank가 같은 `TORCHINDUCTOR_CACHE_DIR` leaf를 사용하며, `ddp_compile_warmup=true`이면 rank0가 첫 batch eval path로 cache를 먼저 priming한 뒤 barrier로 나머지 rank를 진행시킨다. 완전한 런타임 메모리 단일화는 아니지만 rank-local 중복 codegen/cache 생성을 피한다. 필요하면 `compile_cache_mode=per_rank`로 격리한다.
 - DDP/NCCL collective timeout은 `ddp_timeout_minutes`로 설정하며 기본값은 120분이다. 긴 첫 compile 또는 eval compile 동안 rank 간 대기 시간이 길어져도 watchdog timeout으로 중단되지 않게 한다.
 - 프로젝트 모델에 `enable_compiled_forward()` hook이 있으면 top-level model compile fallback을 사용하지 않는다.
 - compile hook이 sequence region을 설치하지 못하면 eager sequence path로 fallback한다.
@@ -47,3 +48,7 @@ D-RF는 origin `BiRFModel.forward` 계약을 보존한다. 별도의 project-own
 DDP evaluation은 rank0-only로 수행하지 않는다. 모든 rank가 test split의 strided subset을 평가한다. subset은 padding 없이 `rank, rank + world_size, ...` index를 사용하므로 중복 sample을 만들지 않는다. 각 rank의 local `EpochMetrics`는 `(loss * total, correct, total)` 형태로 `all_reduce(SUM)`한 뒤 global loss/accuracy로 복원한다.
 
 Evaluation DataLoader의 nominal `batch_size`는 training per-rank batch와 동일하게 둔다. 마지막 partial batch는 정확한 metric 계산을 위해 drop하지 않는다. rank별 evaluation forward는 DDP wrapper를 벗긴 local module로 실행하여 rank별 subset 길이 차이 때문에 per-forward buffer sync collective가 발생하지 않도록 한다. checkpoint metadata에는 `eval_batch_size`, `eval_dataset_policy`, `ddp_eval_policy`, `ddp_timeout_minutes`를 기록한다.
+
+## DDP unused-parameter policy for membrane readouts
+
+Membrane-only readouts such as `temporal_membrane` and `final_membrane` set `emit_spike=false` on the output layer.  In that output layer, spike-only parameters such as trainable thresholds and the `my_d_rf` adaptive-threshold kernel do not participate in the loss.  The builder therefore disables their effective trainability for the output layer while keeping the same hidden-layer threshold/reset policy.  This avoids `DistributedDataParallel` bucket-reduction failures without changing the membrane logits used by the readout.
