@@ -1,0 +1,15 @@
+fft2d_analysis:
+  data:
+    checkpoint: /home/yongokhan/workspace/result/rf_scinario/training/dvs_gesture_flatten/rf_R_none_fixed/checkpoints
+    dataset: dvs128-gesture
+    prep_root: /home/yongokhan/workspace/data/prep_data
+  output:
+    output_root: /home/yongokhan/workspace/result/rf_scinario/analysis/dvs_gesture_flatten/rf_R_none_fixed/fft2d_analysis
+    run_timestamp: ''
+    timestamped_output: false
+  runtime:
+    anal_batch: 128
+    gpu_index: 0
+    seed: 0
+    num_workers: 16
+    low_vram: 0

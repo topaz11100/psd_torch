@@ -86,7 +86,8 @@ PSD_CATEGORIES = {
     "dataset_element_psd",
     "dataset_element_fft",
 }
-RENDERED_CATEGORIES = PSD_CATEGORIES | {"filter_snapshot", "filter_trend", "layer_distance_profile", "layer_distance_trend", "layer_dispersion_profile", "layer_dispersion_trend"}
+FFT2D_CATEGORIES = {"analysis_2d_fft"}
+RENDERED_CATEGORIES = PSD_CATEGORIES | FFT2D_CATEGORIES | {"filter_snapshot", "filter_trend", "layer_distance_profile", "layer_distance_trend", "layer_dispersion_profile", "layer_dispersion_trend"}
 SKIPPED_CATEGORIES = {
     "pair_distance",
     "accuracy_loss_join",
@@ -1002,6 +1003,61 @@ def _render_layer_dispersion_artifact(
         return ManifestRow(str(artifact.path), str(output_path), artifact.category, "failed", str(exc))
 
 
+
+def _render_fft2d_artifact(
+    artifact: CsvArtifact,
+    *,
+    input_root: Path,
+    output_root: Path,
+    file_format: str,
+    overwrite: bool,
+) -> ManifestRow:
+    output_path = _relative_output_path(artifact.path, input_root, output_root, file_format)
+    start = time.perf_counter()
+    if output_path.exists() and not overwrite:
+        return ManifestRow(str(artifact.path), str(output_path), artifact.category, "skipped_existing", "output exists")
+    try:
+        rows = [row for row in artifact.rows if str(row.get("status", "ok")).strip().lower() in {"", "ok"}]
+        if not rows:
+            raise ValueError("no successful analysis_2d_fft rows")
+        value_columns = sorted([key for key in rows[0].keys() if key.startswith("time_freq_")])
+        if not value_columns:
+            raise ValueError("no time_freq_* value columns")
+        ordered_rows = sorted(rows, key=lambda row: (_float_or_none(row.get("row_frequency_index")) or 0.0, _float_or_none(row.get("row_frequency")) or 0.0))
+        matrix: list[list[float]] = []
+        for row in ordered_rows:
+            values = []
+            for column in value_columns:
+                value = _float_or_none(row.get(column, ""))
+                values.append(float("nan") if value is None else float(value))
+            matrix.append(values)
+        row_freqs = [_float_or_none(row.get("row_frequency", "")) for row in ordered_rows]
+        finite_row_freqs = [float(v) for v in row_freqs if v is not None]
+        x_min, x_max = -0.5, 0.5
+        y_min = min(finite_row_freqs) if finite_row_freqs else -0.5
+        y_max = max(finite_row_freqs) if finite_row_freqs else 0.5
+        if y_min == y_max:
+            y_min -= 0.5
+            y_max += 0.5
+        plt, fig, ax = _new_figure()
+        image = ax.imshow(matrix, aspect="auto", origin="lower", extent=[x_min, x_max, y_min, y_max])
+        cbar = fig.colorbar(image, ax=ax)
+        unit = _first_nonempty(rows, "value_unit", "Value")
+        cbar.set_label(_human_token(unit, "Value"), fontsize=max(10, LABEL_SIZE - 4), fontweight="bold")
+        cbar.ax.tick_params(labelsize=max(8, TICK_SIZE - 4))
+        layer = _layer_display(rows)
+        variant = _human_token(_first_nonempty(rows, "variant", "variant"))
+        scale = _human_token(_first_nonempty(rows, "scale", "scale"))
+        ax.set_title(f"2-D FFT of {layer} ({variant}, {scale})", fontsize=TITLE_SIZE, fontweight="bold", pad=10)
+        ax.set_xlabel("Time frequency (cycles/sample)", fontsize=LABEL_SIZE, fontweight="bold", labelpad=8)
+        ax.set_ylabel("Row frequency (cycles/row index)", fontsize=LABEL_SIZE, fontweight="bold", labelpad=8)
+        ax.tick_params(axis="both", labelsize=TICK_SIZE)
+        _save_figure(fig, output_path)
+        plt.close(fig)
+        return ManifestRow(str(artifact.path), str(output_path), artifact.category, "rendered", "2-D FFT heatmap", f"{time.perf_counter() - start:.6f}")
+    except Exception as exc:
+        return ManifestRow(str(artifact.path), str(output_path), artifact.category, "failed", str(exc))
+
 def _write_manifest(path: Path, rows: Sequence[ManifestRow]) -> None:
     payload_rows = [
         {
@@ -1064,6 +1120,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     artifacts, manifest_rows = _load_artifacts(csv_files)
 
     psd_artifacts = [artifact for artifact in artifacts if artifact.category in PSD_CATEGORIES]
+    fft2d_artifacts = [artifact for artifact in artifacts if artifact.category in FFT2D_CATEGORIES]
     filter_artifacts = [artifact for artifact in artifacts if artifact.category == "filter_snapshot"]
     layer_distance_artifacts = [artifact for artifact in artifacts if artifact.category in {"layer_distance_profile", "layer_distance_trend"}]
     layer_dispersion_artifacts = [artifact for artifact in artifacts if artifact.category in {"layer_dispersion_profile", "layer_dispersion_trend"}]
@@ -1078,6 +1135,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file_format=args.format,
                 overwrite=bool(args.overwrite),
                 ylimit_map=ylimit_map,
+            )
+        )
+
+    for artifact in fft2d_artifacts:
+        manifest_rows.append(
+            _render_fft2d_artifact(
+                artifact,
+                input_root=input_path,
+                output_root=output_root,
+                file_format=args.format,
+                overwrite=bool(args.overwrite),
             )
         )
 

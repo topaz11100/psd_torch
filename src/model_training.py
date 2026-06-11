@@ -48,8 +48,6 @@ from src.util.config import load_manifest, load_structured, resolve_manifest_pat
 from src.util.config_cli import parse_args_with_config
 from src.util.csv_schema import common_row, write_common_csv
 from src.util.cli_common import parse_bool_token
-from src.util.checkpoints import checkpoint_state_dict, load_state_dict_compatible, load_torch_checkpoint, normalize_state_dict_keys, unwrap_model as _unwrap_checkpoint_model
-from src.util.precision import configure_tf32, normalize_amp_mode
 from src.util.paths import make_timestamp, parse_timestamped_output, timestamped_output_path
 
 CHECKPOINT_SCHEMA_VERSION = 'psd_checkpoint_v1'
@@ -68,6 +66,10 @@ class DDPContext:
 def _load_runtime_dependencies() -> None:
     global torch, tqdm, _seed_everything, make_loader, resolve_dataset_bundle, select_training_view_for_model, validate_image_mlp_flatten_contract
     global ModelSpec, model_spec_from_namespace, build_optimizer, evaluate_one_epoch, train_one_epoch, eval_one_batch, train_one_batch, build_snn_classifier, build_readout, canonicalize_readout_mode, DistributedSampler, DDP
+    # 💡 글로벌 변수 추가 선언
+    global checkpoint_state_dict, load_state_dict_compatible, load_torch_checkpoint, normalize_state_dict_keys, _unwrap_checkpoint_model
+    global configure_tf32, normalize_amp_mode
+
     import torch as _torch
     from tqdm import tqdm as _tqdm
     from torch.nn.parallel import DistributedDataParallel as _DDP
@@ -78,10 +80,24 @@ def _load_runtime_dependencies() -> None:
     from src.model.snn_builder import build_snn_classifier as _build_snn_classifier
     from src.readout.readout import build_readout as _build_readout, canonicalize_readout_mode as _canonicalize_readout_mode
     from src.util.random import seed_everything as _runtime_seed_everything
+
+    # 💡 최상단에서 옮겨온 의존성 추가
+    from src.util.checkpoints import checkpoint_state_dict as _csd, load_state_dict_compatible as _lsdc, load_torch_checkpoint as _ltc, normalize_state_dict_keys as _nsdk, unwrap_model as _ucm
+    from src.util.precision import configure_tf32 as _ctf32, normalize_amp_mode as _nam
+    
     torch=_torch; tqdm=_tqdm; DDP=_DDP; DistributedSampler=_DistributedSampler
     make_loader=_make_loader; resolve_dataset_bundle=_resolve_dataset_bundle; select_training_view_for_model=_select_training_view_for_model; validate_image_mlp_flatten_contract=_validate_image_mlp_flatten_contract
     ModelSpec=_ModelSpec; model_spec_from_namespace=_model_spec_from_namespace; build_optimizer=_build_optimizer; evaluate_one_epoch=_evaluate_one_epoch; train_one_epoch=_train_one_epoch; eval_one_batch=_eval_one_batch; train_one_batch=_train_one_batch
     build_snn_classifier=_build_snn_classifier; build_readout=_build_readout; canonicalize_readout_mode=_canonicalize_readout_mode; _seed_everything=_runtime_seed_everything
+    
+    # 💡 글로벌 변수 매핑 추가
+    checkpoint_state_dict = _csd
+    load_state_dict_compatible = _lsdc
+    load_torch_checkpoint = _ltc
+    normalize_state_dict_keys = _nsdk
+    _unwrap_checkpoint_model = _ucm
+    configure_tf32 = _ctf32
+    normalize_amp_mode = _nam
 
 def _load_config_light(path: Path) -> dict[str, Any]:
     payload = load_structured(path)
@@ -190,15 +206,15 @@ def _maybe_reexec_for_gpu_index_ddp(args: argparse.Namespace, argv: Sequence[str
             env[key] = threads
 
     command = [
-        sys.executable,
-        '-m',
-        'torch.distributed.run',
-        '--standalone',
-        '--nnodes=1',
-        f'--nproc_per_node={len(indices)}',
-        '-m',
-        'src.model_training',
-        *original_argv,
+            sys.executable,
+            '-m',
+            'torch.distributed.run',
+            '--standalone',
+            '--nnodes=1',
+            f'--nproc_per_node={len(indices)}',
+            '-m',
+            'src.model_training',
+            *original_argv,
     ]
     os.execvpe(command[0], command, env)
     raise RuntimeError('os.execvpe returned unexpectedly while launching torchrun.')
@@ -1184,24 +1200,39 @@ def _compile_cpu_thread_count_from_args(args: argparse.Namespace | None, ctx: DD
     return max(1, min(_default_cpu_thread_count(), int(_FIXED_COMPILE_THREAD_CAP))), 'single_process_auto_cap_8_or_env'
 
 def _configure_compile_cpu_threads(args: argparse.Namespace | None = None, ctx: DDPContext | None = None) -> dict[str, Any]:
-    num_threads, source = _compile_cpu_thread_count_from_args(args, ctx)
+    # 1. source 변수를 먼저 정의합니다.
+    source = 'argument' if (args and getattr(args, 'compile_cpu_threads', None) is not None) else 'default'
+    
+    # 2. num_threads 설정
+    num_threads = getattr(args, 'compile_cpu_threads', None)
+    if num_threads is None:
+        num_threads = 8  # 기본값 설정
+    
     num_threads = max(1, int(num_threads))
-    interop_threads = max(1, min(num_threads, max(1, num_threads // 2)))
+    
+    # 3. interop_threads를 num_threads와 동일하게 설정 (절반 감소 로직 제거)
+    interop_threads = num_threads
+    
     thread_env_keys = _THREAD_ENV_KEYS
     previous_env = {key: os.environ.get(key) for key in thread_env_keys}
     for key in thread_env_keys:
         os.environ[key] = str(num_threads)
+        
     torch_mod = _torch_module()
     set_num_threads_error = None
     set_num_interop_threads_error = None
+    
     try:
         torch_mod.set_num_threads(num_threads)
     except Exception as exc:
         set_num_threads_error = f'{type(exc).__name__}: {exc}'
+        
     try:
         torch_mod.set_num_interop_threads(interop_threads)
     except Exception as exc:
         set_num_interop_threads_error = f'{type(exc).__name__}: {exc}'
+    
+    # 4. status 딕셔너리를 구성하기 전에 status를 먼저 생성해야 합니다.
     status = {
         'num_threads': num_threads,
         'num_interop_threads': interop_threads,
@@ -1211,10 +1242,20 @@ def _configure_compile_cpu_threads(args: argparse.Namespace | None = None, ctx: 
         'env_keys': {key: os.environ.get(key) for key in thread_env_keys},
         'previous_env': previous_env,
     }
+
+    # 5. Inductor 컴파일 스레드 강제 적용
+    try:
+        import torch._inductor.config as inductor_config
+        inductor_config.compile_threads = num_threads
+        status['inductor_compile_threads'] = num_threads
+    except Exception:
+        pass
+
     if set_num_threads_error is not None:
         status['set_num_threads_error'] = set_num_threads_error
     if set_num_interop_threads_error is not None:
         status['set_num_interop_threads_error'] = set_num_interop_threads_error
+        
     return status
 
 
@@ -1480,19 +1521,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     _maybe_reexec_for_gpu_index_ddp(args, argv)
     _normalize_psd_lambda_args(args)
     ctx=None
+
     ddp=_ddp_requested(args); args.batch_size_is_global=_parse_bool_config_value(args.batch_size_is_global, default=True)
-    amp_mode = normalize_amp_mode(getattr(args, 'amp', 'off'))
-    amp_public_mode = 'on' if amp_mode == 'bf16_safe' else 'off'
-    args.amp = amp_public_mode
     args.signal_window = _signal_window_from_args(args)
     _install_signal_curve_internal_aliases(args)
     _configure_token_regularizer_env_from_args(args)
-    amp_bf16_safe_requested = (amp_mode == 'bf16_safe')
     compile_requested=_compile_requested_from_args(args)
+    
+    # 1. 여기서 OMP_NUM_THREADS 스레드 환경 변수를 덮어씁니다. (torch 로드 전)
     preload_compile_threads_policy = _install_compile_cpu_thread_env_from_args(
         args, ddp_enabled=bool(ddp), compile_enabled=bool(compile_requested)
     )
+    
+    # 2. 여기서 torch 및 normalize_amp_mode 등 무거운 모듈들이 글로벌로 로드됩니다.
     _load_runtime_dependencies()
+    
+    # 3. 💡 로드가 완료된 후 함수를 호출하도록 위치를 아래로 이동시켰습니다.
+    amp_mode = normalize_amp_mode(getattr(args, 'amp', 'off'))
+    amp_public_mode = 'on' if amp_mode == 'bf16_safe' else 'off'
+    args.amp = amp_public_mode
+    amp_bf16_safe_requested = (amp_mode == 'bf16_safe')
+
     try:
         tf32_policy=configure_tf32(enabled=True)
         if int(args.batch_size)<1: parser.error('--batch_size must be >= 1.')

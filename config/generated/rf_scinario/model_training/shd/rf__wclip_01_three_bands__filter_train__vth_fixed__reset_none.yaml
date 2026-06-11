@@ -122,8 +122,7 @@ model_training:
     band_edge: ''
     tear: 1
   distributed:
-    gpu_index:
-    - 0
+    gpu_index: [0, 1]
     batch_size_is_global: true
     ddp_timeout_minutes: 120
   output:
@@ -135,5 +134,5 @@ model_training:
     compile: true
     compile_cpu_threads: 8
     compile_cache_mode: shared
-    ddp_compile_warmup: false
+    ddp_compile_warmup: true
     amp: 'off'

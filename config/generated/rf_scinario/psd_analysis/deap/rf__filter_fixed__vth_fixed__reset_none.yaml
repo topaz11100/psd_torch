@@ -1,0 +1,34 @@
+psd_analysis:
+  data:
+    checkpoint: /home/yongokhan/workspace/result/rf_scinario/training/deap/rf__filter_fixed__vth_fixed__reset_none/checkpoints
+    dataset: deap
+    prep_root: /home/yongokhan/workspace/data/prep_data
+  output:
+    output_root: /home/yongokhan/workspace/result/rf_scinario/analysis/deap/rf__filter_fixed__vth_fixed__reset_none/psd_analysis
+    run_timestamp: ''
+    timestamped_output: false
+  runtime:
+    anal_batch: 128
+    gpu_index: 0
+    seed: 0
+    num_workers: 16
+    low_vram: 0
+  signal:
+    analysis_distance_metric:
+    - centered_l2
+    - diff_l2
+    signal_window: none
+    enable_pairwise_dependency_appendix: false
+    enable_pca_1d: false
+    enable_pca_mimo: true
+    pca_ref_epoch: 1
+    pca_min_train_accuracy: 0.3
+    pca_dim_per_layer:
+    - 2
+    psd_curve_tokens: []
+    signal_curve_space: exact
+    signal_curve_scale: raw
+    signal_curve_userbin_edges: []
+    signal_curve_userbin_reducer:
+    - mean
+  filter_histograms: {}

@@ -12,7 +12,7 @@ psd_analysis:
     gpu_index:
     - 0
     seed: 0
-    num_workers: 8
+    num_workers: 16
     low_vram: 0
   signal:
     analysis_distance_metric:
@@ -21,10 +21,11 @@ psd_analysis:
     signal_window: none
     enable_pairwise_dependency_appendix: false
     enable_pca_1d: false
-    enable_pca_mimo: false
-    pca_ref_epoch: ''
-    pca_min_train_accuracy: 0.0
-    pca_dim_per_layer: []
+    enable_pca_mimo: true
+    pca_ref_epoch: 1
+    pca_min_train_accuracy: 0.3
+    pca_dim_per_layer:
+    - 2
     psd_curve_tokens: []
     signal_curve_space: exact
     signal_curve_scale: raw
